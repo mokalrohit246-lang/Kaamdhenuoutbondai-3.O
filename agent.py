@@ -1,337 +1,257 @@
-import os
-import certifi
-
-# Fix for macOS SSL Certificate errors - MUST be before other imports
-os.environ['SSL_CERT_FILE'] = certifi.where()
-
-import logging
-import json
 import asyncio
+import json
+import logging
+import os
+import ssl
+import time
+import certifi
 from dotenv import load_dotenv
 
+_orig_ssl = ssl.create_default_context
+def _certifi_ssl(purpose=ssl.Purpose.SERVER_AUTH, **kwargs):
+    if not kwargs.get("cafile") and not kwargs.get("capath") and not kwargs.get("cadata"):
+        kwargs["cafile"] = certifi.where()
+    return _orig_ssl(purpose, **kwargs)
+ssl.create_default_context = _certifi_ssl
+
 from livekit import agents, api, rtc
-from livekit.agents import AgentSession, Agent, RoomInputOptions
-from livekit.plugins import (
-    openai,
-    cartesia,
-    deepgram,
-    noise_cancellation,
-    silero,
-    sarvam,
-)
+from livekit.agents import Agent, AgentSession, RoomInputOptions
+from livekit.plugins import noise_cancellation, silero
+
+_google_realtime = None
+_google_llm = None
+_google_tts = None
+_deepgram_stt = None
 
 try:
-    from livekit.plugins import google
+    from livekit.plugins import google as _gp
+    _google_realtime = getattr(getattr(_gp, "realtime", None), "RealtimeModel", None) or getattr(getattr(getattr(_gp, "beta", None), "realtime", None), "RealtimeModel", None)
+    _google_llm = getattr(_gp, "LLM", None)
+    _google_tts = getattr(_gp, "TTS", None)
 except ImportError:
-    google = None
+    pass
 
-from livekit.agents import llm
-from typing import Annotated, Optional
+try:
+    from livekit.plugins import deepgram as _dg
+    _deepgram_stt = getattr(_dg, "STT", None)
+except ImportError:
+    pass
 
-# Load environment variables
-load_dotenv(".env")
+from db import push_unified_log, get_client_number_config
+from prompts import build_prompt
+from tools import RealEstateTools
 
-# Configure logging
+load_dotenv(".env", override=True)
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("outbound-agent")
+logger = logging.getLogger("kaamdhenu-agent")
 
-import config
+def _build_session(tools: list, system_prompt: str) -> AgentSession:
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    gemini_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
+    voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
+    use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-# TRUNK ID - Now loaded from config.py
-# You can find this by running 'python setup_trunk.py --list' or checking LiveKit Dashboard 
-
-
-def _build_tts(config_provider: str = None, config_voice: str = None):
-    """Configure the Text-to-Speech provider based on env vars or dynamic config."""
-    # Priority: Config > Env Var > Default
-    provider = (config_provider or os.getenv("TTS_PROVIDER", config.DEFAULT_TTS_PROVIDER)).lower()
-    
-    # If using Sarvam Voice names (Anushka/Aravind), force Sarvam provider
-    if config_voice in ["anushka", "aravind", "amartya", "dhruv"]:
-        provider = "sarvam"
-
-    if provider == "cartesia":
-        logger.info("Using Cartesia TTS")
-        model = os.getenv("CARTESIA_TTS_MODEL", config.CARTESIA_MODEL)
-        voice = os.getenv("CARTESIA_TTS_VOICE", config.CARTESIA_VOICE)
-        return cartesia.TTS(model=model, voice=voice)
-    
-    if provider == "sarvam":
-        logger.info(f"Using Sarvam TTS (Voice: {config_voice})")
-        model = os.getenv("SARVAM_TTS_MODEL", config.SARVAM_MODEL)
-        # Use dynamic voice or env var or default
-        voice = config_voice or os.getenv("SARVAM_VOICE", "anushka")
-        language = os.getenv("SARVAM_LANGUAGE", config.SARVAM_LANGUAGE)
-        return sarvam.TTS(model=model, speaker=voice, target_language_code=language)
-
-    if provider == "deepgram":
-        logger.info("Using Deepgram TTS")
-        model = os.getenv("DEEPGRAM_TTS_MODEL", "aura-asteria-en")
-        return deepgram.TTS(model=model)
-
-    # Default to OpenAI
-    logger.info(f"Using OpenAI TTS (Voice: {config_voice})")
-    model = os.getenv("OPENAI_TTS_MODEL", "tts-1")
-    voice = config_voice or os.getenv("OPENAI_TTS_VOICE", config.DEFAULT_TTS_VOICE)
-    return openai.TTS(model=model, voice=voice)
-
-
-def _build_llm(config_provider: str = None):
-    """Configure the LLM provider based on config or env vars. Default fallback model is gemini-2.0-flash-exp."""
-    provider = (config_provider or os.getenv("LLM_PROVIDER", config.DEFAULT_LLM_PROVIDER)).lower()
-
-    if provider == "groq":
-        logger.info("Using Groq LLM")
-        return openai.LLM(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=os.getenv("GROQ_API_KEY"),
-            model=os.getenv("GROQ_MODEL", config.GROQ_MODEL),
-            temperature=float(os.getenv("GROQ_TEMPERATURE", str(config.GROQ_TEMPERATURE))),
-        )
-
-    if provider in ["google", "gemini"]:
-        logger.info("Using Google Gemini LLM (gemini-2.0-flash-exp)")
-        model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
-        if google is not None:
-            return google.LLM(model=model)
-        return openai.LLM(model=model)
-
-    # Default Fallback: gemini-2.0-flash-exp
-    default_model = os.getenv("DEFAULT_LLM_MODEL", "gemini-2.0-flash-exp")
-    logger.info(f"Using default LLM (model: {default_model})")
-    if google is not None and "gemini" in default_model:
-        return google.LLM(model=default_model)
-    return openai.LLM(model=default_model)
-
-
-class TransferFunctions(llm.ToolContext):
-    def __init__(self, ctx: agents.JobContext, phone_number: str = None):
-        super().__init__(tools=[])
-        self.ctx = ctx
-        self.phone_number = phone_number
-
-    @llm.function_tool(description="Look up user details by phone number.")
-    def lookup_user(self, phone: str):
-        """
-        Mock function to look up user details.
-
-        Args:
-            phone: The phone number to look up
-        """
-        logger.info(f"Looking up user: {phone}")
-        return f"User found: Shreyas Raj. Status: Premium. Last order: Coffee setup (Delivered)."
-
-    @llm.function_tool(description="Transfer the call to a human support agent or another phone number.")
-    async def transfer_call(self, destination: Optional[str] = None):
-        """
-        Transfer the call.
-        """
-        if destination is None:
-            destination = config.DEFAULT_TRANSFER_NUMBER
-            if not destination:
-                 return "Error: No default transfer number configured."
-        if "@" not in destination:
-            # If no domain is provided, append the SIP domain
-            if config.SIP_DOMAIN:
-                # Ensure clean number (strip tel: or sip: prefix if present but no domain)
-                clean_dest = destination.replace("tel:", "").replace("sip:", "")
-                destination = f"sip:{clean_dest}@{config.SIP_DOMAIN}"
-            else:
-                # Fallback to tel URI if no domain configured
-                if not destination.startswith("tel:") and not destination.startswith("sip:"):
-                     destination = f"tel:{destination}"
-        elif not destination.startswith("sip:"):
-             destination = f"sip:{destination}"
-        
-        logger.info(f"Transferring call to {destination}")
-        
-        # Determine the participant identity
-        # For outbound calls initiated by this agent, the participant identity is typically "sip_<phone_number>"
-        # For inbound, we might need to find the remote participant.
-        participant_identity = None
-        
-        # If we stored the phone number from metadata, we can construct the identity
-        if self.phone_number:
-            participant_identity = f"sip_{self.phone_number}"
-        else:
-            # Try to find a participant that is NOT the agent
-            for p in self.ctx.room.remote_participants.values():
-                participant_identity = p.identity
-                break
-        
-        if not participant_identity:
-            logger.error("Could not determine participant identity for transfer")
-            return "Failed to transfer: could not identify the caller."
-
+    # ENGINE 1 (DEFAULT): Pure Gemini Live Realtime
+    if use_realtime and _google_realtime is not None:
         try:
-            logger.info(f"Transferring participant {participant_identity} to {destination}")
-            await self.ctx.api.sip.transfer_sip_participant(
-                api.TransferSIPParticipantRequest(
-                    room_name=self.ctx.room.name,
-                    participant_identity=participant_identity,
-                    transfer_to=destination,
-                    play_dialtone=False
+            from google.genai import types as _gt
+            input_cfg = _gt.RealtimeInputConfig(
+                automatic_activity_detection=_gt.AutomaticActivityDetection(
+                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
+                    silence_duration_ms=2000,
+                    prefix_padding_ms=200
                 )
             )
-            return "Transfer initiated successfully."
-        except Exception as e:
-            logger.error(f"Transfer failed: {e}")
-            return f"Error executing transfer: {e}"
+            return AgentSession(
+                llm=_google_realtime(
+                    model=gemini_model,
+                    voice=gemini_voice,
+                    instructions=system_prompt,
+                    realtime_input_config=input_cfg
+                ),
+                tools=tools
+            )
+        except Exception:
+            return AgentSession(
+                llm=_google_realtime(model=gemini_model, voice=gemini_voice, instructions=system_prompt),
+                tools=tools
+            )
 
+    # ENGINE 2 (MODULAR PIPELINE FALLBACK): Deepgram STT + Gemini LLM + TTS
+    stt = _deepgram_stt(model=os.getenv("STT_MODEL", "nova-3"), language="multi") if _deepgram_stt and os.getenv("DEEPGRAM_API_KEY") else None
+    tts = _google_tts(voice_name=gemini_voice) if _google_tts else None
+    return AgentSession(
+        stt=stt,
+        llm=_google_llm(model="gemini-2.0-flash") if _google_llm else None,
+        tts=tts,
+        vad=silero.VAD.load(),
+        tools=tools
+    )
 
-class OutboundAssistant(Agent):
-    """
-    An AI agent tailored for outbound calls.
-    Attempts to be helpful and concise.
-    """
-    def __init__(self, tools: list) -> None:
-        super().__init__(
-            instructions=config.SYSTEM_PROMPT,
-            tools=tools,
-        )
-
+class KaamdhenuAssistant(Agent):
+    def __init__(self, instructions: str):
+        super().__init__(instructions=instructions)
 
 async def entrypoint(ctx: agents.JobContext):
-    """
-    Main entrypoint for the agent.
-    
-    For outbound calls:
-    1. Checks for 'phone_number' in the job metadata.
-    2. Connects to the room.
-    3. Initiates the SIP call to the phone number.
-    4. Waits for answer before speaking.
-    """
-    logger.info(f"Connecting to room: {ctx.room.name}")
-    
-    # parse the phone number AND config from the metadata
-    phone_number = None
-    config_dict = {}
-    
-    # Check Job Metadata (Legacy/Dispatch)
-    try:
-        if ctx.job.metadata:
-            data = json.loads(ctx.job.metadata)
-            phone_number = data.get("phone_number")
-            config_dict = data
-    except Exception:
-        pass
-        
-    # Check Room Metadata (Dashboard/Route.ts) - Overrides Job Metadata if present
-    try:
-        if ctx.room.metadata:
-            data = json.loads(ctx.room.metadata)
-            if data.get("phone_number"):
-                phone_number = data.get("phone_number")
-            config_dict.update(data) # Merge configs
-    except Exception:
-        logger.warning("No valid JSON metadata found in Room.")
+    call_id = ctx.room.name
+    await push_unified_log("LiveKit", "info", f"Job connected: {call_id}", call_id=call_id)
 
-    # Initialize function context
-    fnc_ctx = TransferFunctions(ctx, phone_number)
+    direction = "outbound"
+    phone_number = ""
+    lead_name = "there"
+    business_name = "Kaamdhenu Real Estate"
+    service_type = "Luxury 2BHK/3BHK Properties"
+    agent_name = "Priya"
+    campaign_id = None
+    broker_phone = None
+    sheets_webhook = None
+    custom_prompt = None
 
-    # Initialize the Agent Session with plugins
-    session = AgentSession(
-        vad=silero.VAD.load(),
-        stt=deepgram.STT(model=config.STT_MODEL, language=config.STT_LANGUAGE), 
-        llm=_build_llm(config_dict.get("model_provider")),
-        tts=_build_tts(config_dict.get("model_provider"), config_dict.get("voice_id")),
-    )
-
-    # Start the session with close_on_disconnect=False to prevent recorder/worker drops from closing room
-    await session.start(
-        room=ctx.room,
-        agent=OutboundAssistant(tools=list(fnc_ctx.function_tools.values())),
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVCTelephony(),
-            close_on_disconnect=False, # Prevent automatic room teardown when non-caller leaves
-        ),
-    )
-
-    # FIX DISCONNECT HANDLER:
-    # Ensure participant_disconnected ONLY triggers if the disconnected participant is the actual SIP caller (identity starts with "sip_").
-    # It must NEVER disconnect the room if an egress recorder or internal worker fails/disconnects.
-    @ctx.room.on("participant_disconnected")
-    def on_participant_disconnected(participant: rtc.RemoteParticipant):
-        logger.info(f"Participant disconnected: identity='{participant.identity}'")
-        if participant.identity and participant.identity.startswith("sip_"):
-            logger.info(f"SIP caller '{participant.identity}' disconnected. Shutting down session.")
-            ctx.shutdown()
-        else:
-            logger.info(f"Non-SIP participant '{participant.identity}' disconnected (e.g. egress recorder/worker). Keeping call active.")
-
-    # SAFE EGRESS HANDLING:
-    # Wrap egress start block in safe try/except so if Egress returns 429 (quota exceeded),
-    # it gracefully logs a warning and continues the voice call without interrupting audio.
-    if config_dict.get("record") or os.getenv("ENABLE_EGRESS", "false").lower() == "true":
+    if ctx.job.metadata:
         try:
-            logger.info("Attempting to start room Egress recording...")
-            from livekit.protocol import egress as egress_proto
-            req = egress_proto.RoomCompositeEgressRequest(
-                room_name=ctx.room.name,
-                file_outputs=[egress_proto.EncodedFileOutput(filepath=f"recordings/{ctx.room.name}.mp4")]
-            )
-            await ctx.api.egress.start_room_composite_egress(req)
-            logger.info("Egress recording started successfully.")
-        except Exception as egress_err:
-            logger.warning(f"Egress recording warning (e.g. 429 quota exceeded): {egress_err}. Continuing call without interruption.")
+            m = json.loads(ctx.job.metadata)
+            direction = m.get("direction", "outbound")
+            phone_number = m.get("phone_number", "")
+            lead_name = m.get("lead_name", lead_name)
+            business_name = m.get("business_name", business_name)
+            service_type = m.get("service_type", service_type)
+            agent_name = m.get("agent_name", agent_name)
+            campaign_id = m.get("campaign_id")
+            broker_phone = m.get("broker_phone")
+            sheets_webhook = m.get("sheets_webhook")
+            custom_prompt = m.get("system_prompt")
+        except Exception:
+            pass
 
-    # Logic to dial out:
-    # 1. If 'phone_number' is present, we MIGHT need to dial.
-    # 2. Check if a SIP participant is already in the room (Dashboard dispatch case).
-    
-    should_dial = False
-    if phone_number:
-        # Check if any remote participant looks like our user (sip_PHONE)
-        user_already_here = False
+    # Inbound DID Resolution
+    if direction == "inbound" or not phone_number:
+        direction = "inbound"
         for p in ctx.room.remote_participants.values():
-            if f"sip_{phone_number}" in p.identity or "sip_" in p.identity:
-                user_already_here = True
-                break
-        
-        if not user_already_here:
-            should_dial = True
-            logger.info("User not in room. Agent will initiate dial-out.")
-        else:
-            logger.info("User already in room (Dashboard dispatched).")
+            phone_number = p.identity.replace("sip_", "").strip()
+            break
+        vobiz_num = os.getenv("VOBIZ_OUTBOUND_NUMBER", "")
+        cfg = await get_client_number_config(vobiz_num)
+        if cfg:
+            business_name = cfg.get("business_name", business_name)
+            service_type = cfg.get("service_type", service_type)
+            agent_name = cfg.get("agent_name", agent_name)
+            broker_phone = cfg.get("broker_whatsapp_number", broker_phone)
+            if cfg.get("system_prompt"): custom_prompt = cfg.get("system_prompt")
 
-    if should_dial:
-        logger.info(f"Initiating outbound SIP call to {phone_number}...")
+    system_prompt = build_prompt(
+        lead_name=lead_name,
+        business_name=business_name,
+        service_type=service_type,
+        agent_name=agent_name,
+        custom_prompt=custom_prompt
+    )
+
+    tool_ctx = RealEstateTools(
+        ctx,
+        phone_number=phone_number,
+        lead_name=lead_name,
+        direction=direction,
+        call_id=call_id,
+        campaign_id=campaign_id,
+        broker_phone=broker_phone,
+        sheets_webhook=sheets_webhook
+    )
+    active_tools = tool_ctx.get_all_tools()
+
+    await ctx.connect()
+    await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
+
+    session = _build_session(tools=active_tools, system_prompt=system_prompt)
+
+    session_start_task = asyncio.create_task(session.start(
+        room=ctx.room,
+        agent=KaamdhenuAssistant(instructions=system_prompt),
+        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
+    ))
+
+    # Pre-warmed outbound dial
+    if direction == "outbound" and phone_number:
+        trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
+        if not trunk_id:
+            await push_unified_log("SIP", "error", "OUTBOUND_TRUNK_ID missing", call_id=call_id)
+            ctx.shutdown()
+            return
         try:
-            # Create a SIP participant to dial out
+            await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
             await ctx.api.sip.create_sip_participant(
                 api.CreateSIPParticipantRequest(
                     room_name=ctx.room.name,
-                    sip_trunk_id=config.SIP_TRUNK_ID,
+                    sip_trunk_id=trunk_id,
                     sip_call_to=phone_number,
-                    participant_identity=f"sip_{phone_number}", # Unique ID for the SIP user
-                    wait_until_answered=True, # Wait for pickup before continuing
+                    participant_identity=f"sip_{phone_number}",
+                    wait_until_answered=True
                 )
             )
-            logger.info("Call answered! Generating opening greeting...")
-            
-            await asyncio.sleep(0.5) # Brief stabilization pause for SIP audio path
-
-            # GEMINI MODEL & GREETING:
-            # Explicitly trigger await session.generate_reply(instructions=...) so the agent speaks full opening greeting cleanly without cut off
-            await session.generate_reply(
-                instructions=config.INITIAL_GREETING
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to place outbound call: {e}")
+            await push_unified_log("SIP", "info", f"Call answered by {phone_number}", call_id=call_id)
+        except Exception as dial_err:
+            await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
             ctx.shutdown()
-    else:
-        logger.info("Detecting if we should greet...")
-        await asyncio.sleep(0.5)
-        # Explicitly trigger generate_reply for inbound/pre-dispatched calls
-        await session.generate_reply(instructions=config.fallback_greeting)
+            return
 
+    await session_start_task
+
+    # Safe S3 Recording Start
+    aws_key = os.getenv("S3_ACCESS_KEY_ID")
+    aws_secret = os.getenv("S3_SECRET_ACCESS_KEY")
+    aws_bucket = os.getenv("S3_BUCKET")
+    s3_endpoint = os.getenv("S3_ENDPOINT_URL")
+    s3_region = os.getenv("S3_REGION", "ap-northeast-1")
+
+    if aws_key and aws_secret and aws_bucket:
+        try:
+            recording_path = f"recordings/{ctx.room.name}.ogg"
+            egress_req = api.RoomCompositeEgressRequest(
+                room_name=ctx.room.name,
+                audio_only=True,
+                file_outputs=[api.EncodedFileOutput(
+                    file_type=api.EncodedFileType.OGG,
+                    filepath=recording_path,
+                    s3=api.S3Upload(
+                        access_key=aws_key,
+                        secret=aws_secret,
+                        bucket=aws_bucket,
+                        region=s3_region,
+                        endpoint=s3_endpoint
+                    )
+                )]
+            )
+            egress = await ctx.api.egress.start_room_composite_egress(egress_req)
+            tool_ctx.recording_url = f"{s3_endpoint.rstrip('/')}/{aws_bucket}/{recording_path}" if s3_endpoint else f"s3://{aws_bucket}/{recording_path}"
+            await push_unified_log("LiveKit", "info", f"Recording started: {egress.egress_id}", call_id=call_id)
+        except Exception as rec_err:
+            await push_unified_log("LiveKit", "warning", f"Recording bypassed: {rec_err}", call_id=call_id)
+
+    # Speak greeting immediately
+    greeting_text = (
+        f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I assist you with your property search today?"
+        if direction == "inbound" else
+        f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your property inquiry."
+    )
+    try:
+        await session.generate_reply(instructions=f"Speak opening greeting immediately: {greeting_text}")
+    except Exception:
+        pass
+
+    # Disconnect Lifecycle Guard
+    done_event = asyncio.Event()
+    def _on_part_disconnected(p: rtc.RemoteParticipant):
+        if p.identity.startswith("sip_"):
+            done_event.set()
+    ctx.room.on("participant_disconnected", _on_part_disconnected)
+    ctx.room.on("disconnected", lambda: done_event.set())
+
+    try:
+        await asyncio.wait_for(done_event.wait(), timeout=1800)
+    except asyncio.TimeoutError:
+        pass
+
+    await push_unified_log("LiveKit", "info", f"Call session completed for {phone_number}", call_id=call_id)
+    await session.aclose()
 
 if __name__ == "__main__":
-    # The agent name "outbound-caller" is used by the dispatch script to find this worker
-    agents.cli.run_app(
-        agents.WorkerOptions(
-            entrypoint_fnc=entrypoint,
-            agent_name="outbound-caller", 
-        )
-    )
+    agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint, agent_name="kaamdhenu-voice-agent"))

@@ -110,13 +110,42 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
 
   <div id="view_single_call" class="tab-view">
     <div class="card">
-      <div class="card-header"><span>Dispatch Pre-Warmed Real Estate Call</span></div>
+      <div class="card-header">
+        <span>⚡ Single Outbound Call Dispatcher (Pre-Warmed)</span>
+        <span class="badge badge-booked">Zero-Latency Engine</span>
+      </div>
       <form id="form_single_call" class="form-grid">
-        <div class="form-group"><label>Phone Number (E.164)</label><input type="text" id="sc_phone" placeholder="+919876543210" required /></div>
-        <div class="form-group"><label>Lead Name</label><input type="text" id="sc_name" placeholder="Rahul Sharma" /></div>
-        <div class="form-group"><label>Property Requirement</label><input type="text" id="sc_service" value="Luxury 2BHK/3BHK Apartments" /></div>
-        <div class="form-group"><label>Assigned Broker WhatsApp</label><input type="text" id="sc_broker" placeholder="+919876543210" /></div>
-        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn">🚀 Start Call</button></div>
+        <div class="form-group">
+          <label>Phone Number (E.164 with Country Code) *</label>
+          <input type="text" id="sc_phone" placeholder="+919876543210" required />
+        </div>
+        <div class="form-group">
+          <label>Lead Full Name</label>
+          <input type="text" id="sc_name" placeholder="Rahul Sharma" />
+        </div>
+        <div class="form-group">
+          <label>AI Agent Name (Persona)</label>
+          <input type="text" id="sc_agent_name" value="Priya" placeholder="Priya / Rahul / Neha" />
+        </div>
+        <div class="form-group">
+          <label>Business / Project Name</label>
+          <input type="text" id="sc_biz_name" value="Kaamdhenu Horizon" placeholder="Kaamdhenu Real Estate" />
+        </div>
+        <div class="form-group">
+          <label>Property Requirement / Service</label>
+          <input type="text" id="sc_service" value="Luxury 2BHK / 3BHK Apartments" />
+        </div>
+        <div class="form-group">
+          <label>Assigned On-Site Broker WhatsApp (For Hot Leads)</label>
+          <input type="text" id="sc_broker" placeholder="+918065353767" />
+        </div>
+        <div class="form-group" style="grid-column: 1 / -1;">
+          <label>Custom System Prompt Override (Optional — Leave blank to use default)</label>
+          <textarea id="sc_prompt" rows="3" placeholder="You are Priya calling Rahul to offer a special preview slot for 3BHK luxury flats..."></textarea>
+        </div>
+        <div class="form-group" style="grid-column: 1 / -1;">
+          <button type="submit" class="btn" style="font-size:14px; padding:10px 20px;">🚀 Launch Immediate Call</button>
+        </div>
       </form>
     </div>
   </div>
@@ -126,11 +155,11 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       <div class="card-header"><span>Batch Call Dispatcher</span></div>
       <form id="form_batch" class="form-grid">
         <div class="form-group" style="grid-column: 1 / -1;">
-          <label>Paste Numbers List (One per line or JSON format)</label>
+          <label>Paste Numbers List (Format: Phone, Name per line)</label>
           <textarea id="batch_numbers" rows="6" placeholder="+919876543210, Rahul&#10;+919876543211, Amit"></textarea>
         </div>
         <div class="form-group"><label>Delay Between Calls (Seconds)</label><input type="number" id="batch_delay" value="3" /></div>
-        <div class="form-group"><label>Default Requirement</label><input type="text" id="batch_service" value="2BHK/3BHK Luxury Flats" /></div>
+        <div class="form-group"><label>Default Requirement</label><input type="text" id="batch_service" value="Luxury 2BHK/3BHK Flats" /></div>
         <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn btn-cyan">⚡ Launch Batch</button></div>
       </form>
     </div>
@@ -143,7 +172,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <thead><tr><th>Campaign Name</th><th>Total Contacts</th><th>Status</th><th>Sheets Webhook</th><th>Actions</th></tr></thead>
         <tbody id="tbl_campaigns">
           <tr>
-            <td><b>Kaamdhenu Thane Launch</b></td>
+            <td><b>Kaamdhenu Horizon Launch</b></td>
             <td>150 Leads</td>
             <td><span class="badge badge-booked">Active</span></td>
             <td>Google Sheets Synced</td>
@@ -161,8 +190,8 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <div class="form-group"><label>Vobiz DID Number</label><input type="text" id="cn_phone" placeholder="+918065353767" required /></div>
         <div class="form-group"><label>Business / Project Name</label><input type="text" id="cn_biz" placeholder="Kaamdhenu Horizon" required /></div>
         <div class="form-group"><label>AI Agent Name</label><input type="text" id="cn_agent" value="Priya" /></div>
-        <div class="form-group"><label>Assigned Broker WhatsApp</label><input type="text" id="cn_broker" placeholder="+919876543210" /></div>
-        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn btn-cyan">Save Persona</button></div>
+        <div class="form-group"><label>Assigned Broker WhatsApp</label><input type="text" id="cn_broker" placeholder="+918065353767" /></div>
+        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn btn-cyan">Save Persona Mapping</button></div>
       </form>
       <table>
         <thead><tr><th>Number</th><th>Business</th><th>Agent</th><th>Broker WhatsApp</th><th>Action</th></tr></thead>
@@ -175,10 +204,10 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
     <div class="card">
       <div class="card-header"><span>System Prompt Customizer</span></div>
       <div class="form-group">
-        <label>Live Real Estate Instructions (Supports {lead_name}, {business_name}, {service_type}, {agent_name})</label>
+        <label>System Instructions (Supports {lead_name}, {business_name}, {service_type}, {agent_name})</label>
         <textarea id="prompt_text" rows="12" style="font-family: monospace; font-size: 12px;"></textarea>
       </div>
-      <div style="margin-top:12px;"><button class="btn" onclick="savePrompt()">💾 Save Prompt</button></div>
+      <div style="margin-top:12px;"><button class="btn" onclick="saveCustomPrompt()">💾 Save Prompt</button></div>
     </div>
   </div>
 
@@ -215,14 +244,9 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
   <div id="view_crm" class="tab-view">
     <div class="card">
       <div class="card-header"><span>Caller Insights & CRM Preferences</span></div>
-      <div class="form-group" style="margin-bottom:14px;">
-        <input type="text" id="crm_search" placeholder="Search insights by phone number..." />
-      </div>
       <table>
         <thead><tr><th>Phone</th><th>Recorded Insight / Preference</th><th>Date</th></tr></thead>
-        <tbody id="tbl_crm">
-          <tr><td>+919892057717</td><td>Looking for 3BHK ready-to-move-in. Family of 4. Budget 1.2 Cr.</td><td>Just now</td></tr>
-        </tbody>
+        <tbody id="tbl_crm"></tbody>
       </table>
     </div>
   </div>
@@ -233,7 +257,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <div style="display:flex; align-items:center; gap:8px;">
           <span style="font-size:16px;">🎙️</span>
           <span style="font-size:15px; font-weight:700; color:#F8FAFC;">Voice Engine & Model Architecture (Vapi-Style)</span>
-          <span class="badge badge-booked" style="background:rgba(6,182,212,0.2); color:#06B6D4;">ACTIVE</span>
+          <span class="badge" style="background:rgba(6,182,212,0.2); color:#06B6D4;">ACTIVE</span>
         </div>
       </div>
       <p style="color:#94A3B8; font-size:12px; margin: 10px 0 16px 0;">Configure the AI voice engine architecture, LLM reasoning model, TTS voice synthesis, and STT speech transcriber.</p>
@@ -251,15 +275,13 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
           <select id="cfg_gemini_model">
             <option value="gemini-2.0-flash-exp" selected>gemini-2.0-flash-exp</option>
             <option value="gemini-3.1-flash-live-preview">gemini-3.1-flash-live-preview</option>
-            <option value="gemini-1.5-flash">gemini-1.5-flash</option>
           </select>
         </div>
         <div class="form-group">
           <label>TTS Voice Synthesis (`TTS_VOICE`)</label>
           <select id="cfg_tts_voice">
-            <option value="hi-IN-Neural2-A" selected>hi-IN-Neural2-A - Google Cloud Hindi Female</option>
-            <option value="hi-IN-Standard-A">hi-IN-Standard-A - Hindi Standard Female</option>
-            <option value="Aoede">Aoede - Natural Gemini Live Multilingual</option>
+            <option value="Aoede" selected>Aoede - Natural Gemini Live Multilingual</option>
+            <option value="hi-IN-Neural2-A">hi-IN-Neural2-A - Google Cloud Hindi Female</option>
             <option value="Puck">Puck - Expressive Male</option>
           </select>
         </div>
@@ -281,19 +303,19 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       <div class="card">
         <div class="card-header">
           <span style="font-size:15px; font-weight:700;">LiveKit</span>
-          <span class="badge" id="badge_livekit" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
+          <span class="badge" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
         </div>
         <div class="form-group" style="margin-bottom:12px;">
           <label>URL</label>
-          <input type="text" id="cfg_lk_url" placeholder="wss://your-project.livekit.cloud" />
+          <input type="text" id="cfg_lk_url" />
         </div>
         <div class="form-group" style="margin-bottom:12px;">
           <label>API Key</label>
-          <input type="password" id="cfg_lk_key" placeholder="••••••••• (Active & Saved)" />
+          <input type="password" id="cfg_lk_key" />
         </div>
         <div class="form-group" style="margin-bottom:16px;">
           <label>API Secret</label>
-          <input type="password" id="cfg_lk_sec" placeholder="••••••••• (Active & Saved)" />
+          <input type="password" id="cfg_lk_sec" />
         </div>
         <button class="btn" style="background:#EAB308; color:#000; width:100%; font-weight:700;" onclick="saveModularSettings('livekit')">Save LiveKit</button>
       </div>
@@ -301,11 +323,11 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       <div class="card">
         <div class="card-header">
           <span style="font-size:15px; font-weight:700;">Gemini</span>
-          <span class="badge" id="badge_gemini" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
+          <span class="badge" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
         </div>
         <div class="form-group" style="margin-bottom:12px;">
           <label>API Key</label>
-          <input type="password" id="cfg_gem_key" placeholder="••••••••• (Active & Saved)" />
+          <input type="password" id="cfg_gem_key" />
         </div>
         <div class="form-group" style="margin-bottom:12px;">
           <label>Default Model</label>
@@ -324,23 +346,23 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       <div class="card">
         <div class="card-header">
           <span style="font-size:15px; font-weight:700;">Vobiz SIP (Inbound & Outbound)</span>
-          <span class="badge" id="badge_vobiz" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
+          <span class="badge" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
         </div>
         <div class="form-group" style="margin-bottom:10px;">
           <label>SIP Domain</label>
-          <input type="text" id="cfg_vob_domain" placeholder="1d3f4bb4.sip.vobiz.ai" />
+          <input type="text" id="cfg_vob_domain" />
         </div>
         <div class="form-group" style="margin-bottom:10px;">
           <label>Username</label>
-          <input type="text" id="cfg_vob_user" placeholder="mokalrohit246@gmail.com" />
+          <input type="text" id="cfg_vob_user" />
         </div>
         <div class="form-group" style="margin-bottom:10px;">
           <label>Password / Token</label>
-          <input type="password" id="cfg_vob_pass" placeholder="••••••••• (Active & Saved)" />
+          <input type="password" id="cfg_vob_pass" />
         </div>
         <div class="form-group" style="margin-bottom:10px;">
           <label>Vobiz DID Number</label>
-          <input type="text" id="cfg_vob_did" placeholder="+918065353767" />
+          <input type="text" id="cfg_vob_did" />
         </div>
         <div class="form-group" style="margin-bottom:10px;">
           <label>LiveKit SIP Destination URI</label>
@@ -348,7 +370,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         </div>
         <div class="form-group" style="margin-bottom:16px;">
           <label>Outbound Trunk ID</label>
-          <input type="text" id="cfg_vob_trunk" placeholder="ST_5fBqM5ZaW7pn" />
+          <input type="text" id="cfg_vob_trunk" />
         </div>
         <button class="btn" style="background:#EAB308; color:#000; width:100%; font-weight:700;" onclick="saveModularSettings('vobiz')">Save Vobiz SIP</button>
       </div>
@@ -373,7 +395,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
     <div class="card">
       <div class="card-header"><span>SIP Trunk Verification & Health Status</span></div>
       <div style="line-height: 1.8;">
-        <p>✔ <b>Active Outbound Trunk:</b> <code id="setup_trunk">ST_5fBqM5ZaW7pn</code></p>
+        <p>✔ <b>Active Outbound Trunk:</b> <code>ST_5fBqM5ZaW7pn</code></p>
         <p>✔ <b>SIP Domain:</b> <code>1d3f4bb4.sip.vobiz.ai</code></p>
         <p>✔ <b>LiveKit Cluster:</b> <code>kaamdhenu-ai-hlb4n5lc.livekit.cloud</code></p>
         <p>✔ <b>AI Audio Engine:</b> Gemini Live Realtime (Sub-100ms Latency)</p>
@@ -387,7 +409,7 @@ let chartOutcomesInstance = null;
 let chartTimelineInstance = null;
 
 document.addEventListener('DOMContentLoaded', () => {
-    // 13-Tab Navigation
+    // 13-Tab Navigation (Zero popups)
     const tabs = document.querySelectorAll('.nav-tab');
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
@@ -396,6 +418,7 @@ document.addEventListener('DOMContentLoaded', () => {
             tab.classList.add('active');
             const target = document.getElementById(tab.dataset.tab);
             if (target) target.classList.add('active');
+            if (tab.dataset.tab === 'view_settings') loadSettings();
         });
     });
 
@@ -420,6 +443,7 @@ document.addEventListener('DOMContentLoaded', () => {
         options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: '#94A3B8' } }, y: { ticks: { color: '#94A3B8' } } } }
     });
 
+    // Data Loaders
     const loadStats = async () => {
         try {
             const res = await fetch('/api/stats');
@@ -531,25 +555,61 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) {}
     };
 
+    const loadCRM = async () => {
+        try {
+            const res = await fetch('/api/crm');
+            if (res.ok) {
+                const list = await res.json();
+                document.getElementById('tbl_crm').innerHTML = list.map(m => `
+                    <tr>
+                        <td><b>${m.phone_number}</b></td>
+                        <td>${m.insight}</td>
+                        <td>${m.created_at ? m.created_at.substring(0, 10) : 'Recent'}</td>
+                    </tr>
+                `).join('');
+            }
+        } catch(e) {}
+    };
+
+    // Single Call Submit
     document.getElementById('form_single_call').addEventListener('submit', async (e) => {
         e.preventDefault();
+        const btn = e.target.querySelector('button');
+        btn.disabled = true;
+        btn.textContent = "⏳ Dispatching Pre-Warmed Call...";
+        
         const payload = {
-            phone: document.getElementById('sc_phone').value,
-            lead_name: document.getElementById('sc_name').value || 'there',
-            service_type: document.getElementById('sc_service').value,
-            broker_phone: document.getElementById('sc_broker').value
+            phone: document.getElementById('sc_phone').value.trim(),
+            lead_name: document.getElementById('sc_name').value.trim() || 'there',
+            agent_name: document.getElementById('sc_agent_name').value.trim() || 'Priya',
+            business_name: document.getElementById('sc_biz_name').value.trim() || 'Kaamdhenu Real Estate',
+            service_type: document.getElementById('sc_service').value.trim() || 'Luxury Properties',
+            broker_phone: document.getElementById('sc_broker').value.trim() || null,
+            system_prompt: document.getElementById('sc_prompt').value.trim() || null
         };
-        const res = await fetch('/api/call', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        if (res.ok) {
-            document.querySelector('[data-tab="view_logs"]').click();
-            loadUnifiedLogs();
+
+        try {
+            const res = await fetch('/api/call', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            if (res.ok) {
+                document.querySelector('[data-tab="view_logs"]').click();
+                loadUnifiedLogs();
+            } else {
+                const err = await res.json();
+                alert("Dispatch Failed: " + (err.detail || "Check logs"));
+            }
+        } catch(err) {
+            alert("Error connecting to server: " + err);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = "🚀 Launch Immediate Call";
         }
     });
 
+    // Inbound Persona Submit
     document.getElementById('form_client_num').addEventListener('submit', async (e) => {
         e.preventDefault();
         const payload = {
@@ -571,34 +631,11 @@ document.addEventListener('DOMContentLoaded', () => {
     loadUnifiedLogs();
     loadVisits();
     loadClients();
+    loadCRM();
     loadSettings();
     setInterval(loadStats, 6000);
     setInterval(loadUnifiedLogs, 3000);
 });
-
-async function savePrompt() {
-    const text = document.getElementById('prompt_text').value;
-    await fetch('/api/prompt', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ prompt: text })
-    });
-}
-
-async function clearLogs() {
-    await fetch('/api/logs', { method: 'DELETE' });
-    document.getElementById('tbl_logs').innerHTML = '';
-}
-
-async function cancelVisit(id) {
-    await fetch(`/api/appointments/${id}`, { method: 'DELETE' });
-    location.reload();
-}
-
-async function deleteClient(id) {
-    await fetch(`/api/client-numbers/${id}`, { method: 'DELETE' });
-    location.reload();
-}
 
 async function loadSettings() {
     try {
@@ -614,24 +651,19 @@ async function loadSettings() {
                 document.getElementById('cfg_gem_default_model').value = d.GEMINI_MODEL;
             }
             if (d.GEMINI_TTS_VOICE) document.getElementById('cfg_tts_voice').value = d.GEMINI_TTS_VOICE;
+            if (d.VOICE_ENGINE) document.getElementById('cfg_voice_engine').value = d.VOICE_ENGINE;
+            if (d.STT_MODEL) document.getElementById('cfg_stt_model').value = d.STT_MODEL;
             if (d.VOBIZ_SIP_DOMAIN) document.getElementById('cfg_vob_domain').value = d.VOBIZ_SIP_DOMAIN;
             if (d.VOBIZ_USERNAME) document.getElementById('cfg_vob_user').value = d.VOBIZ_USERNAME;
             if (d.VOBIZ_PASSWORD) document.getElementById('cfg_vob_pass').value = d.VOBIZ_PASSWORD;
             if (d.VOBIZ_OUTBOUND_NUMBER) document.getElementById('cfg_vob_did').value = d.VOBIZ_OUTBOUND_NUMBER;
             if (d.OUTBOUND_TRUNK_ID) document.getElementById('cfg_vob_trunk').value = d.OUTBOUND_TRUNK_ID;
-            if (d.USE_GEMINI_REALTIME) document.getElementById('cfg_realtime_chk').checked = (d.USE_GEMINI_REALTIME === 'true');
-
-            // Format SIP Destination URI
+            
             const cleanDid = (d.VOBIZ_OUTBOUND_NUMBER || '').replace('+', '');
             const lkHost = (d.LIVEKIT_URL || '').replace('wss://', '').replace('.livekit.cloud', '.sip.livekit.cloud');
             document.getElementById('cfg_lk_sip_uri').value = `sip:${cleanDid}@${lkHost}`;
-
-            // Update badges
-            if (d.LIVEKIT_URL) document.getElementById('badge_livekit').textContent = 'CONFIGURED';
-            if (d.GOOGLE_API_KEY) document.getElementById('badge_gemini').textContent = 'CONFIGURED';
-            if (d.VOBIZ_SIP_DOMAIN) document.getElementById('badge_vobiz').textContent = 'CONFIGURED';
         }
-    } catch (e) { console.error("Error loading settings:", e); }
+    } catch (e) {}
 }
 
 async function saveVoiceSettings() {
@@ -639,16 +671,15 @@ async function saveVoiceSettings() {
         VOICE_ENGINE: document.getElementById('cfg_voice_engine').value,
         GEMINI_MODEL: document.getElementById('cfg_gemini_model').value,
         GEMINI_TTS_VOICE: document.getElementById('cfg_tts_voice').value,
-        STT_MODEL: document.getElementById('cfg_stt_model').value
+        STT_MODEL: document.getElementById('cfg_stt_model').value,
+        USE_GEMINI_REALTIME: document.getElementById('cfg_voice_engine').value === 'realtime' ? 'true' : 'false'
     };
-    try {
-        await fetch('/api/settings', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        loadSettings();
-    } catch (e) { console.error("Error saving voice settings:", e); }
+    await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+    alert("Voice Engine Configuration Saved!");
 }
 
 async function saveModularSettings(target) {
@@ -674,14 +705,27 @@ async function saveModularSettings(target) {
             OUTBOUND_TRUNK_ID: document.getElementById('cfg_vob_trunk').value
         };
     }
-    try {
-        await fetch('/api/settings', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        loadSettings();
-    } catch (e) { console.error("Error saving " + target + " settings:", e); }
+    await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    });
+    alert(`${target.toUpperCase()} Settings Saved!`);
+}
+
+async function clearLogs() {
+    await fetch('/api/logs', { method: 'DELETE' });
+    document.getElementById('tbl_logs').innerHTML = '';
+}
+
+async function cancelVisit(id) {
+    await fetch(`/api/appointments/${id}`, { method: 'DELETE' });
+    location.reload();
+}
+
+async function deleteClient(id) {
+    await fetch(`/api/client-numbers/${id}`, { method: 'DELETE' });
+    location.reload();
 }
 </script>
 </body>

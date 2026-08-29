@@ -1,13 +1,160 @@
 import os
-import logging
+import uuid
+import httpx
+from datetime import datetime, timedelta
+from typing import Optional
 
-logger = logging.getLogger("db")
+def _adb():
+    from supabase._async.client import create_client
+    url = os.getenv("SUPABASE_URL", "")
+    key = os.getenv("SUPABASE_SERVICE_KEY", "")
+    return create_client(url, key)
 
-def get_db_connection():
-    """Mock database connection helper with safe fallback."""
-    db_url = os.getenv("DATABASE_URL", "")
-    if not db_url:
-        logger.info("DATABASE_URL not configured. Running in stateless mode.")
-        return None
-    logger.info("Database URL detected.")
-    return None
+async def push_unified_log(source: str, level: str, message: str, detail: str = "", call_id: Optional[str] = None):
+    try:
+        db = await _adb()
+        await db.table("unified_logs").insert({
+            "id": str(uuid.uuid4()), "source": source, "level": level.lower(),
+            "message": message[:500], "detail": detail[:2000], "call_id": call_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }).execute()
+    except Exception:
+        pass
+
+async def get_unified_logs(limit: int = 150, level: Optional[str] = None, source: Optional[str] = None):
+    db = await _adb()
+    q = db.table("unified_logs").select("*").order("timestamp", desc=True).limit(limit)
+    if level and level != "all": q = q.eq("level", level.lower())
+    if source and source != "all": q = q.eq("source", source)
+    res = await q.execute()
+    return res.data or []
+
+async def clear_unified_logs():
+    db = await _adb()
+    await db.table("unified_logs").delete().neq("id", "").execute()
+
+async def get_client_number_config(inbound_number: str):
+    db = await _adb()
+    clean = inbound_number.replace("+", "").replace("sip_", "").strip()
+    res = await db.table("client_numbers").select("*").ilike("inbound_number", f"%{clean}%").maybe_single().execute()
+    return res.data if res else None
+
+async def list_client_numbers():
+    db = await _adb()
+    res = await db.table("client_numbers").select("*").order("created_at", desc=True).execute()
+    return res.data or []
+
+async def save_client_number(data: dict):
+    db = await _adb()
+    cid = data.get("id") or str(uuid.uuid4())
+    data["id"] = cid
+    data["created_at"] = datetime.utcnow().isoformat()
+    await db.table("client_numbers").upsert(data, on_conflict="inbound_number").execute()
+    return cid
+
+async def delete_client_number(cid: str):
+    db = await _adb()
+    await db.table("client_numbers").delete().eq("id", cid).execute()
+
+async def insert_appointment(name: str, phone: str, date: str, time: str, service: str, budget: str = "", property_type: str = ""):
+    full_id = str(uuid.uuid4())
+    db = await _adb()
+    await db.table("appointments").insert({
+        "id": full_id, "name": name, "phone": phone, "date": date, "time": time,
+        "service": service, "budget": budget, "property_type": property_type,
+        "status": "booked", "created_at": datetime.utcnow().isoformat()
+    }).execute()
+    return full_id[:8].upper()
+
+async def check_slot(date: str, time: str) -> bool:
+    db = await _adb()
+    res = await db.table("appointments").select("id").eq("date", date).eq("time", time).eq("status", "booked").maybe_single().execute()
+    return res.data is None
+
+async def get_next_available(date: str, time: str) -> str:
+    try:
+        dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
+    except Exception:
+        dt = datetime.utcnow() + timedelta(hours=1)
+    for _ in range(24):
+        dt += timedelta(hours=1)
+        if 10 <= dt.hour < 19:
+            if await check_slot(dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")):
+                return f"{dt.strftime('%Y-%m-%d')} at {dt.strftime('%H:%M')}"
+    return "Tomorrow at 11:00 AM"
+
+async def get_all_appointments():
+    db = await _adb()
+    res = await db.table("appointments").select("*").order("date", desc=True).order("time").execute()
+    return res.data or []
+
+async def cancel_appointment(aid: str):
+    db = await _adb()
+    await db.table("appointments").update({"status": "cancelled"}).eq("id", aid).execute()
+    return True
+
+async def log_call(call_id: str, phone_number: str, called_to: str, lead_name: str, direction: str, campaign_id: Optional[str], outcome: str, lead_score: str, summary: str, reason: str, duration_seconds: int, cost_inr: float, recording_url: Optional[str] = None):
+    db = await _adb()
+    await db.table("call_logs").upsert({
+        "id": call_id or str(uuid.uuid4()), "phone_number": phone_number, "called_to": called_to,
+        "lead_name": lead_name, "direction": direction, "campaign_id": campaign_id,
+        "outcome": outcome, "lead_score": lead_score, "summary": summary, "reason": reason,
+        "duration_seconds": duration_seconds, "cost_inr": cost_inr, "recording_url": recording_url,
+        "timestamp": datetime.utcnow().isoformat()
+    }, on_conflict="id").execute()
+
+async def get_calls(direction: Optional[str] = None, campaign_id: Optional[str] = None, limit: int = 100):
+    db = await _adb()
+    q = db.table("call_logs").select("*").order("timestamp", desc=True).limit(limit)
+    if direction: q = q.eq("direction", direction)
+    if campaign_id: q = q.eq("campaign_id", campaign_id)
+    res = await q.execute()
+    return res.data or []
+
+async def get_stats_data():
+    db = await _adb()
+    res = await db.table("call_logs").select("*").execute()
+    rows = res.data or []
+    total = len(rows)
+    booked = sum(1 for r in rows if r.get("outcome") == "booked")
+    not_interested = sum(1 for r in rows if r.get("outcome") == "not_interested")
+    total_spent_inr = sum(float(r.get("cost_inr") or 0) for r in rows)
+    durations = [r["duration_seconds"] for r in rows if r.get("duration_seconds")]
+    avg_dur = round(sum(durations)/len(durations), 1) if durations else 0
+    rate = round((booked / total * 100), 1) if total else 0.0
+    return {
+        "total_calls": total, "booked": booked, "not_interested": not_interested,
+        "total_spent_inr": round(total_spent_inr, 2), "booking_rate": rate, "avg_duration": avg_dur
+    }
+
+async def add_contact_memory(phone: str, insight: str):
+    db = await _adb()
+    await db.table("contact_memory").insert({
+        "id": str(uuid.uuid4()), "phone_number": phone, "insight": insight, "created_at": datetime.utcnow().isoformat()
+    }).execute()
+
+async def get_contact_memory(phone: Optional[str] = None):
+    db = await _adb()
+    q = db.table("contact_memory").select("*").order("created_at", desc=True).limit(50)
+    if phone: q = q.ilike("phone_number", f"%{phone}%")
+    res = await q.execute()
+    return res.data or []
+
+async def sync_google_sheets_row(webhook_url: str, payload: dict):
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(webhook_url, json=payload)
+    except Exception as e:
+        await push_unified_log("Webhook", "warning", f"Google Sheets sync failed: {e}")
+
+async def get_settings():
+    db = await _adb()
+    res = await db.table("settings").select("key, value").execute()
+    return {r["key"]: r["value"] for r in (res.data or [])}
+
+async def save_settings_dict(data: dict):
+    db = await _adb()
+    now_iso = datetime.utcnow().isoformat()
+    rows = [{"key": k, "value": str(v), "updated_at": now_iso} for k, v in data.items() if v is not None]
+    if rows:
+        await db.table("settings").upsert(rows, on_conflict="key").execute()
