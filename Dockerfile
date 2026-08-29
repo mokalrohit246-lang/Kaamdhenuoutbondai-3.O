@@ -5,6 +5,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -16,8 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy source code
 COPY . .
 
-# Expose port (if needed, e.g. for healthchecks)
-EXPOSE 8080
+# Ensure start.sh has executable permissions and LF line endings
+RUN chmod +x start.sh || true
 
-# Run the agent
-CMD ["python", "agent.py", "start"]
+# Expose HTTP port 8000 for Coolify / Traefik reverse proxy
+EXPOSE 8000
+
+# Entrypoint using background supervisor start.sh
+CMD ["/bin/bash", "start.sh"]
