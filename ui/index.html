@@ -228,17 +228,131 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
   </div>
 
   <div id="view_settings" class="tab-view">
-    <div class="card">
-      <div class="card-header"><span>Platform API Credentials (BYOK)</span></div>
-      <form id="form_settings" class="form-grid">
-        <div class="form-group"><label>LiveKit URL</label><input type="text" id="st_lk_url" /></div>
-        <div class="form-group"><label>LiveKit API Key</label><input type="text" id="st_lk_key" /></div>
-        <div class="form-group"><label>LiveKit API Secret</label><input type="password" id="st_lk_sec" /></div>
-        <div class="form-group"><label>Google Gemini API Key</label><input type="password" id="st_gem_key" /></div>
-        <div class="form-group"><label>Vobiz Outbound DID</label><input type="text" id="st_vob_num" /></div>
-        <div class="form-group"><label>Outbound Trunk ID</label><input type="text" id="st_trunk_id" /></div>
-        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn">Save Configuration</button></div>
-      </form>
+    <div class="card" style="border: 1px solid #EAB308; background: #0F172A; margin-bottom: 20px;">
+      <div class="card-header" style="border-bottom: 1px solid #334155; padding-bottom: 12px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:16px;">🎙️</span>
+          <span style="font-size:15px; font-weight:700; color:#F8FAFC;">Voice Engine & Model Architecture (Vapi-Style)</span>
+          <span class="badge badge-booked" style="background:rgba(6,182,212,0.2); color:#06B6D4;">ACTIVE</span>
+        </div>
+      </div>
+      <p style="color:#94A3B8; font-size:12px; margin: 10px 0 16px 0;">Configure the AI voice engine architecture, LLM reasoning model, TTS voice synthesis, and STT speech transcriber.</p>
+      
+      <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px;">
+        <div class="form-group">
+          <label>Voice Engine Architecture (`VOICE_ENGINE`)</label>
+          <select id="cfg_voice_engine">
+            <option value="realtime" selected>Gemini Realtime [Native Multimodal Audio - Sub-300ms]</option>
+            <option value="pipeline">Pipeline Mode [Deepgram STT + Gemini LLM + Google TTS]</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>LLM Reasoning Model (`GEMINI_MODEL`)</label>
+          <select id="cfg_gemini_model">
+            <option value="gemini-2.0-flash-exp" selected>gemini-2.0-flash-exp</option>
+            <option value="gemini-3.1-flash-live-preview">gemini-3.1-flash-live-preview</option>
+            <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>TTS Voice Synthesis (`TTS_VOICE`)</label>
+          <select id="cfg_tts_voice">
+            <option value="hi-IN-Neural2-A" selected>hi-IN-Neural2-A - Google Cloud Hindi Female</option>
+            <option value="hi-IN-Standard-A">hi-IN-Standard-A - Hindi Standard Female</option>
+            <option value="Aoede">Aoede - Natural Gemini Live Multilingual</option>
+            <option value="Puck">Puck - Expressive Male</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>STT Speech Transcriber (`STT_MODEL`)</label>
+          <select id="cfg_stt_model">
+            <option value="nova-3" selected>Deepgram nova-3 [Multi-Lingual / Hindi]</option>
+            <option value="nova-2">Deepgram nova-2</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top: 16px;">
+        <button class="btn" style="background:#F59E0B; color:#000; font-weight:700;" onclick="saveVoiceSettings()">⚡ Save Voice Configuration</button>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px;">
+      
+      <div class="card">
+        <div class="card-header">
+          <span style="font-size:15px; font-weight:700;">LiveKit</span>
+          <span class="badge" id="badge_livekit" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+          <label>URL</label>
+          <input type="text" id="cfg_lk_url" placeholder="wss://your-project.livekit.cloud" />
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+          <label>API Key</label>
+          <input type="password" id="cfg_lk_key" placeholder="••••••••• (Active & Saved)" />
+        </div>
+        <div class="form-group" style="margin-bottom:16px;">
+          <label>API Secret</label>
+          <input type="password" id="cfg_lk_sec" placeholder="••••••••• (Active & Saved)" />
+        </div>
+        <button class="btn" style="background:#EAB308; color:#000; width:100%; font-weight:700;" onclick="saveModularSettings('livekit')">Save LiveKit</button>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span style="font-size:15px; font-weight:700;">Gemini</span>
+          <span class="badge" id="badge_gemini" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+          <label>API Key</label>
+          <input type="password" id="cfg_gem_key" placeholder="••••••••• (Active & Saved)" />
+        </div>
+        <div class="form-group" style="margin-bottom:12px;">
+          <label>Default Model</label>
+          <select id="cfg_gem_default_model">
+            <option value="gemini-2.0-flash-exp" selected>gemini-2.0-flash-exp</option>
+            <option value="gemini-3.1-flash-live-preview">gemini-3.1-flash-live-preview</option>
+          </select>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:20px; margin-top:10px;">
+          <input type="checkbox" id="cfg_realtime_chk" checked style="width:auto; cursor:pointer;" />
+          <label for="cfg_realtime_chk" style="color:#F8FAFC; cursor:pointer; font-size:12px;">Enable Realtime Audio API</label>
+        </div>
+        <button class="btn" style="background:#EAB308; color:#000; width:100%; font-weight:700;" onclick="saveModularSettings('gemini')">Save Gemini</button>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span style="font-size:15px; font-weight:700;">Vobiz SIP (Inbound & Outbound)</span>
+          <span class="badge" id="badge_vobiz" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
+        </div>
+        <div class="form-group" style="margin-bottom:10px;">
+          <label>SIP Domain</label>
+          <input type="text" id="cfg_vob_domain" placeholder="1d3f4bb4.sip.vobiz.ai" />
+        </div>
+        <div class="form-group" style="margin-bottom:10px;">
+          <label>Username</label>
+          <input type="text" id="cfg_vob_user" placeholder="mokalrohit246@gmail.com" />
+        </div>
+        <div class="form-group" style="margin-bottom:10px;">
+          <label>Password / Token</label>
+          <input type="password" id="cfg_vob_pass" placeholder="••••••••• (Active & Saved)" />
+        </div>
+        <div class="form-group" style="margin-bottom:10px;">
+          <label>Vobiz DID Number</label>
+          <input type="text" id="cfg_vob_did" placeholder="+918065353767" />
+        </div>
+        <div class="form-group" style="margin-bottom:10px;">
+          <label>LiveKit SIP Destination URI</label>
+          <input type="text" id="cfg_lk_sip_uri" readonly style="background:#070B11; color:#06B6D4; border-color:#06B6D4; font-family:monospace;" />
+        </div>
+        <div class="form-group" style="margin-bottom:16px;">
+          <label>Outbound Trunk ID</label>
+          <input type="text" id="cfg_vob_trunk" placeholder="ST_5fBqM5ZaW7pn" />
+        </div>
+        <button class="btn" style="background:#EAB308; color:#000; width:100%; font-weight:700;" onclick="saveModularSettings('vobiz')">Save Vobiz SIP</button>
+      </div>
+
     </div>
   </div>
 
@@ -457,6 +571,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadUnifiedLogs();
     loadVisits();
     loadClients();
+    loadSettings();
     setInterval(loadStats, 6000);
     setInterval(loadUnifiedLogs, 3000);
 });
@@ -483,6 +598,90 @@ async function cancelVisit(id) {
 async function deleteClient(id) {
     await fetch(`/api/client-numbers/${id}`, { method: 'DELETE' });
     location.reload();
+}
+
+async function loadSettings() {
+    try {
+        const res = await fetch('/api/settings');
+        if (res.ok) {
+            const d = await res.json();
+            if (d.LIVEKIT_URL) document.getElementById('cfg_lk_url').value = d.LIVEKIT_URL;
+            if (d.LIVEKIT_API_KEY) document.getElementById('cfg_lk_key').value = d.LIVEKIT_API_KEY;
+            if (d.LIVEKIT_API_SECRET) document.getElementById('cfg_lk_sec').value = d.LIVEKIT_API_SECRET;
+            if (d.GOOGLE_API_KEY) document.getElementById('cfg_gem_key').value = d.GOOGLE_API_KEY;
+            if (d.GEMINI_MODEL) {
+                document.getElementById('cfg_gemini_model').value = d.GEMINI_MODEL;
+                document.getElementById('cfg_gem_default_model').value = d.GEMINI_MODEL;
+            }
+            if (d.GEMINI_TTS_VOICE) document.getElementById('cfg_tts_voice').value = d.GEMINI_TTS_VOICE;
+            if (d.VOBIZ_SIP_DOMAIN) document.getElementById('cfg_vob_domain').value = d.VOBIZ_SIP_DOMAIN;
+            if (d.VOBIZ_USERNAME) document.getElementById('cfg_vob_user').value = d.VOBIZ_USERNAME;
+            if (d.VOBIZ_PASSWORD) document.getElementById('cfg_vob_pass').value = d.VOBIZ_PASSWORD;
+            if (d.VOBIZ_OUTBOUND_NUMBER) document.getElementById('cfg_vob_did').value = d.VOBIZ_OUTBOUND_NUMBER;
+            if (d.OUTBOUND_TRUNK_ID) document.getElementById('cfg_vob_trunk').value = d.OUTBOUND_TRUNK_ID;
+            if (d.USE_GEMINI_REALTIME) document.getElementById('cfg_realtime_chk').checked = (d.USE_GEMINI_REALTIME === 'true');
+
+            // Format SIP Destination URI
+            const cleanDid = (d.VOBIZ_OUTBOUND_NUMBER || '').replace('+', '');
+            const lkHost = (d.LIVEKIT_URL || '').replace('wss://', '').replace('.livekit.cloud', '.sip.livekit.cloud');
+            document.getElementById('cfg_lk_sip_uri').value = `sip:${cleanDid}@${lkHost}`;
+
+            // Update badges
+            if (d.LIVEKIT_URL) document.getElementById('badge_livekit').textContent = 'CONFIGURED';
+            if (d.GOOGLE_API_KEY) document.getElementById('badge_gemini').textContent = 'CONFIGURED';
+            if (d.VOBIZ_SIP_DOMAIN) document.getElementById('badge_vobiz').textContent = 'CONFIGURED';
+        }
+    } catch (e) { console.error("Error loading settings:", e); }
+}
+
+async function saveVoiceSettings() {
+    const payload = {
+        VOICE_ENGINE: document.getElementById('cfg_voice_engine').value,
+        GEMINI_MODEL: document.getElementById('cfg_gemini_model').value,
+        GEMINI_TTS_VOICE: document.getElementById('cfg_tts_voice').value,
+        STT_MODEL: document.getElementById('cfg_stt_model').value
+    };
+    try {
+        await fetch('/api/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        loadSettings();
+    } catch (e) { console.error("Error saving voice settings:", e); }
+}
+
+async function saveModularSettings(target) {
+    let payload = {};
+    if (target === 'livekit') {
+        payload = {
+            LIVEKIT_URL: document.getElementById('cfg_lk_url').value,
+            LIVEKIT_API_KEY: document.getElementById('cfg_lk_key').value,
+            LIVEKIT_API_SECRET: document.getElementById('cfg_lk_sec').value
+        };
+    } else if (target === 'gemini') {
+        payload = {
+            GOOGLE_API_KEY: document.getElementById('cfg_gem_key').value,
+            GEMINI_MODEL: document.getElementById('cfg_gem_default_model').value,
+            USE_GEMINI_REALTIME: document.getElementById('cfg_realtime_chk').checked ? 'true' : 'false'
+        };
+    } else if (target === 'vobiz') {
+        payload = {
+            VOBIZ_SIP_DOMAIN: document.getElementById('cfg_vob_domain').value,
+            VOBIZ_USERNAME: document.getElementById('cfg_vob_user').value,
+            VOBIZ_PASSWORD: document.getElementById('cfg_vob_pass').value,
+            VOBIZ_OUTBOUND_NUMBER: document.getElementById('cfg_vob_did').value,
+            OUTBOUND_TRUNK_ID: document.getElementById('cfg_vob_trunk').value
+        };
+    }
+    try {
+        await fetch('/api/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        loadSettings();
+    } catch (e) { console.error("Error saving " + target + " settings:", e); }
 }
 </script>
 </body>
