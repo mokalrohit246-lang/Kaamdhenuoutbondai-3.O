@@ -58,8 +58,8 @@ CARTESIA_VOICE = "f786b574-daa5-4673-aa0c-cbe3e8534c02"
 
 # --- 4. LARGE LANGUAGE MODEL (LLM) SETTINGS ---
 # Choose "openai" or "groq"
-DEFAULT_LLM_PROVIDER = "openai"
-DEFAULT_LLM_MODEL = "gpt-4o-mini" # OpenAI default
+DEFAULT_LLM_PROVIDER = "google"
+DEFAULT_LLM_MODEL = "gemini-2.0-flash-exp"
 
 # Groq Specifics (Faster inference)
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -71,5 +71,5 @@ GROQ_TEMPERATURE = 0.7
 DEFAULT_TRANSFER_NUMBER = os.getenv("DEFAULT_TRANSFER_NUMBER")
 
 # Vobiz Trunk Details (Loaded from .env usually, but you can hardcode if needed)
-SIP_TRUNK_ID = os.getenv("VOBIZ_SIP_TRUNK_ID")
+SIP_TRUNK_ID = os.getenv("VOBIZ_SIP_TRUNK_ID", "ST_5fBqM5ZaW7pn")
 SIP_DOMAIN = os.getenv("VOBIZ_SIP_DOMAIN")

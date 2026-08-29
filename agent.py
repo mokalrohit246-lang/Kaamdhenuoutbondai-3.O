@@ -6,9 +6,10 @@ os.environ['SSL_CERT_FILE'] = certifi.where()
 
 import logging
 import json
+import asyncio
 from dotenv import load_dotenv
 
-from livekit import agents, api
+from livekit import agents, api, rtc
 from livekit.agents import AgentSession, Agent, RoomInputOptions
 from livekit.plugins import (
     openai,
@@ -18,6 +19,12 @@ from livekit.plugins import (
     silero,
     sarvam,
 )
+
+try:
+    from livekit.plugins import google
+except ImportError:
+    google = None
+
 from livekit.agents import llm
 from typing import Annotated, Optional
 
@@ -70,7 +77,7 @@ def _build_tts(config_provider: str = None, config_voice: str = None):
 
 
 def _build_llm(config_provider: str = None):
-    """Configure the LLM provider based on config or env vars."""
+    """Configure the LLM provider based on config or env vars. Default fallback model is gemini-2.0-flash-exp."""
     provider = (config_provider or os.getenv("LLM_PROVIDER", config.DEFAULT_LLM_PROVIDER)).lower()
 
     if provider == "groq":
@@ -81,11 +88,20 @@ def _build_llm(config_provider: str = None):
             model=os.getenv("GROQ_MODEL", config.GROQ_MODEL),
             temperature=float(os.getenv("GROQ_TEMPERATURE", str(config.GROQ_TEMPERATURE))),
         )
-    
-    # Default to OpenAI
-    logger.info("Using OpenAI LLM")
-    return openai.LLM(model=config.DEFAULT_LLM_MODEL)
 
+    if provider in ["google", "gemini"]:
+        logger.info("Using Google Gemini LLM (gemini-2.0-flash-exp)")
+        model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+        if google is not None:
+            return google.LLM(model=model)
+        return openai.LLM(model=model)
+
+    # Default Fallback: gemini-2.0-flash-exp
+    default_model = os.getenv("DEFAULT_LLM_MODEL", "gemini-2.0-flash-exp")
+    logger.info(f"Using default LLM (model: {default_model})")
+    if google is not None and "gemini" in default_model:
+        return google.LLM(model=default_model)
+    return openai.LLM(model=default_model)
 
 
 class TransferFunctions(llm.ToolContext):
@@ -175,8 +191,6 @@ class OutboundAssistant(Agent):
         )
 
 
-
-
 async def entrypoint(ctx: agents.JobContext):
     """
     Main entrypoint for the agent.
@@ -223,15 +237,43 @@ async def entrypoint(ctx: agents.JobContext):
         tts=_build_tts(config_dict.get("model_provider"), config_dict.get("voice_id")),
     )
 
-    # Start the session
+    # Start the session with close_on_disconnect=False to prevent recorder/worker drops from closing room
     await session.start(
         room=ctx.room,
         agent=OutboundAssistant(tools=list(fnc_ctx.function_tools.values())),
         room_input_options=RoomInputOptions(
             noise_cancellation=noise_cancellation.BVCTelephony(),
-            close_on_disconnect=True, # Close room when agent disconnects
+            close_on_disconnect=False, # Prevent automatic room teardown when non-caller leaves
         ),
     )
+
+    # FIX DISCONNECT HANDLER:
+    # Ensure participant_disconnected ONLY triggers if the disconnected participant is the actual SIP caller (identity starts with "sip_").
+    # It must NEVER disconnect the room if an egress recorder or internal worker fails/disconnects.
+    @ctx.room.on("participant_disconnected")
+    def on_participant_disconnected(participant: rtc.RemoteParticipant):
+        logger.info(f"Participant disconnected: identity='{participant.identity}'")
+        if participant.identity and participant.identity.startswith("sip_"):
+            logger.info(f"SIP caller '{participant.identity}' disconnected. Shutting down session.")
+            ctx.shutdown()
+        else:
+            logger.info(f"Non-SIP participant '{participant.identity}' disconnected (e.g. egress recorder/worker). Keeping call active.")
+
+    # SAFE EGRESS HANDLING:
+    # Wrap egress start block in safe try/except so if Egress returns 429 (quota exceeded),
+    # it gracefully logs a warning and continues the voice call without interrupting audio.
+    if config_dict.get("record") or os.getenv("ENABLE_EGRESS", "false").lower() == "true":
+        try:
+            logger.info("Attempting to start room Egress recording...")
+            from livekit.protocol import egress as egress_proto
+            req = egress_proto.RoomCompositeEgressRequest(
+                room_name=ctx.room.name,
+                file_outputs=[egress_proto.EncodedFileOutput(filepath=f"recordings/{ctx.room.name}.mp4")]
+            )
+            await ctx.api.egress.start_room_composite_egress(req)
+            logger.info("Egress recording started successfully.")
+        except Exception as egress_err:
+            logger.warning(f"Egress recording warning (e.g. 429 quota exceeded): {egress_err}. Continuing call without interruption.")
 
     # Logic to dial out:
     # 1. If 'phone_number' is present, we MIGHT need to dial.
@@ -250,44 +292,38 @@ async def entrypoint(ctx: agents.JobContext):
             should_dial = True
             logger.info("User not in room. Agent will initiate dial-out.")
         else:
-            logger.info("User already in room (Dashboard dispatched). output Only generated greeting.")
+            logger.info("User already in room (Dashboard dispatched).")
 
     if should_dial:
         logger.info(f"Initiating outbound SIP call to {phone_number}...")
         try:
             # Create a SIP participant to dial out
-            # This effectively "calls" the phone number and brings them into this room
-            # --- CONNECTING TO THE PHONE NETWORK ---
-            # This step actually "dials" the number using Vobiz (SIP Trunk).
-            # It invites the phone number into this digital room.
             await ctx.api.sip.create_sip_participant(
                 api.CreateSIPParticipantRequest(
                     room_name=ctx.room.name,
                     sip_trunk_id=config.SIP_TRUNK_ID,
                     sip_call_to=phone_number,
                     participant_identity=f"sip_{phone_number}", # Unique ID for the SIP user
-                    wait_until_answered=True, # Important: Wait for pickup before continuing
+                    wait_until_answered=True, # Wait for pickup before continuing
                 )
             )
-            logger.info("Call answered! Agent is now listening.")
+            logger.info("Call answered! Generating opening greeting...")
             
-            # Note: We do NOT generate an initial reply here immediately.
-            # Usually for outbound, we want to hear "Hello?" from the user first,
-            # OR we can speak immediately. 
-            # If you want the agent to speak first, uncomment the lines below:
-            
+            await asyncio.sleep(0.5) # Brief stabilization pause for SIP audio path
+
+            # GEMINI MODEL & GREETING:
+            # Explicitly trigger await session.generate_reply(instructions=...) so the agent speaks full opening greeting cleanly without cut off
             await session.generate_reply(
                 instructions=config.INITIAL_GREETING
             )
             
         except Exception as e:
             logger.error(f"Failed to place outbound call: {e}")
-            # Ensure we clean up if the call fails
             ctx.shutdown()
     else:
-        # Fallback for inbound calls (if this agent is used for that) OR Dashboard calls where user is already there
         logger.info("Detecting if we should greet...")
-        # Give a small delay for audio to stabilize if user just joined
+        await asyncio.sleep(0.5)
+        # Explicitly trigger generate_reply for inbound/pre-dispatched calls
         await session.generate_reply(instructions=config.fallback_greeting)
 
 
