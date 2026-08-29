@@ -51,15 +51,15 @@ def _build_session(tools: list, system_prompt: str) -> AgentSession:
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # 100% PURE GEMINI LIVE REALTIME (Zero STT/TTS Delay)
+    # ULTRA-FAST 500ms PURE GEMINI REALTIME
     if use_realtime and _google_realtime is not None:
         try:
             from google.genai import types as _gt
             input_cfg = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
-                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
-                    silence_duration_ms=1500,
-                    prefix_padding_ms=200
+                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
+                    silence_duration_ms=500,
+                    prefix_padding_ms=100
                 )
             )
             return AgentSession(
@@ -124,14 +124,6 @@ async def entrypoint(ctx: agents.JobContext):
         for p in ctx.room.remote_participants.values():
             phone_number = p.identity.replace("sip_", "").strip()
             break
-        vobiz_num = os.getenv("VOBIZ_OUTBOUND_NUMBER", "")
-        cfg = await get_client_number_config(vobiz_num)
-        if cfg:
-            business_name = cfg.get("business_name", business_name)
-            service_type = cfg.get("service_type", service_type)
-            agent_name = cfg.get("agent_name", agent_name)
-            broker_phone = cfg.get("broker_whatsapp_number", broker_phone)
-            if cfg.get("system_prompt"): custom_prompt = cfg.get("system_prompt")
 
     system_prompt = build_prompt(
         lead_name=lead_name,
@@ -151,55 +143,49 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     await ctx.connect()
-    await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
 
     session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt)
 
-    # Start audio session in room
+    # Start audio session concurrently
     session_start_task = asyncio.create_task(session.start(
         room=ctx.room,
         agent=KaamdhenuAssistant(instructions=system_prompt),
         room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
     ))
 
-    # Outbound SIP Call Dispatch
+    # Pre-warmed outbound dial
     if direction == "outbound" and phone_number:
         trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
-        if not trunk_id:
-            await push_unified_log("SIP", "error", "OUTBOUND_TRUNK_ID missing", call_id=call_id)
-            ctx.shutdown()
-            return
-        try:
-            await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
-            await ctx.api.sip.create_sip_participant(
-                api.CreateSIPParticipantRequest(
-                    room_name=ctx.room.name,
-                    sip_trunk_id=trunk_id,
-                    sip_call_to=phone_number,
-                    participant_identity=f"sip_{phone_number}",
-                    wait_until_answered=True
+        if trunk_id:
+            try:
+                await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
+                await ctx.api.sip.create_sip_participant(
+                    api.CreateSIPParticipantRequest(
+                        room_name=ctx.room.name,
+                        sip_trunk_id=trunk_id,
+                        sip_call_to=phone_number,
+                        participant_identity=f"sip_{phone_number}",
+                        wait_until_answered=True
+                    )
                 )
-            )
-            await push_unified_log("SIP", "info", f"Call answered by {phone_number}", call_id=call_id)
-        except Exception as dial_err:
-            await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
-            ctx.shutdown()
-            return
+                await push_unified_log("SIP", "info", f"Call answered by {phone_number}", call_id=call_id)
+            except Exception as dial_err:
+                await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
+                ctx.shutdown()
+                return
 
     await session_start_task
-    await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
 
-    # Immediately deliver opening greeting
+    # Instant greeting
     greeting_text = (
         f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I assist you with your property inquiry today?"
         if direction == "inbound" else
-        f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your property requirement."
+        f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your property inquiry."
     )
     try:
         await session.generate_reply(instructions=f"Speak immediately: {greeting_text}")
-        await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name}", call_id=call_id)
-    except Exception as g_err:
-        await push_unified_log("Gemini", "warning", f"Greeting fallback: {g_err}", call_id=call_id)
+    except Exception:
+        pass
 
     done_event = asyncio.Event()
     def _on_part_disconnected(p: rtc.RemoteParticipant):
@@ -213,7 +199,6 @@ async def entrypoint(ctx: agents.JobContext):
     except asyncio.TimeoutError:
         pass
 
-    await push_unified_log("LiveKit", "info", f"Call session completed for {phone_number}", call_id=call_id)
     await session.aclose()
 
 if __name__ == "__main__":
