@@ -220,31 +220,48 @@ async def api_provision_inbound():
         session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx))
         lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
         
-        # 1. Create Inbound Trunk
-        in_trunk = await lk.sip.create_sip_inbound_trunk(
-            lk_api.CreateSIPInboundTrunkRequest(
-                trunk=lk_api.SIPInboundTrunkInfo(
-                    name="Vobiz Inbound Trunk",
-                    numbers=[num],
-                    allowed_addresses=[domain] if domain else []
-                )
-            )
-        )
-        in_trunk_id = in_trunk.sip_trunk_id
+        # 1. Check existing Inbound Trunks
+        existing_trunks = await lk.sip.list_sip_inbound_trunks(lk_api.ListSIPInboundTrunksRequest())
+        in_trunk_id = None
+        for t in existing_trunks.items:
+            if num in t.numbers or (t.numbers and any(n.replace("+", "") in num for n in t.numbers)):
+                in_trunk_id = t.sip_trunk_id
+                break
         
-        # 2. Create Inbound Dispatch Rule
-        rule = await lk.sip.create_sip_dispatch_rule(
-            lk_api.CreateSIPDispatchRuleRequest(
-                rule=lk_api.SIPDispatchRuleInfo(
-                    name="Kaamdhenu Inbound Dispatch Rule",
-                    trunk_ids=[in_trunk_id],
-                    rule=lk_api.SIPDispatchRule(
-                        dispatch_rule_direct=lk_api.SIPDispatchRuleDirect(room_name_prefix="inbound-", pin="")
+        # Create only if not exists
+        if not in_trunk_id:
+            in_trunk = await lk.sip.create_sip_inbound_trunk(
+                lk_api.CreateSIPInboundTrunkRequest(
+                    trunk=lk_api.SIPInboundTrunkInfo(
+                        name="Vobiz Inbound Trunk",
+                        numbers=[num],
+                        allowed_addresses=[domain] if domain else []
                     )
                 )
             )
-        )
-        rule_id = rule.sip_dispatch_rule_id
+            in_trunk_id = in_trunk.sip_trunk_id
+        
+        # 2. Check / Create Dispatch Rule
+        existing_rules = await lk.sip.list_sip_dispatch_rules(lk_api.ListSIPDispatchRulesRequest())
+        rule_id = None
+        for r in existing_rules.items:
+            if in_trunk_id in r.trunk_ids:
+                rule_id = r.sip_dispatch_rule_id
+                break
+                
+        if not rule_id:
+            rule = await lk.sip.create_sip_dispatch_rule(
+                lk_api.CreateSIPDispatchRuleRequest(
+                    rule=lk_api.SIPDispatchRuleInfo(
+                        name="Kaamdhenu Inbound Dispatch Rule",
+                        trunk_ids=[in_trunk_id],
+                        rule=lk_api.SIPDispatchRule(
+                            dispatch_rule_direct=lk_api.SIPDispatchRuleDirect(room_name_prefix="inbound-", pin="")
+                        )
+                    )
+                )
+            )
+            rule_id = rule.sip_dispatch_rule_id
         
         await lk.aclose()
         await session.close()
@@ -256,7 +273,7 @@ async def api_provision_inbound():
         os.environ["INBOUND_TRUNK_ID"] = in_trunk_id
         os.environ["INBOUND_DISPATCH_RULE_ID"] = rule_id
         
-        await push_unified_log("SIP", "info", f"Inbound provisioned: Trunk={in_trunk_id}, Rule={rule_id}")
+        await push_unified_log("SIP", "info", f"Inbound successfully linked: Trunk={in_trunk_id}, Rule={rule_id}")
         return {"status": "provisioned", "inbound_trunk_id": in_trunk_id, "dispatch_rule_id": rule_id}
     except Exception as e:
         await push_unified_log("SIP", "error", f"Inbound provisioning failed: {e}")
