@@ -265,9 +265,9 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px;">
         <div class="form-group">
           <label>Voice Engine Architecture (`VOICE_ENGINE`)</label>
-          <select id="cfg_voice_engine">
-            <option value="realtime" selected>Gemini Realtime [Native Multimodal Audio - Sub-300ms]</option>
-            <option value="pipeline">Pipeline Mode [Deepgram STT + Gemini LLM + Google TTS]</option>
+          <select id="cfg_voice_engine" onchange="onEngineChange()">
+            <option value="realtime" selected>Gemini Realtime [Pure Native Multimodal - Zero Latency]</option>
+            <option value="pipeline">Pipeline Mode [Deepgram STT + Gemini LLM + TTS]</option>
           </select>
         </div>
         <div class="form-group">
@@ -281,15 +281,17 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
           <label>TTS Voice Synthesis (`TTS_VOICE`)</label>
           <select id="cfg_tts_voice">
             <option value="Aoede" selected>Aoede - Natural Gemini Live Multilingual</option>
-            <option value="hi-IN-Neural2-A">hi-IN-Neural2-A - Google Cloud Hindi Female</option>
-            <option value="Puck">Puck - Expressive Male</option>
+            <option value="Puck">Puck - Natural Gemini Male</option>
+            <option value="Charon">Charon - Deep Gemini Male</option>
+            <option value="Kore">Kore - Calm Gemini Female</option>
+            <option value="hi-IN-Neural2-A">hi-IN-Neural2-A - Google Cloud Hindi Female (Pipeline only)</option>
           </select>
         </div>
         <div class="form-group">
           <label>STT Speech Transcriber (`STT_MODEL`)</label>
           <select id="cfg_stt_model">
-            <option value="nova-3" selected>Deepgram nova-3 [Multi-Lingual / Hindi]</option>
-            <option value="nova-2">Deepgram nova-2</option>
+            <option value="gemini-native" selected>Gemini Native Multimodal (Built-in Zero STT)</option>
+            <option value="nova-3">Deepgram nova-3 [Multi-Lingual / Hindi] (Pipeline only)</option>
           </select>
         </div>
       </div>
@@ -636,6 +638,16 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(loadStats, 6000);
     setInterval(loadUnifiedLogs, 3000);
 });
+
+function onEngineChange() {
+    const engine = document.getElementById('cfg_voice_engine').value;
+    const stt = document.getElementById('cfg_stt_model');
+    if (engine === 'realtime') {
+        stt.value = 'gemini-native';
+    } else {
+        stt.value = 'nova-3';
+    }
+}
 
 async function loadSettings() {
     try {

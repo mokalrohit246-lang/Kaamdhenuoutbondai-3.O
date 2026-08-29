@@ -51,14 +51,14 @@ def _build_session(tools: list, system_prompt: str) -> AgentSession:
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # ENGINE 1 (DEFAULT): Pure Gemini Live Realtime
+    # 100% PURE GEMINI LIVE REALTIME (Zero STT/TTS Delay)
     if use_realtime and _google_realtime is not None:
         try:
             from google.genai import types as _gt
             input_cfg = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
-                    silence_duration_ms=2000,
+                    silence_duration_ms=1500,
                     prefix_padding_ms=200
                 )
             )
@@ -77,7 +77,7 @@ def _build_session(tools: list, system_prompt: str) -> AgentSession:
                 tools=tools
             )
 
-    # ENGINE 2 (MODULAR PIPELINE FALLBACK): Deepgram STT + Gemini LLM + TTS
+    # PIPELINE FALLBACK
     stt = _deepgram_stt(model=os.getenv("STT_MODEL", "nova-3"), language="multi") if _deepgram_stt and os.getenv("DEEPGRAM_API_KEY") else None
     tts = _google_tts(voice_name=gemini_voice) if _google_tts else None
     return AgentSession(
@@ -100,11 +100,9 @@ async def entrypoint(ctx: agents.JobContext):
     phone_number = ""
     lead_name = "there"
     business_name = "Kaamdhenu Real Estate"
-    service_type = "Luxury 2BHK/3BHK Properties"
+    service_type = "Luxury Properties"
     agent_name = "Priya"
-    campaign_id = None
     broker_phone = None
-    sheets_webhook = None
     custom_prompt = None
 
     if ctx.job.metadata:
@@ -116,14 +114,11 @@ async def entrypoint(ctx: agents.JobContext):
             business_name = m.get("business_name", business_name)
             service_type = m.get("service_type", service_type)
             agent_name = m.get("agent_name", agent_name)
-            campaign_id = m.get("campaign_id")
             broker_phone = m.get("broker_phone")
-            sheets_webhook = m.get("sheets_webhook")
             custom_prompt = m.get("system_prompt")
         except Exception:
             pass
 
-    # Inbound DID Resolution
     if direction == "inbound" or not phone_number:
         direction = "inbound"
         for p in ctx.room.remote_participants.values():
@@ -152,24 +147,22 @@ async def entrypoint(ctx: agents.JobContext):
         lead_name=lead_name,
         direction=direction,
         call_id=call_id,
-        campaign_id=campaign_id,
-        broker_phone=broker_phone,
-        sheets_webhook=sheets_webhook
+        broker_phone=broker_phone
     )
-    active_tools = tool_ctx.get_all_tools()
 
     await ctx.connect()
     await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
 
-    session = _build_session(tools=active_tools, system_prompt=system_prompt)
+    session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt)
 
+    # Start audio session in room
     session_start_task = asyncio.create_task(session.start(
         room=ctx.room,
         agent=KaamdhenuAssistant(instructions=system_prompt),
         room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
     ))
 
-    # Pre-warmed outbound dial
+    # Outbound SIP Call Dispatch
     if direction == "outbound" and phone_number:
         trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
         if not trunk_id:
@@ -194,50 +187,20 @@ async def entrypoint(ctx: agents.JobContext):
             return
 
     await session_start_task
+    await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
 
-    # Safe S3 Recording Start
-    aws_key = os.getenv("S3_ACCESS_KEY_ID")
-    aws_secret = os.getenv("S3_SECRET_ACCESS_KEY")
-    aws_bucket = os.getenv("S3_BUCKET")
-    s3_endpoint = os.getenv("S3_ENDPOINT_URL")
-    s3_region = os.getenv("S3_REGION", "ap-northeast-1")
-
-    if aws_key and aws_secret and aws_bucket:
-        try:
-            recording_path = f"recordings/{ctx.room.name}.ogg"
-            egress_req = api.RoomCompositeEgressRequest(
-                room_name=ctx.room.name,
-                audio_only=True,
-                file_outputs=[api.EncodedFileOutput(
-                    file_type=api.EncodedFileType.OGG,
-                    filepath=recording_path,
-                    s3=api.S3Upload(
-                        access_key=aws_key,
-                        secret=aws_secret,
-                        bucket=aws_bucket,
-                        region=s3_region,
-                        endpoint=s3_endpoint
-                    )
-                )]
-            )
-            egress = await ctx.api.egress.start_room_composite_egress(egress_req)
-            tool_ctx.recording_url = f"{s3_endpoint.rstrip('/')}/{aws_bucket}/{recording_path}" if s3_endpoint else f"s3://{aws_bucket}/{recording_path}"
-            await push_unified_log("LiveKit", "info", f"Recording started: {egress.egress_id}", call_id=call_id)
-        except Exception as rec_err:
-            await push_unified_log("LiveKit", "warning", f"Recording bypassed: {rec_err}", call_id=call_id)
-
-    # Speak greeting immediately
+    # Immediately deliver opening greeting
     greeting_text = (
-        f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I assist you with your property search today?"
+        f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I assist you with your property inquiry today?"
         if direction == "inbound" else
-        f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your property inquiry."
+        f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your property requirement."
     )
     try:
-        await session.generate_reply(instructions=f"Speak opening greeting immediately: {greeting_text}")
-    except Exception:
-        pass
+        await session.generate_reply(instructions=f"Speak immediately: {greeting_text}")
+        await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name}", call_id=call_id)
+    except Exception as g_err:
+        await push_unified_log("Gemini", "warning", f"Greeting fallback: {g_err}", call_id=call_id)
 
-    # Disconnect Lifecycle Guard
     done_event = asyncio.Event()
     def _on_part_disconnected(p: rtc.RemoteParticipant):
         if p.identity.startswith("sip_"):
