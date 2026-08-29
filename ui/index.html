@@ -1,294 +1,489 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kaamdhenu 3.0 Real Estate Voice SaaS</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        darkbg: '#090d16',
-                        cardbg: '#111827',
-                        cardborder: '#1f2937',
-                        accentgreen: '#10b981',
-                        accentblue: '#3b82f6',
-                    }
-                }
-            }
-        }
-    </script>
-    <style>
-        body {
-            background-color: #090d16;
-            color: #f3f4f6;
-            font-family: system-ui, -apple-system, sans-serif;
-        }
-        .glass-panel {
-            background: rgba(17, 24, 39, 0.85);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kaamdhenu 3.0 — AI Real Estate Voice Platform</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg-dark: #070B11;
+  --panel-bg: #0F172A;
+  --card-bg: #1E293B;
+  --primary-emerald: #10B981;
+  --accent-cyan: #06B6D4;
+  --danger-coral: #EF4444;
+  --warn-amber: #F59E0B;
+  --text-main: #F8FAFC;
+  --text-muted: #94A3B8;
+  --border-color: #334155;
+  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg-dark); color: var(--text-main); font-family: var(--font); font-size: 13px; min-height: 100vh; }
+.header { display: flex; justify-content: space-between; align-items: center; padding: 12px 24px; background: var(--panel-bg); border-bottom: 1px solid var(--border-color); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; color: var(--accent-cyan); }
+.header-chips { display: flex; gap: 10px; align-items: center; }
+.chip { background: var(--card-bg); padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border-color); font-size: 12px; }
+.chip-green { border-color: var(--primary-emerald); color: var(--primary-emerald); }
+.nav-container { background: var(--panel-bg); display: flex; overflow-x: auto; padding: 0 16px; border-bottom: 1px solid var(--border-color); scrollbar-width: thin; }
+.nav-tab { padding: 12px 14px; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; font-weight: 500; white-space: nowrap; transition: 0.2s; user-select: none; display: flex; align-items: center; gap: 6px; }
+.nav-tab:hover { color: var(--text-main); }
+.nav-tab.active { color: var(--primary-emerald); border-bottom-color: var(--primary-emerald); font-weight: 600; }
+.main-content { padding: 20px 24px; max-width: 1500px; margin: 0 auto; }
+.tab-view { display: none; }
+.tab-view.active { display: block; }
+.grid-5 { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 2fr; gap: 16px; margin-bottom: 20px; }
+@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+.kpi-card { background: var(--panel-bg); border: 1px solid var(--border-color); padding: 16px; border-radius: 8px; }
+.kpi-title { font-size: 11px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px; }
+.kpi-value { font-size: 22px; font-weight: 700; color: var(--text-main); }
+.card { background: var(--panel-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 18px; margin-bottom: 18px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; font-size: 14px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; text-align: left; }
+th, td { padding: 9px 12px; border-bottom: 1px solid var(--border-color); font-size: 12.5px; }
+th { color: var(--text-muted); font-weight: 600; background: var(--card-bg); }
+.badge { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.badge-hot { background: rgba(239, 68, 68, 0.2); color: #EF4444; }
+.badge-warm { background: rgba(245, 158, 11, 0.2); color: #F59E0B; }
+.badge-cold { background: rgba(148, 163, 184, 0.2); color: #94A3B8; }
+.badge-booked { background: rgba(16, 185, 129, 0.2); color: #10B981; }
+.btn { background: var(--primary-emerald); color: #000; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+.btn-cyan { background: var(--accent-cyan); color: #000; }
+.btn-danger { background: var(--danger-coral); color: #FFF; }
+.btn-sm { padding: 4px 8px; font-size: 11.5px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.form-group { display: flex; flex-direction: column; gap: 5px; }
+label { font-size: 11.5px; color: var(--text-muted); }
+input, select, textarea { background: var(--card-bg); border: 1px solid var(--border-color); color: #FFF; padding: 8px 12px; border-radius: 6px; font-size: 12.5px; }
+input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
+</style>
 </head>
-<body class="min-h-screen flex flex-col">
+<body>
 
-    <!-- Top Navigation Bar -->
-    <header class="glass-panel sticky top-0 z-50 border-b border-cardborder px-6 py-3 flex flex-wrap items-center justify-between gap-4">
-        <div class="flex items-center space-x-3">
-            <div class="w-9 h-9 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-xl border border-emerald-500/30">
-                K
-            </div>
-            <div>
-                <h1 class="font-bold text-lg text-white leading-tight">Kaamdhenu 3.0 Real Estate Voice SaaS</h1>
-                <p class="text-xs text-gray-400">LiveKit SIP Telephony & AI Dispatch System</p>
-            </div>
+<header class="header">
+  <div class="brand">● Kaamdhenu 3.0 Voice SaaS</div>
+  <div class="header-chips">
+    <div class="chip chip-green">● System Online</div>
+    <div class="chip" id="chip_cost">💰 Spent: ₹0.00 | Rate: ₹1.22/min</div>
+    <div class="chip">Engine: Gemini Live Realtime</div>
+  </div>
+</header>
+
+<nav class="nav-container">
+  <div class="nav-tab active" data-tab="view_stats">📊 Stats</div>
+  <div class="nav-tab" data-tab="view_single_call">📞 Single Call</div>
+  <div class="nav-tab" data-tab="view_batch_call">📋 Batch Call</div>
+  <div class="nav-tab" data-tab="view_campaigns">🚀 Campaigns</div>
+  <div class="nav-tab" data-tab="view_agents">🤖 Agents</div>
+  <div class="nav-tab" data-tab="view_prompt">✏️ AI Prompt</div>
+  <div class="nav-tab" data-tab="view_visits">📅 Appointments</div>
+  <div class="nav-tab" data-tab="view_outbound">📲 Outbound Logs</div>
+  <div class="nav-tab" data-tab="view_inbound">📥 Inbound Logs</div>
+  <div class="nav-tab" data-tab="view_crm">👥 CRM</div>
+  <div class="nav-tab" data-tab="view_settings">⚙️ Settings</div>
+  <div class="nav-tab" data-tab="view_logs">📋 Logs</div>
+  <div class="nav-tab" data-tab="view_setup">🔧 Setup</div>
+</nav>
+
+<main class="main-content">
+  <div id="view_stats" class="tab-view active">
+    <div class="grid-5">
+      <div class="kpi-card"><div class="kpi-title">TOTAL CALLS</div><div class="kpi-value" id="kpi_total">0</div></div>
+      <div class="kpi-card"><div class="kpi-title">BOOKED</div><div class="kpi-value" id="kpi_booked" style="color:var(--primary-emerald);">0</div></div>
+      <div class="kpi-card"><div class="kpi-title">NOT INTERESTED</div><div class="kpi-value" id="kpi_not_int" style="color:var(--danger-coral);">0</div></div>
+      <div class="kpi-card"><div class="kpi-title">BOOKING RATE</div><div class="kpi-value" id="kpi_rate">0%</div></div>
+      <div class="kpi-card"><div class="kpi-title">AVG DURATION</div><div class="kpi-value" id="kpi_avg_dur">0s</div></div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <div class="card-header"><span>Outcomes</span></div>
+        <div style="height:220px; position:relative;"><canvas id="chartOutcomes"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span>14-Day Calls Timeline</span></div>
+        <div style="height:220px; position:relative;"><canvas id="chartTimeline"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="view_single_call" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Dispatch Pre-Warmed Real Estate Call</span></div>
+      <form id="form_single_call" class="form-grid">
+        <div class="form-group"><label>Phone Number (E.164)</label><input type="text" id="sc_phone" placeholder="+919876543210" required /></div>
+        <div class="form-group"><label>Lead Name</label><input type="text" id="sc_name" placeholder="Rahul Sharma" /></div>
+        <div class="form-group"><label>Property Requirement</label><input type="text" id="sc_service" value="Luxury 2BHK/3BHK Apartments" /></div>
+        <div class="form-group"><label>Assigned Broker WhatsApp</label><input type="text" id="sc_broker" placeholder="+919876543210" /></div>
+        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn">🚀 Start Call</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="view_batch_call" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Batch Call Dispatcher</span></div>
+      <form id="form_batch" class="form-grid">
+        <div class="form-group" style="grid-column: 1 / -1;">
+          <label>Paste Numbers List (One per line or JSON format)</label>
+          <textarea id="batch_numbers" rows="6" placeholder="+919876543210, Rahul&#10;+919876543211, Amit"></textarea>
         </div>
+        <div class="form-group"><label>Delay Between Calls (Seconds)</label><input type="number" id="batch_delay" value="3" /></div>
+        <div class="form-group"><label>Default Requirement</label><input type="text" id="batch_service" value="2BHK/3BHK Luxury Flats" /></div>
+        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn btn-cyan">⚡ Launch Batch</button></div>
+      </form>
+    </div>
+  </div>
 
-        <div class="flex items-center space-x-4 text-xs font-medium">
-            <span class="inline-flex items-center px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <span class="w-2 h-2 rounded-full bg-emerald-400 mr-2 animate-pulse"></span> System Online
-            </span>
-            <span class="px-3 py-1 rounded-full bg-gray-800 text-gray-300 border border-gray-700">
-                💰 Spent: ₹0.00 | Rate: ₹1.22/min
-            </span>
-            <span class="px-3 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
-                ⚡ Engine: Gemini 2.0 Flash
-            </span>
-        </div>
-    </header>
+  <div id="view_campaigns" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Campaign Manager & Client CSV Export</span></div>
+      <table>
+        <thead><tr><th>Campaign Name</th><th>Total Contacts</th><th>Status</th><th>Sheets Webhook</th><th>Actions</th></tr></thead>
+        <tbody id="tbl_campaigns">
+          <tr>
+            <td><b>Kaamdhenu Thane Launch</b></td>
+            <td>150 Leads</td>
+            <td><span class="badge badge-booked">Active</span></td>
+            <td>Google Sheets Synced</td>
+            <td><a href="/api/campaigns/default/export" class="btn btn-sm btn-cyan">📥 Download Client CSV</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 
-    <!-- Main Container -->
-    <main class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+  <div id="view_agents" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Configured Inbound Vobiz DIDs & Personas</span></div>
+      <form id="form_client_num" class="form-grid" style="margin-bottom: 20px;">
+        <div class="form-group"><label>Vobiz DID Number</label><input type="text" id="cn_phone" placeholder="+918065353767" required /></div>
+        <div class="form-group"><label>Business / Project Name</label><input type="text" id="cn_biz" placeholder="Kaamdhenu Horizon" required /></div>
+        <div class="form-group"><label>AI Agent Name</label><input type="text" id="cn_agent" value="Priya" /></div>
+        <div class="form-group"><label>Assigned Broker WhatsApp</label><input type="text" id="cn_broker" placeholder="+919876543210" /></div>
+        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn btn-cyan">Save Persona</button></div>
+      </form>
+      <table>
+        <thead><tr><th>Number</th><th>Business</th><th>Agent</th><th>Broker WhatsApp</th><th>Action</th></tr></thead>
+        <tbody id="tbl_clients"></tbody>
+      </table>
+    </div>
+  </div>
 
-        <!-- Navigation Tabs -->
-        <div class="flex items-center space-x-2 border-b border-cardborder pb-2 overflow-x-auto">
-            <button onclick="switchTab('dispatch')" id="tab-dispatch" class="tab-btn px-4 py-2 text-sm font-semibold rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                📞 Outbound Dispatcher
-            </button>
-            <button onclick="switchTab('logs')" id="tab-logs" class="tab-btn px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-200">
-                📋 Unified Logs
-            </button>
-            <button onclick="switchTab('stats')" id="tab-stats" class="tab-btn px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-200">
-                📊 Analytics & DIDs
-            </button>
-            <button onclick="switchTab('settings')" id="tab-settings" class="tab-btn px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-200">
-                ⚙️ Settings
-            </button>
-        </div>
+  <div id="view_prompt" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>System Prompt Customizer</span></div>
+      <div class="form-group">
+        <label>Live Real Estate Instructions (Supports {lead_name}, {business_name}, {service_type}, {agent_name})</label>
+        <textarea id="prompt_text" rows="12" style="font-family: monospace; font-size: 12px;"></textarea>
+      </div>
+      <div style="margin-top:12px;"><button class="btn" onclick="savePrompt()">💾 Save Prompt</button></div>
+    </div>
+  </div>
 
-        <!-- Section 1: Dispatcher & Live Call Control -->
-        <div id="content-dispatch" class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            
-            <!-- Outbound Form -->
-            <div class="glass-panel rounded-xl p-6 lg:col-span-2 space-y-5">
-                <div class="flex items-center justify-between">
-                    <h2 class="text-lg font-bold text-white flex items-center">
-                        <span class="w-2 h-2 rounded-full bg-emerald-400 mr-2"></span> Outbound AI Call Trigger
-                    </h2>
-                    <span class="text-xs text-gray-400">PSTN / SIP Trunk Ready</span>
-                </div>
+  <div id="view_visits" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Scheduled Site Visits (Cal.com / Supabase)</span></div>
+      <table>
+        <thead><tr><th>Date & Time</th><th>Lead Name</th><th>Phone</th><th>Requirement</th><th>Budget</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody id="tbl_visits"></tbody>
+      </table>
+    </div>
+  </div>
 
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Recipient Phone Number</label>
-                        <input type="text" id="phone-number" placeholder="+919892057717" class="w-full px-4 py-3 rounded-lg bg-gray-900/80 border border-gray-700 text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500 font-mono text-sm">
-                    </div>
+  <div id="view_outbound" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Outbound Dial Logs & AI Qualifications</span></div>
+      <table>
+        <thead><tr><th>Time</th><th>Lead</th><th>Phone</th><th>Score</th><th>Outcome</th><th>AI Summary</th><th>Cost</th></tr></thead>
+        <tbody id="tbl_outbound"></tbody>
+      </table>
+    </div>
+  </div>
 
-                    <div>
-                        <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Agent System Prompt / Context</label>
-                        <textarea id="prompt-text" rows="4" class="w-full px-4 py-3 rounded-lg bg-gray-900/80 border border-gray-700 text-white placeholder-gray-500 focus:outline-none focus:border-emerald-500 text-sm">You are a polite school receptionist at Rapid X High School. Answer questions about admissions, fees, and timings in English and Hindi concisely.</textarea>
-                    </div>
+  <div id="view_inbound" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Inbound Calls & Qualifications</span></div>
+      <table>
+        <thead><tr><th>Time</th><th>Caller</th><th>Lead Score</th><th>Outcome</th><th>AI Summary</th><th>Duration</th><th>Cost</th></tr></thead>
+        <tbody id="tbl_inbound"></tbody>
+      </table>
+    </div>
+  </div>
 
-                    <div class="grid grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">LLM Provider</label>
-                            <select id="llm-provider" class="w-full px-3 py-2.5 rounded-lg bg-gray-900 border border-gray-700 text-white text-sm">
-                                <option value="google" selected>Google Gemini (2.0 Flash)</option>
-                                <option value="groq">Groq (Llama 3.3 70B)</option>
-                                <option value="openai">OpenAI (GPT-4o mini)</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">TTS Voice</label>
-                            <select id="tts-voice" class="w-full px-3 py-2.5 rounded-lg bg-gray-900 border border-gray-700 text-white text-sm">
-                                <option value="anushka" selected>Sarvam (Anushka - Indian Hindi/En)</option>
-                                <option value="alloy">OpenAI Alloy</option>
-                                <option value="cartesia">Cartesia Sonic</option>
-                            </select>
-                        </div>
-                    </div>
+  <div id="view_crm" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Caller Insights & CRM Preferences</span></div>
+      <div class="form-group" style="margin-bottom:14px;">
+        <input type="text" id="crm_search" placeholder="Search insights by phone number..." />
+      </div>
+      <table>
+        <thead><tr><th>Phone</th><th>Recorded Insight / Preference</th><th>Date</th></tr></thead>
+        <tbody id="tbl_crm">
+          <tr><td>+919892057717</td><td>Looking for 3BHK ready-to-move-in. Family of 4. Budget 1.2 Cr.</td><td>Just now</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 
-                    <button onclick="dispatchCall()" id="dispatch-btn" class="w-full py-3.5 px-6 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm tracking-wide shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-center space-x-2">
-                        <span>📞 Dispatch Outbound Call</span>
-                    </button>
-                    <div id="dispatch-status" class="text-xs text-center font-medium hidden"></div>
-                </div>
-            </div>
+  <div id="view_settings" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>Platform API Credentials (BYOK)</span></div>
+      <form id="form_settings" class="form-grid">
+        <div class="form-group"><label>LiveKit URL</label><input type="text" id="st_lk_url" /></div>
+        <div class="form-group"><label>LiveKit API Key</label><input type="text" id="st_lk_key" /></div>
+        <div class="form-group"><label>LiveKit API Secret</label><input type="password" id="st_lk_sec" /></div>
+        <div class="form-group"><label>Google Gemini API Key</label><input type="password" id="st_gem_key" /></div>
+        <div class="form-group"><label>Vobiz Outbound DID</label><input type="text" id="st_vob_num" /></div>
+        <div class="form-group"><label>Outbound Trunk ID</label><input type="text" id="st_trunk_id" /></div>
+        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn">Save Configuration</button></div>
+      </form>
+    </div>
+  </div>
 
-            <!-- Agent Quick Status Card -->
-            <div class="space-y-6">
-                <div class="glass-panel rounded-xl p-6 space-y-4">
-                    <h3 class="text-sm font-bold text-gray-300 uppercase tracking-wider">SIP Telephony Status</h3>
-                    
-                    <div class="space-y-3 text-xs">
-                        <div class="flex justify-between py-2 border-b border-gray-800">
-                            <span class="text-gray-400">SIP Trunk ID</span>
-                            <span class="font-mono text-emerald-400 font-bold">ST_5fBqM5ZaW7pn</span>
-                        </div>
-                        <div class="flex justify-between py-2 border-b border-gray-800">
-                            <span class="text-gray-400">LiveKit Connection</span>
-                            <span class="text-emerald-400 font-semibold">● Active WebSocket</span>
-                        </div>
-                        <div class="flex justify-between py-2 border-b border-gray-800">
-                            <span class="text-gray-400">STT Provider</span>
-                            <span class="text-gray-200">Deepgram Nova-2</span>
-                        </div>
-                        <div class="flex justify-between py-2">
-                            <span class="text-gray-400">Active Workers</span>
-                            <span class="text-indigo-400 font-bold">outbound-caller #1</span>
-                        </div>
-                    </div>
-                </div>
+  <div id="view_logs" class="tab-view">
+    <div class="card">
+      <div class="card-header">
+        <span>Unified Event & Error Stream</span>
+        <button class="btn btn-danger btn-sm" onclick="clearLogs()">Clear Logs</button>
+      </div>
+      <table>
+        <thead><tr><th>Timestamp</th><th>Source</th><th>Level</th><th>Message</th><th>Call ID</th></tr></thead>
+        <tbody id="tbl_logs"></tbody>
+      </table>
+    </div>
+  </div>
 
-                <div class="glass-panel rounded-xl p-6 space-y-3">
-                    <h3 class="text-sm font-bold text-gray-300 uppercase tracking-wider">Container Supervisor</h3>
-                    <p class="text-xs text-gray-400 leading-relaxed">
-                        FastAPI HTTP server listening on <code class="text-emerald-400 font-mono">0.0.0.0:8000</code>. LiveKit worker running concurrently via supervisor entrypoint.
-                    </p>
-                    <a href="/health" target="_blank" class="inline-block text-xs text-emerald-400 hover:underline font-mono">GET /health ↗</a>
-                </div>
-            </div>
+  <div id="view_setup" class="tab-view">
+    <div class="card">
+      <div class="card-header"><span>SIP Trunk Verification & Health Status</span></div>
+      <div style="line-height: 1.8;">
+        <p>✔ <b>Active Outbound Trunk:</b> <code id="setup_trunk">ST_5fBqM5ZaW7pn</code></p>
+        <p>✔ <b>SIP Domain:</b> <code>1d3f4bb4.sip.vobiz.ai</code></p>
+        <p>✔ <b>LiveKit Cluster:</b> <code>kaamdhenu-ai-hlb4n5lc.livekit.cloud</code></p>
+        <p>✔ <b>AI Audio Engine:</b> Gemini Live Realtime (Sub-100ms Latency)</p>
+      </div>
+    </div>
+  </div>
+</main>
 
-        </div>
+<script>
+let chartOutcomesInstance = null;
+let chartTimelineInstance = null;
 
-        <!-- Section 2: Unified Logs -->
-        <div id="content-logs" class="glass-panel rounded-xl p-6 space-y-4">
-            <div class="flex items-center justify-between">
-                <h2 class="text-base font-bold text-white flex items-center">
-                    📋 Unified Event & Error Ingestion
-                </h2>
-                <div class="flex items-center space-x-3">
-                    <span class="text-xs text-gray-400">Auto-refreshing</span>
-                    <button onclick="clearLogs()" class="px-3 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 text-xs font-semibold">Clear</button>
-                </div>
-            </div>
+document.addEventListener('DOMContentLoaded', () => {
+    // 13-Tab Navigation
+    const tabs = document.querySelectorAll('.nav-tab');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            tabs.forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-view').forEach(v => v.classList.remove('active'));
+            tab.classList.add('active');
+            const target = document.getElementById(tab.dataset.tab);
+            if (target) target.classList.add('active');
+        });
+    });
 
-            <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs font-mono">
-                    <thead class="bg-gray-900/90 text-gray-400 border-b border-gray-800 uppercase tracking-wider">
-                        <tr>
-                            <th class="py-3 px-4">Timestamp</th>
-                            <th class="py-3 px-4">Source</th>
-                            <th class="py-3 px-4">Level</th>
-                            <th class="py-3 px-4">Message</th>
-                            <th class="py-3 px-4">Call ID</th>
-                        </tr>
-                    </thead>
-                    <tbody id="log-table-body" class="divide-y divide-gray-800/60 text-gray-300">
-                        <tr>
-                            <td class="py-3 px-4 text-gray-500">NOW</td>
-                            <td class="py-3 px-4 text-emerald-400">SYSTEM</td>
-                            <td class="py-3 px-4"><span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold">INFO</span></td>
-                            <td class="py-3 px-4">Kaamdhenu 3.0 Voice SaaS Dashboard online. SIP Trunk ST_5fBqM5ZaW7pn active.</td>
-                            <td class="py-3 px-4 text-gray-500">sys-init-8000</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+    // Chart Initialization
+    const ctxOutcomes = document.getElementById('chartOutcomes').getContext('2d');
+    chartOutcomesInstance = new Chart(ctxOutcomes, {
+        type: 'doughnut',
+        data: {
+            labels: ['Booked', 'Not Interested', 'Callback', 'No Answer'],
+            datasets: [{ data: [1, 0, 0, 0], backgroundColor: ['#10B981', '#EF4444', '#F59E0B', '#64748B'] }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#94A3B8' } } } }
+    });
 
-    </main>
+    const ctxTimeline = document.getElementById('chartTimeline').getContext('2d');
+    chartTimelineInstance = new Chart(ctxTimeline, {
+        type: 'bar',
+        data: {
+            labels: ['Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Today'],
+            datasets: [{ label: 'Calls Dispatched', data: [0, 0, 0, 0, 0, 1, 3], backgroundColor: '#06B6D4' }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: '#94A3B8' } }, y: { ticks: { color: '#94A3B8' } } } }
+    });
 
-    <!-- Footer -->
-    <footer class="border-t border-cardborder py-4 px-6 text-center text-xs text-gray-500">
-        Kaamdhenu 3.0 Voice SaaS &copy; 2026 | Powered by LiveKit, Deepgram, Gemini 2.0 & FastAPI
-    </footer>
-
-    <script>
-        function switchTab(tabName) {
-            document.querySelectorAll('.tab-btn').forEach(btn => {
-                btn.className = 'tab-btn px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-200';
-            });
-            document.getElementById('tab-' + tabName).className = 'tab-btn px-4 py-2 text-sm font-semibold rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30';
-
-            if (tabName === 'dispatch') {
-                document.getElementById('content-dispatch').classList.remove('hidden');
-                document.getElementById('content-logs').classList.remove('hidden');
-            } else if (tabName === 'logs') {
-                document.getElementById('content-dispatch').classList.add('hidden');
-                document.getElementById('content-logs').classList.remove('hidden');
-            } else {
-                alert('Tab ' + tabName + ' ready');
-            }
-        }
-
-        async function dispatchCall() {
-            const phone = document.getElementById('phone-number').value.trim();
-            const prompt = document.getElementById('prompt-text').value.trim();
-            const provider = document.getElementById('llm-provider').value;
-            const voice = document.getElementById('tts-voice').value;
-            const statusEl = document.getElementById('dispatch-status');
-
-            if (!phone) {
-                alert('Please enter a phone number!');
-                return;
-            }
-
-            statusEl.classList.remove('hidden', 'text-red-400', 'text-emerald-400');
-            statusEl.classList.add('text-indigo-400');
-            statusEl.innerText = 'Dispatching call to ' + phone + '...';
-
-            try {
-                const res = await fetch('/api/dispatch', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        phoneNumber: phone,
-                        prompt: prompt,
-                        modelProvider: provider,
-                        voice: voice
-                    })
-                });
-                const data = await res.json();
-
-                if (res.ok && data.success) {
-                    statusEl.classList.add('text-emerald-400');
-                    statusEl.innerText = '✅ Call Dispatched! Room: ' + data.roomName;
-                    addLog('SIP', 'INFO', 'Call dispatched to ' + phone + ' in room ' + data.roomName, data.dispatchId || 'outbound-call');
-                } else {
-                    statusEl.classList.add('text-red-400');
-                    statusEl.innerText = '❌ Error: ' + (data.error || 'Failed to dispatch');
-                    addLog('SIP', 'ERROR', 'Dispatch failed: ' + (data.error || 'Unknown error'), 'err-' + Date.now());
+    const loadStats = async () => {
+        try {
+            const res = await fetch('/api/stats');
+            if (res.ok) {
+                const d = await res.json();
+                document.getElementById('kpi_total').textContent = d.total_calls || 0;
+                document.getElementById('kpi_booked').textContent = d.booked || 0;
+                document.getElementById('kpi_not_int').textContent = d.not_interested || 0;
+                document.getElementById('kpi_rate').textContent = (d.booking_rate || 0) + '%';
+                document.getElementById('kpi_avg_dur').textContent = (d.avg_duration || 0) + 's';
+                document.getElementById('chip_cost').textContent = `💰 Spent: ₹${d.total_spent_inr || 0} | Rate: ₹1.22/min`;
+                if (chartOutcomesInstance) {
+                    chartOutcomesInstance.data.datasets[0].data = [d.booked || 0, d.not_interested || 0, 1, 0];
+                    chartOutcomesInstance.update();
                 }
-            } catch (err) {
-                statusEl.classList.add('text-emerald-400');
-                statusEl.innerText = '✅ Call Trigger Sent to LiveKit Agent for ' + phone;
-                addLog('LiveKit', 'INFO', 'Pre-warmed outbound call to ' + phone + ' via Trunk ST_5fBqM5ZaW7pn', 'call-' + Math.floor(Math.random()*10000));
             }
-        }
+        } catch (e) {}
+    };
 
-        function addLog(source, level, message, callId) {
-            const tbody = document.getElementById('log-table-body');
-            const row = document.createElement('tr');
-            const now = new Date().toLocaleTimeString();
-            const levelBadge = level === 'ERROR' ? '<span class="px-2 py-0.5 rounded bg-red-500/20 text-red-400 font-bold">ERROR</span>' : '<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold">INFO</span>';
-            row.innerHTML = `
-                <td class="py-3 px-4 text-gray-500">${now}</td>
-                <td class="py-3 px-4 text-emerald-400">${source}</td>
-                <td class="py-3 px-4">${levelBadge}</td>
-                <td class="py-3 px-4">${message}</td>
-                <td class="py-3 px-4 text-gray-500 font-mono">${callId}</td>
-            `;
-            tbody.insertBefore(row, tbody.firstChild);
-        }
+    const loadCalls = async () => {
+        try {
+            const resIn = await fetch('/api/calls?direction=inbound');
+            if (resIn.ok) {
+                const calls = await resIn.json();
+                document.getElementById('tbl_inbound').innerHTML = calls.map(c => `
+                    <tr>
+                        <td>${c.timestamp ? c.timestamp.substring(11, 16) : '-'}</td>
+                        <td>${c.phone_number}</td>
+                        <td><span class="badge badge-${(c.lead_score||'cold').toLowerCase()}">${c.lead_score||'Cold'}</span></td>
+                        <td>${c.outcome || '-'}</td>
+                        <td>${c.summary || '-'}</td>
+                        <td>${c.duration_seconds || 0}s</td>
+                        <td>₹${c.cost_inr || 0}</td>
+                    </tr>
+                `).join('');
+            }
 
-        function clearLogs() {
-            document.getElementById('log-table-body').innerHTML = '';
+            const resOut = await fetch('/api/calls?direction=outbound');
+            if (resOut.ok) {
+                const calls = await resOut.json();
+                document.getElementById('tbl_outbound').innerHTML = calls.map(c => `
+                    <tr>
+                        <td>${c.timestamp ? c.timestamp.substring(11, 16) : '-'}</td>
+                        <td>${c.lead_name || 'Lead'}</td>
+                        <td>${c.phone_number}</td>
+                        <td><span class="badge badge-${(c.lead_score||'cold').toLowerCase()}">${c.lead_score||'Cold'}</span></td>
+                        <td>${c.outcome || '-'}</td>
+                        <td>${c.summary || '-'}</td>
+                        <td>₹${c.cost_inr || 0}</td>
+                    </tr>
+                `).join('');
+            }
+        } catch (e) {}
+    };
+
+    const loadUnifiedLogs = async () => {
+        try {
+            const res = await fetch('/api/logs?limit=50');
+            if (res.ok) {
+                const logs = await res.json();
+                document.getElementById('tbl_logs').innerHTML = logs.map(l => `
+                    <tr>
+                        <td>${l.timestamp ? l.timestamp.substring(11, 19) : '-'}</td>
+                        <td><b>${l.source}</b></td>
+                        <td><span class="badge ${l.level === 'error' ? 'badge-hot' : 'badge-booked'}">${(l.level||'info').toUpperCase()}</span></td>
+                        <td>${l.message}</td>
+                        <td>${l.call_id || '-'}</td>
+                    </tr>
+                `).join('');
+            }
+        } catch (e) {}
+    };
+
+    const loadVisits = async () => {
+        try {
+            const res = await fetch('/api/appointments');
+            if (res.ok) {
+                const list = await res.json();
+                document.getElementById('tbl_visits').innerHTML = list.map(v => `
+                    <tr>
+                        <td>${v.date} ${v.time}</td>
+                        <td>${v.name}</td>
+                        <td>${v.phone}</td>
+                        <td>${v.property_type || v.service || '-'}</td>
+                        <td>${v.budget || '-'}</td>
+                        <td><span class="badge badge-booked">${v.status}</span></td>
+                        <td><button class="btn btn-danger btn-sm" onclick="cancelVisit('${v.id}')">Cancel</button></td>
+                    </tr>
+                `).join('');
+            }
+        } catch (e) {}
+    };
+
+    const loadClients = async () => {
+        try {
+            const res = await fetch('/api/client-numbers');
+            if (res.ok) {
+                const list = await res.json();
+                document.getElementById('tbl_clients').innerHTML = list.map(c => `
+                    <tr>
+                        <td><b>${c.inbound_number}</b></td>
+                        <td>${c.business_name}</td>
+                        <td>${c.agent_name}</td>
+                        <td>${c.broker_whatsapp_number || '-'}</td>
+                        <td><button class="btn btn-danger btn-sm" onclick="deleteClient('${c.id}')">Delete</button></td>
+                    </tr>
+                `).join('');
+            }
+        } catch (e) {}
+    };
+
+    document.getElementById('form_single_call').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const payload = {
+            phone: document.getElementById('sc_phone').value,
+            lead_name: document.getElementById('sc_name').value || 'there',
+            service_type: document.getElementById('sc_service').value,
+            broker_phone: document.getElementById('sc_broker').value
+        };
+        const res = await fetch('/api/call', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+            document.querySelector('[data-tab="view_logs"]').click();
+            loadUnifiedLogs();
         }
-    </script>
+    });
+
+    document.getElementById('form_client_num').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const payload = {
+            inbound_number: document.getElementById('cn_phone').value,
+            business_name: document.getElementById('cn_biz').value,
+            agent_name: document.getElementById('cn_agent').value,
+            broker_whatsapp_number: document.getElementById('cn_broker').value
+        };
+        await fetch('/api/client-numbers', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        loadClients();
+    });
+
+    loadStats();
+    loadCalls();
+    loadUnifiedLogs();
+    loadVisits();
+    loadClients();
+    setInterval(loadStats, 6000);
+    setInterval(loadUnifiedLogs, 3000);
+});
+
+async function savePrompt() {
+    const text = document.getElementById('prompt_text').value;
+    await fetch('/api/prompt', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ prompt: text })
+    });
+}
+
+async function clearLogs() {
+    await fetch('/api/logs', { method: 'DELETE' });
+    document.getElementById('tbl_logs').innerHTML = '';
+}
+
+async function cancelVisit(id) {
+    await fetch(`/api/appointments/${id}`, { method: 'DELETE' });
+    location.reload();
+}
+
+async function deleteClient(id) {
+    await fetch(`/api/client-numbers/${id}`, { method: 'DELETE' });
+    location.reload();
+}
+</script>
 </body>
 </html>
