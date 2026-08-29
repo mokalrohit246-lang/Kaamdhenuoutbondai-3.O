@@ -143,7 +143,10 @@ async def api_get_settings():
         "VOBIZ_USERNAME": db_s.get("VOBIZ_USERNAME") or os.getenv("VOBIZ_USERNAME", ""),
         "VOBIZ_PASSWORD": db_s.get("VOBIZ_PASSWORD") or os.getenv("VOBIZ_PASSWORD", ""),
         "VOBIZ_OUTBOUND_NUMBER": db_s.get("VOBIZ_OUTBOUND_NUMBER") or os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
-        "OUTBOUND_TRUNK_ID": db_s.get("OUTBOUND_TRUNK_ID") or os.getenv("OUTBOUND_TRUNK_ID", "ST_5fBqM5ZaW7pn")
+        "OUTBOUND_TRUNK_ID": db_s.get("OUTBOUND_TRUNK_ID") or os.getenv("OUTBOUND_TRUNK_ID", "ST_5fBqM5ZaW7pn"),
+        "INBOUND_TRUNK_ID": db_s.get("INBOUND_TRUNK_ID") or os.getenv("INBOUND_TRUNK_ID", ""),
+        "INBOUND_DISPATCH_RULE_ID": db_s.get("INBOUND_DISPATCH_RULE_ID") or os.getenv("INBOUND_DISPATCH_RULE_ID", ""),
+        "VOBIZ_API_URL": db_s.get("VOBIZ_API_URL") or os.getenv("VOBIZ_API_URL", "https://api.vobiz.ai/v1")
     }
 
 @app.post("/api/settings")
@@ -152,6 +155,112 @@ async def api_save_settings(req: Request):
     await save_settings_dict(d)
     for k, v in d.items(): os.environ[k] = str(v)
     return {"status": "saved"}
+
+@app.post("/api/sip/create-outbound-trunk")
+async def api_create_outbound_trunk():
+    url = os.getenv("LIVEKIT_URL")
+    key = os.getenv("LIVEKIT_API_KEY")
+    secret = os.getenv("LIVEKIT_API_SECRET")
+    domain = os.getenv("VOBIZ_SIP_DOMAIN")
+    user = os.getenv("VOBIZ_USERNAME")
+    pwd = os.getenv("VOBIZ_PASSWORD")
+    num = os.getenv("VOBIZ_OUTBOUND_NUMBER")
+    
+    if not (url and key and secret and domain and user and pwd and num):
+        raise HTTPException(400, "Missing SIP or LiveKit credentials in environment.")
+    
+    try:
+        from livekit import api as lk_api
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx))
+        lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
+        
+        trunk = await lk.sip.create_sip_outbound_trunk(
+            lk_api.CreateSIPOutboundTrunkRequest(
+                trunk=lk_api.SIPOutboundTrunkInfo(
+                    name="Vobiz Outbound Trunk",
+                    address=domain,
+                    transport=lk_api.SIPTransport.SIP_TRANSPORT_AUTO,
+                    numbers=[num],
+                    auth_username=user,
+                    auth_password=pwd
+                )
+            )
+        )
+        await lk.aclose()
+        await session.close()
+        
+        trunk_id = trunk.sip_trunk_id
+        await save_settings_dict({"OUTBOUND_TRUNK_ID": trunk_id})
+        os.environ["OUTBOUND_TRUNK_ID"] = trunk_id
+        await push_unified_log("SIP", "info", f"Outbound Trunk created: {trunk_id}")
+        return {"status": "created", "trunk_id": trunk_id}
+    except Exception as e:
+        await push_unified_log("SIP", "error", f"Create Outbound Trunk failed: {e}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/sip/provision-inbound")
+async def api_provision_inbound():
+    url = os.getenv("LIVEKIT_URL")
+    key = os.getenv("LIVEKIT_API_KEY")
+    secret = os.getenv("LIVEKIT_API_SECRET")
+    domain = os.getenv("VOBIZ_SIP_DOMAIN")
+    num = os.getenv("VOBIZ_OUTBOUND_NUMBER")
+    
+    if not (url and key and secret and num):
+        raise HTTPException(400, "Missing LiveKit URL/Keys or Vobiz Number.")
+        
+    try:
+        from livekit import api as lk_api
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx))
+        lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
+        
+        # 1. Create Inbound Trunk
+        in_trunk = await lk.sip.create_sip_inbound_trunk(
+            lk_api.CreateSIPInboundTrunkRequest(
+                trunk=lk_api.SIPInboundTrunkInfo(
+                    name="Vobiz Inbound Trunk",
+                    numbers=[num],
+                    allowed_addresses=[domain] if domain else []
+                )
+            )
+        )
+        in_trunk_id = in_trunk.sip_trunk_id
+        
+        # 2. Create Inbound Dispatch Rule
+        rule = await lk.sip.create_sip_dispatch_rule(
+            lk_api.CreateSIPDispatchRuleRequest(
+                rule=lk_api.SIPDispatchRuleInfo(
+                    name="Kaamdhenu Inbound Dispatch Rule",
+                    trunk_ids=[in_trunk_id],
+                    rule=lk_api.SIPDispatchRule(
+                        dispatch_rule_direct=lk_api.SIPDispatchRuleDirect(room_name_prefix="inbound-", pin="")
+                    )
+                )
+            )
+        )
+        rule_id = rule.sip_dispatch_rule_id
+        
+        await lk.aclose()
+        await session.close()
+        
+        await save_settings_dict({
+            "INBOUND_TRUNK_ID": in_trunk_id,
+            "INBOUND_DISPATCH_RULE_ID": rule_id
+        })
+        os.environ["INBOUND_TRUNK_ID"] = in_trunk_id
+        os.environ["INBOUND_DISPATCH_RULE_ID"] = rule_id
+        
+        await push_unified_log("SIP", "info", f"Inbound provisioned: Trunk={in_trunk_id}, Rule={rule_id}")
+        return {"status": "provisioned", "inbound_trunk_id": in_trunk_id, "dispatch_rule_id": rule_id}
+    except Exception as e:
+        await push_unified_log("SIP", "error", f"Inbound provisioning failed: {e}")
+        raise HTTPException(500, str(e))
 
 @app.post("/api/call")
 async def api_dispatch(req: SingleCallReq):

@@ -350,31 +350,49 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
           <span style="font-size:15px; font-weight:700;">Vobiz SIP (Inbound & Outbound)</span>
           <span class="badge" style="background:rgba(6,182,212,0.2); color:#06B6D4;">CONFIGURED</span>
         </div>
-        <div class="form-group" style="margin-bottom:10px;">
+        
+        <div class="form-group" style="margin-bottom:8px;">
           <label>SIP Domain</label>
-          <input type="text" id="cfg_vob_domain" />
+          <input type="text" id="cfg_vob_domain" placeholder="1d3f4bb4.sip.vobiz.ai" />
         </div>
-        <div class="form-group" style="margin-bottom:10px;">
+        <div class="form-group" style="margin-bottom:8px;">
           <label>Username</label>
-          <input type="text" id="cfg_vob_user" />
+          <input type="text" id="cfg_vob_user" placeholder="mokalrohit246@gmail.com" />
         </div>
-        <div class="form-group" style="margin-bottom:10px;">
+        <div class="form-group" style="margin-bottom:8px;">
           <label>Password / Token</label>
-          <input type="password" id="cfg_vob_pass" />
+          <input type="password" id="cfg_vob_pass" placeholder="••••••••• (Active & Saved)" />
         </div>
-        <div class="form-group" style="margin-bottom:10px;">
+        <div class="form-group" style="margin-bottom:8px;">
           <label>Vobiz DID Number</label>
-          <input type="text" id="cfg_vob_did" />
+          <input type="text" id="cfg_vob_did" placeholder="+918065353767" />
         </div>
-        <div class="form-group" style="margin-bottom:10px;">
+        <div class="form-group" style="margin-bottom:8px;">
           <label>LiveKit SIP Destination URI</label>
           <input type="text" id="cfg_lk_sip_uri" readonly style="background:#070B11; color:#06B6D4; border-color:#06B6D4; font-family:monospace;" />
         </div>
-        <div class="form-group" style="margin-bottom:16px;">
+        <div class="form-group" style="margin-bottom:8px;">
           <label>Outbound Trunk ID</label>
-          <input type="text" id="cfg_vob_trunk" />
+          <input type="text" id="cfg_vob_trunk" placeholder="ST_5fBqM5ZaW7pn" />
         </div>
-        <button class="btn" style="background:#EAB308; color:#000; width:100%; font-weight:700;" onclick="saveModularSettings('vobiz')">Save Vobiz SIP</button>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label>Inbound Trunk ID</label>
+          <input type="text" id="cfg_vob_inbound_trunk" placeholder="ST_Ua5ypLzBtQP3" />
+        </div>
+        <div class="form-group" style="margin-bottom:8px;">
+          <label>Inbound Dispatch Rule ID</label>
+          <input type="text" id="cfg_vob_dispatch_rule" placeholder="SDR_mfgEwEcxt3u2" />
+        </div>
+        <div class="form-group" style="margin-bottom:14px;">
+          <label>Vobiz API Base URL (Automated Provisioning)</label>
+          <input type="text" id="cfg_vob_api_url" value="https://api.vobiz.ai/v1" />
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn" style="background:#EAB308; color:#000; font-weight:700; flex:1;" onclick="saveModularSettings('vobiz')">Save SIP</button>
+          <button class="btn" style="background:#DC2626; color:#FFF; font-weight:700; flex:1;" onclick="autoCreateOutboundTrunk()">⚡ Create Outbound Trunk</button>
+          <button class="btn" style="background:#1E293B; border:1px solid #EAB308; color:#F59E0B; font-weight:700; flex:1.2;" onclick="autoProvisionInbound()">⚡ Auto-Provision Inbound SIP Trunk & Rule</button>
+        </div>
       </div>
 
     </div>
@@ -649,6 +667,43 @@ function onEngineChange() {
     }
 }
 
+// Auto Create Outbound Trunk
+async function autoCreateOutboundTrunk() {
+    if (!confirm("Create a new Outbound SIP Trunk on LiveKit with current Vobiz credentials?")) return;
+    try {
+        const res = await fetch('/api/sip/create-outbound-trunk', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            document.getElementById('cfg_vob_trunk').value = data.trunk_id;
+            alert("Outbound Trunk Created Successfully: " + data.trunk_id);
+            loadSettings();
+        } else {
+            alert("Error: " + (data.detail || "Failed to create trunk"));
+        }
+    } catch (e) {
+        alert("Request error: " + e);
+    }
+}
+
+// Auto Provision Inbound Trunk & Dispatch Rule
+async function autoProvisionInbound() {
+    if (!confirm("Auto-provision Inbound Trunk and SIP Dispatch Rule on LiveKit?")) return;
+    try {
+        const res = await fetch('/api/sip/provision-inbound', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            document.getElementById('cfg_vob_inbound_trunk').value = data.inbound_trunk_id;
+            document.getElementById('cfg_vob_dispatch_rule').value = data.dispatch_rule_id;
+            alert(`Inbound Provisioned Successfully!\nTrunk: ${data.inbound_trunk_id}\nRule: ${data.dispatch_rule_id}`);
+            loadSettings();
+        } else {
+            alert("Error: " + (data.detail || "Failed to provision inbound"));
+        }
+    } catch (e) {
+        alert("Request error: " + e);
+    }
+}
+
 async function loadSettings() {
     try {
         const res = await fetch('/api/settings');
@@ -670,6 +725,9 @@ async function loadSettings() {
             if (d.VOBIZ_PASSWORD) document.getElementById('cfg_vob_pass').value = d.VOBIZ_PASSWORD;
             if (d.VOBIZ_OUTBOUND_NUMBER) document.getElementById('cfg_vob_did').value = d.VOBIZ_OUTBOUND_NUMBER;
             if (d.OUTBOUND_TRUNK_ID) document.getElementById('cfg_vob_trunk').value = d.OUTBOUND_TRUNK_ID;
+            if (d.INBOUND_TRUNK_ID) document.getElementById('cfg_vob_inbound_trunk').value = d.INBOUND_TRUNK_ID;
+            if (d.INBOUND_DISPATCH_RULE_ID) document.getElementById('cfg_vob_dispatch_rule').value = d.INBOUND_DISPATCH_RULE_ID;
+            if (d.VOBIZ_API_URL) document.getElementById('cfg_vob_api_url').value = d.VOBIZ_API_URL;
             
             const cleanDid = (d.VOBIZ_OUTBOUND_NUMBER || '').replace('+', '');
             const lkHost = (d.LIVEKIT_URL || '').replace('wss://', '').replace('.livekit.cloud', '.sip.livekit.cloud');
@@ -714,7 +772,10 @@ async function saveModularSettings(target) {
             VOBIZ_USERNAME: document.getElementById('cfg_vob_user').value,
             VOBIZ_PASSWORD: document.getElementById('cfg_vob_pass').value,
             VOBIZ_OUTBOUND_NUMBER: document.getElementById('cfg_vob_did').value,
-            OUTBOUND_TRUNK_ID: document.getElementById('cfg_vob_trunk').value
+            OUTBOUND_TRUNK_ID: document.getElementById('cfg_vob_trunk').value,
+            INBOUND_TRUNK_ID: document.getElementById('cfg_vob_inbound_trunk').value,
+            INBOUND_DISPATCH_RULE_ID: document.getElementById('cfg_vob_dispatch_rule').value,
+            VOBIZ_API_URL: document.getElementById('cfg_vob_api_url').value
         };
     }
     await fetch('/api/settings', {
