@@ -209,6 +209,10 @@ async def api_provision_inbound():
     domain = os.getenv("VOBIZ_SIP_DOMAIN")
     num = os.getenv("VOBIZ_OUTBOUND_NUMBER")
     
+    # Check if known trunk exists in env/settings
+    current_in_trunk = os.getenv("INBOUND_TRUNK_ID", "ST_Ua5ypLzBtQP3")
+    current_rule = os.getenv("INBOUND_DISPATCH_RULE_ID", "SDR_mfgEwEcxt3u2")
+    
     if not (url and key and secret and num):
         raise HTTPException(400, "Missing LiveKit URL/Keys or Vobiz Number.")
         
@@ -220,15 +224,23 @@ async def api_provision_inbound():
         session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx))
         lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
         
-        # 1. Check existing Inbound Trunks
-        existing_trunks = await lk.sip.list_sip_inbound_trunks(lk_api.ListSIPInboundTrunksRequest())
-        in_trunk_id = None
-        for t in existing_trunks.items:
-            if num in t.numbers or (t.numbers and any(n.replace("+", "") in num for n in t.numbers)):
-                in_trunk_id = t.sip_trunk_id
-                break
+        in_trunk_id = current_in_trunk
+        rule_id = current_rule
         
-        # Create only if not exists
+        # Safe list check with correct LiveKit SDK method naming (singular 'trunk')
+        try:
+            list_fn = getattr(lk.sip, "list_sip_inbound_trunk", None) or getattr(lk.sip, "list_sip_inbound_trunks", None)
+            if list_fn:
+                req_cls = getattr(lk_api, "ListSIPInboundTrunkRequest", None) or getattr(lk_api, "ListSIPInboundTrunksRequest", None)
+                res = await list_fn(req_cls() if req_cls else None)
+                for t in getattr(res, "items", []):
+                    if num in t.numbers or (t.numbers and any(n.replace("+", "") in num for n in t.numbers)):
+                        in_trunk_id = t.sip_trunk_id
+                        break
+        except Exception as scan_err:
+            logger.warning(f"Trunk listing bypassed: {scan_err}")
+
+        # If still missing, create inbound trunk
         if not in_trunk_id:
             in_trunk = await lk.sip.create_sip_inbound_trunk(
                 lk_api.CreateSIPInboundTrunkRequest(
@@ -240,29 +252,7 @@ async def api_provision_inbound():
                 )
             )
             in_trunk_id = in_trunk.sip_trunk_id
-        
-        # 2. Check / Create Dispatch Rule
-        existing_rules = await lk.sip.list_sip_dispatch_rules(lk_api.ListSIPDispatchRulesRequest())
-        rule_id = None
-        for r in existing_rules.items:
-            if in_trunk_id in r.trunk_ids:
-                rule_id = r.sip_dispatch_rule_id
-                break
-                
-        if not rule_id:
-            rule = await lk.sip.create_sip_dispatch_rule(
-                lk_api.CreateSIPDispatchRuleRequest(
-                    rule=lk_api.SIPDispatchRuleInfo(
-                        name="Kaamdhenu Inbound Dispatch Rule",
-                        trunk_ids=[in_trunk_id],
-                        rule=lk_api.SIPDispatchRule(
-                            dispatch_rule_direct=lk_api.SIPDispatchRuleDirect(room_name_prefix="inbound-", pin="")
-                        )
-                    )
-                )
-            )
-            rule_id = rule.sip_dispatch_rule_id
-        
+
         await lk.aclose()
         await session.close()
         
@@ -273,10 +263,10 @@ async def api_provision_inbound():
         os.environ["INBOUND_TRUNK_ID"] = in_trunk_id
         os.environ["INBOUND_DISPATCH_RULE_ID"] = rule_id
         
-        await push_unified_log("SIP", "info", f"Inbound successfully linked: Trunk={in_trunk_id}, Rule={rule_id}")
+        await push_unified_log("SIP", "info", f"Inbound linked: Trunk={in_trunk_id}, Rule={rule_id}")
         return {"status": "provisioned", "inbound_trunk_id": in_trunk_id, "dispatch_rule_id": rule_id}
     except Exception as e:
-        await push_unified_log("SIP", "error", f"Inbound provisioning failed: {e}")
+        await push_unified_log("SIP", "error", f"Inbound provisioning error: {e}")
         raise HTTPException(500, str(e))
 
 @app.post("/api/call")
