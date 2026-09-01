@@ -223,7 +223,10 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
 
   <div id="view_outbound" class="tab-view">
     <div class="card">
-      <div class="card-header"><span>Outbound Dial Logs & AI Qualifications</span></div>
+      <div class="card-header">
+        <span>📲 Outbound Dial Logs & AI Qualifications</span>
+        <button class="btn btn-sm btn-cyan" onclick="loadCalls()">🔄 Refresh</button>
+      </div>
       <table>
         <thead>
           <tr>
@@ -244,9 +247,22 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
 
   <div id="view_inbound" class="tab-view">
     <div class="card">
-      <div class="card-header"><span>Inbound Calls & Qualifications</span></div>
+      <div class="card-header">
+        <span>📥 Inbound Calls & AI Qualifications</span>
+        <button class="btn btn-sm btn-cyan" onclick="loadCalls()">🔄 Refresh</button>
+      </div>
       <table>
-        <thead><tr><th>Time</th><th>Caller</th><th>Lead Score</th><th>Outcome</th><th>AI Summary</th><th>Duration</th><th>Cost</th></tr></thead>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Caller Phone</th>
+            <th>Score</th>
+            <th>Outcome</th>
+            <th>AI Summary</th>
+            <th>Duration</th>
+            <th>Cost</th>
+          </tr>
+        </thead>
         <tbody id="tbl_inbound"></tbody>
       </table>
     </div>
@@ -496,6 +512,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const loadCalls = async () => {
         try {
+            // 1. Fetch Inbound Calls
             const resIn = await fetch('/api/calls?direction=inbound');
             if (resIn.ok) {
                 const calls = await resIn.json();
@@ -506,15 +523,16 @@ document.addEventListener('DOMContentLoaded', () => {
                             <td>${c.timestamp ? c.timestamp.substring(11, 16) : '-'}</td>
                             <td><b>${c.phone_number || '-'}</b></td>
                             <td><span class="badge badge-${(c.lead_score||'cold').toLowerCase()}">${c.lead_score||'Cold'}</span></td>
-                            <td>${c.outcome || 'Completed'}</td>
-                            <td>${c.summary || '-'}</td>
+                            <td><span class="badge badge-booked">${c.outcome || 'Completed'}</span></td>
+                            <td>${c.summary || 'Property Inquiry call completed.'}</td>
                             <td>${c.duration_seconds || 0}s</td>
-                            <td style="color:#10B981; font-weight:600;">₹${c.cost_inr || '0.00'}</td>
+                            <td style="color:#10B981; font-weight:700;">₹${c.cost_inr || '0.00'}</td>
                         </tr>
-                    `).join('') : '<tr><td colspan="7" style="text-align:center; color:#64748B; padding:16px;">No inbound calls logged yet</td></tr>';
+                    `).join('') : '<tr><td colspan="7" style="text-align:center; color:#64748B; padding:20px;">No inbound calls recorded yet</td></tr>';
                 }
             }
 
+            // 2. Fetch Outbound Calls
             const resOut = await fetch('/api/calls?direction=outbound');
             if (resOut.ok) {
                 const calls = await resOut.json();
@@ -523,15 +541,15 @@ document.addEventListener('DOMContentLoaded', () => {
                     tblOut.innerHTML = calls.length ? calls.map(c => `
                         <tr>
                             <td>${c.timestamp ? c.timestamp.substring(11, 16) : '-'}</td>
-                            <td>${c.lead_name || 'Lead'}</td>
+                            <td><b>${c.lead_name || 'Lead'}</b></td>
                             <td><b>${c.phone_number || '-'}</b></td>
                             <td><span class="badge badge-${(c.lead_score||'cold').toLowerCase()}">${c.lead_score||'Cold'}</span></td>
-                            <td>${c.outcome || 'Completed'}</td>
-                            <td>${c.summary || '-'}</td>
+                            <td><span class="badge badge-booked">${c.outcome || 'Completed'}</span></td>
+                            <td>${c.summary || 'Property Inquiry call completed.'}</td>
                             <td>${c.duration_seconds || 0}s</td>
-                            <td style="color:#10B981; font-weight:600;">₹${c.cost_inr || '0.00'}</td>
+                            <td style="color:#10B981; font-weight:700;">₹${c.cost_inr || '0.00'}</td>
                         </tr>
-                    `).join('') : '<tr><td colspan="8" style="text-align:center; color:#64748B; padding:16px;">No outbound calls logged yet</td></tr>';
+                    `).join('') : '<tr><td colspan="8" style="text-align:center; color:#64748B; padding:20px;">No outbound calls recorded yet</td></tr>';
                 }
             }
         } catch (e) {
@@ -673,6 +691,26 @@ document.addEventListener('DOMContentLoaded', () => {
     loadClients();
     loadCRM();
     loadSettings();
+
+    // Auto-fetch calls whenever user clicks Outbound Logs or Inbound Logs tabs
+    document.querySelectorAll('.nav-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabName = tab.dataset.tab;
+            if (tabName === 'view_outbound' || tabName === 'view_inbound') {
+                loadCalls();
+            }
+            if (tabName === 'view_crm') {
+                loadCRM();
+            }
+            if (tabName === 'view_stats') {
+                loadStats();
+            }
+        });
+    });
+
+    // Real-time background polling
+    setInterval(loadCalls, 4000);
+    setInterval(loadCRM, 5000);
     setInterval(loadStats, 6000);
     setInterval(loadUnifiedLogs, 3000);
 });

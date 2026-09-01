@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import ssl
 import time
 import certifi
@@ -37,7 +38,7 @@ try:
 except ImportError:
     pass
 
-from db import push_unified_log, get_client_number_config
+from db import push_unified_log, get_client_number_config, log_call
 from prompts import build_prompt
 from tools import RealEstateTools
 
@@ -94,18 +95,20 @@ class KaamdhenuAssistant(Agent):
 
 async def entrypoint(ctx: agents.JobContext):
     call_id = ctx.room.name
+    call_start_time = time.time()
     await push_unified_log("LiveKit", "info", f"Job connected: {call_id}", call_id=call_id)
 
     direction = "outbound"
     phone_number = ""
-    lead_name = "there"
+    lead_name = "Lead"
     business_name = "Kaamdhenu Real Estate"
     service_type = "Luxury Properties"
     agent_name = "Priya"
+    campaign_id = None
     broker_phone = None
     custom_prompt = None
 
-    campaign_id = None
+    # Detect metadata for outbound
     if ctx.job.metadata:
         try:
             m = json.loads(ctx.job.metadata)
@@ -121,11 +124,31 @@ async def entrypoint(ctx: agents.JobContext):
         except Exception:
             pass
 
-    if direction == "inbound" or not phone_number:
+    # Detect inbound call & extract clean phone number
+    if "inbound" in call_id.lower() or direction == "inbound" or not phone_number:
         direction = "inbound"
+        lead_name = "Caller"
+        # Extract phone from participant identity or room name
         for p in ctx.room.remote_participants.values():
-            phone_number = p.identity.replace("sip_", "").strip()
-            break
+            raw_id = p.identity.replace("sip_", "").strip()
+            if raw_id:
+                phone_number = raw_id
+                break
+        if not phone_number:
+            match = re.search(r'(\+?\d{10,13})', call_id.replace("_", "+"))
+            if match:
+                phone_number = match.group(1)
+            else:
+                phone_number = "Inbound Caller"
+
+        vobiz_num = os.getenv("VOBIZ_OUTBOUND_NUMBER", "")
+        cfg = await get_client_number_config(vobiz_num)
+        if cfg:
+            business_name = cfg.get("business_name", business_name)
+            service_type = cfg.get("service_type", service_type)
+            agent_name = cfg.get("agent_name", agent_name)
+            broker_phone = cfg.get("broker_whatsapp_number", broker_phone)
+            if cfg.get("system_prompt"): custom_prompt = cfg.get("system_prompt")
 
     system_prompt = build_prompt(
         lead_name=lead_name,
@@ -146,6 +169,7 @@ async def entrypoint(ctx: agents.JobContext):
     )
 
     await ctx.connect()
+    await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
 
     session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt)
 
@@ -178,8 +202,9 @@ async def entrypoint(ctx: agents.JobContext):
                 return
 
     await session_start_task
+    await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
 
-    # Instant greeting
+    # Immediate opening greeting
     greeting_text = (
         f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I assist you with your property inquiry today?"
         if direction == "inbound" else
@@ -187,12 +212,10 @@ async def entrypoint(ctx: agents.JobContext):
     )
     try:
         await session.generate_reply(instructions=f"Speak immediately: {greeting_text}")
+        await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name}", call_id=call_id)
     except Exception:
         pass
 
-    call_start_ts = time.time()
-
-    # Disconnect Lifecycle Guard
     done_event = asyncio.Event()
     def _on_part_disconnected(p: rtc.RemoteParticipant):
         if p.identity.startswith("sip_"):
@@ -205,38 +228,36 @@ async def entrypoint(ctx: agents.JobContext):
     except asyncio.TimeoutError:
         pass
 
-    # GUARANTEED CALL LOGGING ON HANGUP
-    dur = max(1, int(time.time() - call_start_ts))
+    # GUARANTEED CALL LOGGING ON HANGUP/DISCONNECT
+    dur = max(1, int(time.time() - call_start_time))
     cost_inr = round((dur / 60.0) * 1.22, 2)
-    
-    # Check if end_call was already triggered by tool_ctx
-    if not getattr(tool_ctx, "_log_saved", False):
-        outcome = getattr(tool_ctx, "outcome", "completed")
-        lead_score = "Hot" if outcome == "booked" else ("Warm" if dur > 20 else "Cold")
-        summary = f"Call duration: {dur}s with {lead_name}. Outcome: {outcome}."
-        
-        try:
-            from db import log_call
-            await log_call(
-                call_id=call_id,
-                phone_number=phone_number,
-                called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
-                lead_name=lead_name,
-                direction=direction,
-                campaign_id=campaign_id,
-                outcome=outcome,
-                lead_score=lead_score,
-                summary=summary,
-                reason="",
-                duration_seconds=dur,
-                cost_inr=cost_inr,
-                recording_url=getattr(tool_ctx, "recording_url", None)
-            )
-            await push_unified_log("CRM", "info", f"Call logged ({direction}): {phone_number} - {dur}s, ₹{cost_inr}", call_id=call_id)
-        except Exception as e:
-            logger.error("Failed to save call log: %s", e)
+    clean_phone = phone_number.replace("_", "+").strip() or "Caller"
 
-    await push_unified_log("LiveKit", "info", f"Call session finalized: {phone_number}", call_id=call_id)
+    outcome = getattr(tool_ctx, "outcome", "completed")
+    lead_score = "Hot" if outcome == "booked" else ("Warm" if dur > 20 else "Cold")
+    summary = f"Spoke with {lead_name} ({clean_phone}) regarding {service_type}. Duration {dur}s. Lead qualified as {lead_score}."
+
+    try:
+        await log_call(
+            call_id=call_id,
+            phone_number=clean_phone,
+            called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
+            lead_name=lead_name,
+            direction=direction,
+            campaign_id=campaign_id,
+            outcome=outcome,
+            lead_score=lead_score,
+            summary=summary,
+            reason="",
+            duration_seconds=dur,
+            cost_inr=cost_inr,
+            recording_url=getattr(tool_ctx, "recording_url", None)
+        )
+        await push_unified_log("CRM", "info", f"Call saved to logs ({direction}): {clean_phone} - {dur}s, ₹{cost_inr}", call_id=call_id)
+    except Exception as e:
+        logger.error(f"Failed to save call log: {e}")
+
+    await push_unified_log("LiveKit", "info", f"Call session completed for {clean_phone}", call_id=call_id)
     await session.aclose()
 
 if __name__ == "__main__":
