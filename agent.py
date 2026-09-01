@@ -105,6 +105,7 @@ async def entrypoint(ctx: agents.JobContext):
     broker_phone = None
     custom_prompt = None
 
+    campaign_id = None
     if ctx.job.metadata:
         try:
             m = json.loads(ctx.job.metadata)
@@ -114,6 +115,7 @@ async def entrypoint(ctx: agents.JobContext):
             business_name = m.get("business_name", business_name)
             service_type = m.get("service_type", service_type)
             agent_name = m.get("agent_name", agent_name)
+            campaign_id = m.get("campaign_id")
             broker_phone = m.get("broker_phone")
             custom_prompt = m.get("system_prompt")
         except Exception:
@@ -139,6 +141,7 @@ async def entrypoint(ctx: agents.JobContext):
         lead_name=lead_name,
         direction=direction,
         call_id=call_id,
+        campaign_id=campaign_id,
         broker_phone=broker_phone
     )
 
@@ -187,6 +190,9 @@ async def entrypoint(ctx: agents.JobContext):
     except Exception:
         pass
 
+    call_start_ts = time.time()
+
+    # Disconnect Lifecycle Guard
     done_event = asyncio.Event()
     def _on_part_disconnected(p: rtc.RemoteParticipant):
         if p.identity.startswith("sip_"):
@@ -199,6 +205,38 @@ async def entrypoint(ctx: agents.JobContext):
     except asyncio.TimeoutError:
         pass
 
+    # GUARANTEED CALL LOGGING ON HANGUP
+    dur = max(1, int(time.time() - call_start_ts))
+    cost_inr = round((dur / 60.0) * 1.22, 2)
+    
+    # Check if end_call was already triggered by tool_ctx
+    if not getattr(tool_ctx, "_log_saved", False):
+        outcome = getattr(tool_ctx, "outcome", "completed")
+        lead_score = "Hot" if outcome == "booked" else ("Warm" if dur > 20 else "Cold")
+        summary = f"Call duration: {dur}s with {lead_name}. Outcome: {outcome}."
+        
+        try:
+            from db import log_call
+            await log_call(
+                call_id=call_id,
+                phone_number=phone_number,
+                called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
+                lead_name=lead_name,
+                direction=direction,
+                campaign_id=campaign_id,
+                outcome=outcome,
+                lead_score=lead_score,
+                summary=summary,
+                reason="",
+                duration_seconds=dur,
+                cost_inr=cost_inr,
+                recording_url=getattr(tool_ctx, "recording_url", None)
+            )
+            await push_unified_log("CRM", "info", f"Call logged ({direction}): {phone_number} - {dur}s, ₹{cost_inr}", call_id=call_id)
+        except Exception as e:
+            logger.error("Failed to save call log: %s", e)
+
+    await push_unified_log("LiveKit", "info", f"Call session finalized: {phone_number}", call_id=call_id)
     await session.aclose()
 
 if __name__ == "__main__":

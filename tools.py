@@ -25,6 +25,8 @@ class RealEstateTools(llm.ToolContext):
         self.sheets_webhook = sheets_webhook
         self._call_start_time = time.time()
         self.recording_url: Optional[str] = None
+        self._log_saved = False
+        self.outcome = "completed"
         super().__init__(tools=[])
 
     def get_all_tools(self):
@@ -205,6 +207,7 @@ class RealEstateTools(llm.ToolContext):
         """End call and finalize CRM logs with 2-line summary & lead scoring."""
         dur = int(time.time() - self._call_start_time)
         cost_inr = round((dur / 60.0) * 1.22, 2)
+        self.outcome = outcome
         if outcome == "booked":
             lead_score = "Hot"
         elif outcome == "callback_requested":
@@ -229,6 +232,7 @@ class RealEstateTools(llm.ToolContext):
                 cost_inr=cost_inr,
                 recording_url=self.recording_url
             )
+            self._log_saved = True
             if self.sheets_webhook:
                 asyncio.create_task(sync_google_sheets_row(self.sheets_webhook, {
                     "call_id": self.call_id,
