@@ -38,7 +38,7 @@ try:
 except ImportError:
     pass
 
-from db import push_unified_log, get_client_number_config, log_call
+from db import push_unified_log, log_call
 from prompts import build_prompt
 from tools import RealEstateTools
 
@@ -52,14 +52,14 @@ def _build_session(tools: list, system_prompt: str) -> AgentSession:
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # ULTRA-FAST 500ms PURE GEMINI REALTIME
+    # ULTRA-FAST PURE GEMINI REALTIME
     if use_realtime and _google_realtime is not None:
         try:
             from google.genai import types as _gt
             input_cfg = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=500,
+                    silence_duration_ms=600,
                     prefix_padding_ms=100
                 )
             )
@@ -100,7 +100,7 @@ async def entrypoint(ctx: agents.JobContext):
 
     direction = "outbound"
     phone_number = ""
-    lead_name = "Lead"
+    lead_name = "there"
     business_name = "Kaamdhenu Real Estate"
     service_type = "Luxury Properties"
     agent_name = "Priya"
@@ -108,157 +108,140 @@ async def entrypoint(ctx: agents.JobContext):
     broker_phone = None
     custom_prompt = None
 
-    # Detect metadata for outbound
-    if ctx.job.metadata:
-        try:
-            m = json.loads(ctx.job.metadata)
-            direction = m.get("direction", "outbound")
-            phone_number = m.get("phone_number", "")
-            lead_name = m.get("lead_name", lead_name)
-            business_name = m.get("business_name", business_name)
-            service_type = m.get("service_type", service_type)
-            agent_name = m.get("agent_name", agent_name)
-            campaign_id = m.get("campaign_id")
-            broker_phone = m.get("broker_phone")
-            custom_prompt = m.get("system_prompt")
-        except Exception:
-            pass
-
-    # Detect inbound call & extract clean phone number
-    if "inbound" in call_id.lower() or direction == "inbound" or not phone_number:
-        direction = "inbound"
-        lead_name = "Caller"
-        # Extract phone from participant identity or room name
-        for p in ctx.room.remote_participants.values():
-            raw_id = p.identity.replace("sip_", "").strip()
-            if raw_id:
-                phone_number = raw_id
-                break
-        if not phone_number:
-            match = re.search(r'(\+?\d{10,13})', call_id.replace("_", "+"))
-            if match:
-                phone_number = match.group(1)
-            else:
-                phone_number = "Inbound Caller"
-
-        vobiz_num = os.getenv("VOBIZ_OUTBOUND_NUMBER", "")
-        cfg = await get_client_number_config(vobiz_num)
-        if cfg:
-            business_name = cfg.get("business_name", business_name)
-            service_type = cfg.get("service_type", service_type)
-            agent_name = cfg.get("agent_name", agent_name)
-            broker_phone = cfg.get("broker_whatsapp_number", broker_phone)
-            if cfg.get("system_prompt"): custom_prompt = cfg.get("system_prompt")
-
-    system_prompt = build_prompt(
-        lead_name=lead_name,
-        business_name=business_name,
-        service_type=service_type,
-        agent_name=agent_name,
-        custom_prompt=custom_prompt
-    )
-
-    tool_ctx = RealEstateTools(
-        ctx,
-        phone_number=phone_number,
-        lead_name=lead_name,
-        direction=direction,
-        call_id=call_id,
-        campaign_id=campaign_id,
-        broker_phone=broker_phone
-    )
-
-    await ctx.connect()
-    await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
-
-    session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt)
-
-    # Start audio session concurrently
-    session_start_task = asyncio.create_task(session.start(
-        room=ctx.room,
-        agent=KaamdhenuAssistant(instructions=system_prompt),
-        room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
-    ))
-
-    # Pre-warmed outbound dial
-    if direction == "outbound" and phone_number:
-        trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
-        if trunk_id:
+    try:
+        # Outbound Metadata parsing
+        if ctx.job.metadata:
             try:
-                await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
-                await ctx.api.sip.create_sip_participant(
-                    api.CreateSIPParticipantRequest(
-                        room_name=ctx.room.name,
-                        sip_trunk_id=trunk_id,
-                        sip_call_to=phone_number,
-                        participant_identity=f"sip_{phone_number}",
-                        wait_until_answered=True
-                    )
-                )
-                await push_unified_log("SIP", "info", f"Call answered by {phone_number}", call_id=call_id)
-            except Exception as dial_err:
-                await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
-                ctx.shutdown()
-                return
+                m = json.loads(ctx.job.metadata)
+                direction = m.get("direction", "outbound")
+                phone_number = m.get("phone_number", "")
+                lead_name = m.get("lead_name", lead_name)
+                business_name = m.get("business_name", business_name)
+                service_type = m.get("service_type", service_type)
+                agent_name = m.get("agent_name", agent_name)
+                campaign_id = m.get("campaign_id")
+                broker_phone = m.get("broker_phone")
+                custom_prompt = m.get("system_prompt")
+            except Exception as e:
+                logger.warning(f"Metadata parse warning: {e}")
 
-    await session_start_task
-    await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
+        # Inbound detection
+        if "inbound" in call_id.lower() or not phone_number:
+            direction = "inbound"
+            lead_name = "Caller"
+            match = re.search(r'(\d{10,12})', call_id)
+            phone_number = f"+{match.group(1)}" if match else "+918065353767"
 
-    # Immediate opening greeting
-    greeting_text = (
-        f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I assist you with your property inquiry today?"
-        if direction == "inbound" else
-        f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your property inquiry."
-    )
-    try:
-        await session.generate_reply(instructions=f"Speak immediately: {greeting_text}")
-        await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name}", call_id=call_id)
-    except Exception:
-        pass
+        # Build prompt safely
+        system_prompt = build_prompt(
+            lead_name=lead_name,
+            business_name=business_name,
+            service_type=service_type,
+            agent_name=agent_name,
+            custom_prompt=custom_prompt
+        )
 
-    done_event = asyncio.Event()
-    def _on_part_disconnected(p: rtc.RemoteParticipant):
-        if p.identity.startswith("sip_"):
-            done_event.set()
-    ctx.room.on("participant_disconnected", _on_part_disconnected)
-    ctx.room.on("disconnected", lambda: done_event.set())
-
-    try:
-        await asyncio.wait_for(done_event.wait(), timeout=1800)
-    except asyncio.TimeoutError:
-        pass
-
-    # GUARANTEED CALL LOGGING ON HANGUP/DISCONNECT
-    dur = max(1, int(time.time() - call_start_time))
-    cost_inr = round((dur / 60.0) * 1.22, 2)
-    clean_phone = phone_number.replace("_", "+").strip() or "Caller"
-
-    outcome = getattr(tool_ctx, "outcome", "completed")
-    lead_score = "Hot" if outcome == "booked" else ("Warm" if dur > 20 else "Cold")
-    summary = f"Spoke with {lead_name} ({clean_phone}) regarding {service_type}. Duration {dur}s. Lead qualified as {lead_score}."
-
-    try:
-        await log_call(
-            call_id=call_id,
-            phone_number=clean_phone,
-            called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
+        tool_ctx = RealEstateTools(
+            ctx,
+            phone_number=phone_number,
             lead_name=lead_name,
             direction=direction,
+            call_id=call_id,
             campaign_id=campaign_id,
-            outcome=outcome,
-            lead_score=lead_score,
-            summary=summary,
-            reason="",
-            duration_seconds=dur,
-            cost_inr=cost_inr,
-            recording_url=getattr(tool_ctx, "recording_url", None)
+            broker_phone=broker_phone
         )
-        await push_unified_log("CRM", "info", f"Call saved to logs ({direction}): {clean_phone} - {dur}s, ₹{cost_inr}", call_id=call_id)
-    except Exception as e:
-        logger.error(f"Failed to save call log: {e}")
 
-    await push_unified_log("LiveKit", "info", f"Call session completed for {clean_phone}", call_id=call_id)
-    await session.aclose()
+        # Connect immediately
+        await ctx.connect()
+        await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
+
+        session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt)
+
+        session_start_task = asyncio.create_task(session.start(
+            room=ctx.room,
+            agent=KaamdhenuAssistant(instructions=system_prompt),
+            room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
+        ))
+
+        # Outbound dial
+        if direction == "outbound" and phone_number:
+            trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
+            if trunk_id:
+                try:
+                    await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
+                    await ctx.api.sip.create_sip_participant(
+                        api.CreateSIPParticipantRequest(
+                            room_name=ctx.room.name,
+                            sip_trunk_id=trunk_id,
+                            sip_call_to=phone_number,
+                            participant_identity=f"sip_{phone_number}",
+                            wait_until_answered=True
+                        )
+                    )
+                    await push_unified_log("SIP", "info", f"Call answered by {phone_number}", call_id=call_id)
+                except Exception as dial_err:
+                    await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
+                    ctx.shutdown()
+                    return
+
+        await session_start_task
+        await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
+
+        # Opening greeting
+        greeting_text = (
+            f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I help you today?"
+            if direction == "inbound" else
+            f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your inquiry."
+        )
+        try:
+            await session.generate_reply(instructions=f"Speak opening line: {greeting_text}")
+            await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name}", call_id=call_id)
+        except Exception as ge:
+            logger.warning(f"Greeting error: {ge}")
+
+        done_event = asyncio.Event()
+        def _on_part_disconnected(p: rtc.RemoteParticipant):
+            if p.identity.startswith("sip_"):
+                done_event.set()
+        ctx.room.on("participant_disconnected", _on_part_disconnected)
+        ctx.room.on("disconnected", lambda: done_event.set())
+
+        try:
+            await asyncio.wait_for(done_event.wait(), timeout=1800)
+        except asyncio.TimeoutError:
+            pass
+
+    except Exception as general_err:
+        await push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id)
+        logger.error(f"General error in entrypoint: {general_err}", exc_info=True)
+
+    finally:
+        # ALWAYS LOG CALL DATA
+        dur = max(1, int(time.time() - call_start_time))
+        cost_inr = round((dur / 60.0) * 1.22, 2)
+        clean_phone = phone_number or "Unknown"
+        lead_score = "Warm" if dur > 15 else "Cold"
+        summary = f"Call duration: {dur}s. Direction: {direction}. Qualified as {lead_score}."
+        try:
+            await log_call(
+                call_id=call_id,
+                phone_number=clean_phone,
+                called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
+                lead_name=lead_name,
+                direction=direction,
+                campaign_id=campaign_id,
+                outcome="completed",
+                lead_score=lead_score,
+                summary=summary,
+                reason="",
+                duration_seconds=dur,
+                cost_inr=cost_inr
+            )
+            await push_unified_log("CRM", "info", f"Call log saved ({direction}): {clean_phone} - {dur}s, ₹{cost_inr}", call_id=call_id)
+        except Exception as log_err:
+            logger.error(f"Failed to write call log: {log_err}")
+
+        await push_unified_log("LiveKit", "info", f"Call session completed for {clean_phone}", call_id=call_id)
 
 if __name__ == "__main__":
     agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint, agent_name="kaamdhenu-voice-agent"))

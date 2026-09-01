@@ -94,14 +94,28 @@ async def cancel_appointment(aid: str):
     return True
 
 async def log_call(call_id: str, phone_number: str, called_to: str, lead_name: str, direction: str, campaign_id: Optional[str], outcome: str, lead_score: str, summary: str, reason: str, duration_seconds: int, cost_inr: float, recording_url: Optional[str] = None):
-    db = await _adb()
-    await db.table("call_logs").upsert({
-        "id": call_id or str(uuid.uuid4()), "phone_number": phone_number, "called_to": called_to,
-        "lead_name": lead_name, "direction": direction, "campaign_id": campaign_id,
-        "outcome": outcome, "lead_score": lead_score, "summary": summary, "reason": reason,
-        "duration_seconds": duration_seconds, "cost_inr": cost_inr, "recording_url": recording_url,
-        "timestamp": datetime.utcnow().isoformat()
-    }, on_conflict="id").execute()
+    try:
+        db = await _adb()
+        row = {
+            "id": call_id or str(uuid.uuid4()),
+            "phone_number": phone_number,
+            "called_to": called_to,
+            "lead_name": lead_name,
+            "direction": direction,
+            "outcome": outcome,
+            "lead_score": lead_score,
+            "summary": summary,
+            "duration_seconds": int(duration_seconds),
+            "cost_inr": float(cost_inr),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        if campaign_id:
+            row["campaign_id"] = campaign_id
+        if recording_url:
+            row["recording_url"] = recording_url
+        await db.table("call_logs").upsert(row, on_conflict="id").execute()
+    except Exception as e:
+        logger.error(f"Error executing log_call upsert: {e}")
 
 async def get_calls(direction: Optional[str] = None, campaign_id: Optional[str] = None, limit: int = 100):
     db = await _adb()

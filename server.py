@@ -77,7 +77,11 @@ async def api_clear_logs():
 
 @app.get("/api/calls")
 async def api_calls(direction: Optional[str] = None, campaign_id: Optional[str] = None):
-    return await get_calls(direction=direction, campaign_id=campaign_id)
+    try:
+        return await get_calls(direction=direction, campaign_id=campaign_id)
+    except Exception as e:
+        logger.error(f"Error fetching calls: {e}")
+        return []
 
 @app.get("/api/crm")
 async def api_crm(phone: Optional[str] = None):
