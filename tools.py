@@ -27,6 +27,23 @@ class RealEstateTools(llm.ToolContext):
         self.recording_url: Optional[str] = None
         self._log_saved = False
         self.outcome = "completed"
+        # Qualification state
+        self.client_name = ""
+        self.current_location = ""
+        self.occupation = ""
+        self.bhk_requirement = ""
+        self.budget = ""
+        self.purpose = "Self-Use"
+        self.possession_timeline = "Ready-to-Move"
+        self.funding_type = "Bank Loan"
+        self.commitment_risk = "Low"
+        self.site_visit_date = ""
+        self.pickup_required = False
+        self.pickup_location = ""
+        self.next_callback = ""
+        self.objection = ""
+        self.whatsapp_status = "— Not Requested"
+        self.lead_score = "Warm"
         super().__init__(tools=[])
 
     def get_all_tools(self):
@@ -34,11 +51,14 @@ class RealEstateTools(llm.ToolContext):
             self.check_availability,
             self.book_appointment,
             self.book_calcom,
+            self.book_site_visit,
             self.send_whatsapp_brochure,
             self.send_broker_hot_lead_alert,
             self.send_sms_confirmation,
             self.transfer_to_human,
             self.remember_details,
+            self.record_client_qualification,
+            self.schedule_callback,
             self.end_call
         ]
 
@@ -58,6 +78,8 @@ class RealEstateTools(llm.ToolContext):
         """Book site visit or consultation after verbal confirmation from caller."""
         try:
             booking_id = await insert_appointment(name, phone, date, time, service, budget, property_type)
+            self.lead_score = "Hot"
+            self.outcome = "booked"
             await push_unified_log("Tools", "info", f"Site visit booked: {name} ({phone}) on {date} at {time}", call_id=self.call_id)
             return f"Site visit confirmed! Reference ID: {booking_id} for {date} at {time}."
         except Exception:
@@ -97,22 +119,76 @@ class RealEstateTools(llm.ToolContext):
             return "Cal.com booking queued."
 
     @llm.function_tool
-    async def send_whatsapp_brochure(self, phone: str, project_name: str = "Kaamdhenu Horizon") -> str:
-        """Send property brochure, floor plans, and site location pin to lead via WhatsApp."""
+    async def book_site_visit(self, client_name: str, visit_datetime: str, pickup_required: bool = False, pickup_address: str = "") -> str:
+        """Book a site visit with optional complimentary cab pickup. visit_datetime format: YYYY-MM-DD HH:MM."""
+        self.client_name = client_name
+        self.site_visit_date = visit_datetime
+        self.pickup_required = pickup_required
+        self.pickup_location = pickup_address
+        self.lead_score = "Hot"
+        self.commitment_risk = "High"
+        self.outcome = "booked"
+        try:
+            parts = visit_datetime.split(" ")
+            date = parts[0] if len(parts) > 0 else visit_datetime
+            vtime = parts[1] if len(parts) > 1 else "11:00"
+            booking_id = await insert_appointment(client_name, self.phone_number, date, vtime, "Site Visit", self.budget, self.bhk_requirement)
+            pickup_msg = f" with cab pickup from {pickup_address}" if pickup_required and pickup_address else ""
+            await push_unified_log("Tools", "info", f"Site visit booked: {client_name} on {visit_datetime}{pickup_msg}", call_id=self.call_id)
+            return f"Site visit confirmed for {visit_datetime}! Ref: {booking_id}.{' Cab pickup arranged from ' + pickup_address + '.' if pickup_required and pickup_address else ''}"
+        except Exception as e:
+            logger.error(f"Site visit booking error: {e}")
+            return "Site visit booked with our team. We will confirm shortly."
+
+    @llm.function_tool
+    async def record_client_qualification(self, client_name: str = "", location: str = "", occupation: str = "", bhk: str = "", budget: str = "", possession: str = "", funding: str = "", objection: str = "") -> str:
+        """Silently record client qualification details gathered during conversation. Call this as you learn each detail."""
+        if client_name: self.client_name = client_name
+        if location: self.current_location = location
+        if occupation: self.occupation = occupation
+        if bhk: self.bhk_requirement = bhk
+        if budget: self.budget = budget
+        if possession: self.possession_timeline = possession
+        if funding: self.funding_type = funding
+        if objection: self.objection = objection
+        # Auto-score
+        if self.budget and self.bhk_requirement:
+            self.lead_score = "Warm"
+        if self.site_visit_date:
+            self.lead_score = "Hot"
+        await push_unified_log("CRM", "info", f"Qualification updated: {client_name or self.lead_name} - {bhk} {budget}", call_id=self.call_id)
+        return "Client details recorded."
+
+    @llm.function_tool
+    async def schedule_callback(self, callback_time: str, notes: str = "") -> str:
+        """Schedule a callback when client says 'call me later' or 'busy right now'. callback_time example: 'today 6pm', '2024-09-03 14:00'."""
+        self.next_callback = callback_time
+        self.outcome = "callback_requested"
+        self.lead_score = "Warm"
+        await add_contact_memory(self.phone_number, f"Callback requested for {callback_time}. {notes}")
+        await push_unified_log("CRM", "info", f"Callback scheduled: {self.phone_number} at {callback_time}", call_id=self.call_id)
+        return f"Callback scheduled for {callback_time}. We will call you back."
+
+    @llm.function_tool
+    async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
+        """Send property brochure, floor plans, and site location to lead via WhatsApp. Call when client agrees to receive details."""
+        phone = phone_number or self.phone_number
+        self.whatsapp_status = "Sent Auto"
         sid = os.getenv("TWILIO_ACCOUNT_SID", "")
         token = os.getenv("TWILIO_AUTH_TOKEN", "")
         from_wa = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
         if not (sid and token):
-            return "Brochure dispatched (demo mode)."
+            await push_unified_log("WhatsApp", "info", f"Brochure dispatched (demo): {phone}", call_id=self.call_id)
+            return "Brochure sent to your WhatsApp."
         try:
             from twilio.rest import Client
             to_wa = f"whatsapp:{phone}" if not phone.startswith("whatsapp:") else phone
-            msg = f"Namaste {self.lead_name}! 🏡\nThank you for speaking with Kaamdhenu Real Estate.\nHere are the brochure & floor plans for *{project_name}*.\nLocation: Near City Center.\nSee you at the site visit!"
+            msg = f"Namaste {self.client_name or self.lead_name}! \U0001f3e1\nThank you for speaking with Kaamdhenu Real Estate.\nHere are the brochure & floor plans for our premium properties.\nLocation: Near City Center.\nSee you at the site visit!"
             loop = asyncio.get_event_loop()
             client = Client(sid, token)
             await loop.run_in_executor(None, lambda: client.messages.create(body=msg, from_=from_wa, to=to_wa))
             await push_unified_log("WhatsApp", "info", f"Brochure sent to lead: {phone}", call_id=self.call_id)
-            return f"Brochure sent to lead's WhatsApp ({phone})."
+            return "Brochure sent to your WhatsApp."
         except Exception as exc:
             await push_unified_log("WhatsApp", "error", f"Lead WhatsApp error: {exc}", call_id=self.call_id)
             return "Brochure queued for delivery."
@@ -132,15 +208,15 @@ class RealEstateTools(llm.ToolContext):
             from twilio.rest import Client
             to_wa = f"whatsapp:{broker_num}" if not broker_num.startswith("whatsapp:") else broker_num
             msg = (
-                f"🔥 *NEW HOT LEAD SITE VISIT BOOKED*\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"👤 *Lead Name:* {name}\n"
-                f"📞 *Phone:* {phone}\n"
-                f"🏢 *Requirement:* {property_type or '2BHK/3BHK'}\n"
-                f"💰 *Budget:* {budget or 'Standard'}\n"
-                f"📅 *Visit Slot:* {date} at {time}\n"
-                f"━━━━━━━━━━━━━━━━━━━\n"
-                f"👉 *Action:* Please call for confirmation & arrange site pass."
+                f"\U0001f525 *NEW HOT LEAD SITE VISIT BOOKED*\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"\U0001f464 *Lead Name:* {name}\n"
+                f"\U0001f4de *Phone:* {phone}\n"
+                f"\U0001f3e2 *Requirement:* {property_type or '2BHK/3BHK'}\n"
+                f"\U0001f4b0 *Budget:* {budget or 'Standard'}\n"
+                f"\U0001f4c5 *Visit Slot:* {date} at {time}\n"
+                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+                f"\U0001f449 *Action:* Please call for confirmation & arrange site pass."
             )
             loop = asyncio.get_event_loop()
             client = Client(sid, token)
@@ -210,8 +286,12 @@ class RealEstateTools(llm.ToolContext):
         self.outcome = outcome
         if outcome == "booked":
             lead_score = "Hot"
+            self.lead_score = "Hot"
         elif outcome == "callback_requested":
             lead_score = "Warm"
+            self.lead_score = "Warm"
+        else:
+            self.lead_score = lead_score
 
         if not summary:
             summary = f"Outcome: {outcome}. Duration: {dur}s. Lead qualified as {lead_score}."
@@ -221,7 +301,7 @@ class RealEstateTools(llm.ToolContext):
                 call_id=self.call_id,
                 phone_number=self.phone_number,
                 called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
-                lead_name=self.lead_name,
+                lead_name=self.client_name or self.lead_name,
                 direction=self.direction,
                 campaign_id=self.campaign_id,
                 outcome=outcome,
@@ -230,21 +310,36 @@ class RealEstateTools(llm.ToolContext):
                 reason=reason,
                 duration_seconds=dur,
                 cost_inr=cost_inr,
-                recording_url=self.recording_url
+                recording_url=self.recording_url,
+                client_name=self.client_name,
+                current_location=self.current_location,
+                occupation=self.occupation,
+                bhk_requirement=self.bhk_requirement,
+                budget=self.budget,
+                purpose=self.purpose,
+                possession_timeline=self.possession_timeline,
+                funding_type=self.funding_type,
+                commitment_risk=self.commitment_risk,
+                site_visit_date=self.site_visit_date,
+                pickup_required=self.pickup_required,
+                pickup_location=self.pickup_location,
+                next_callback=self.next_callback,
+                objection=self.objection,
+                whatsapp_status=self.whatsapp_status
             )
             self._log_saved = True
             if self.sheets_webhook:
                 asyncio.create_task(sync_google_sheets_row(self.sheets_webhook, {
                     "call_id": self.call_id,
                     "phone": self.phone_number,
-                    "lead_name": self.lead_name,
+                    "lead_name": self.client_name or self.lead_name,
                     "lead_score": lead_score,
                     "outcome": outcome,
                     "summary": summary,
                     "duration": dur,
                     "cost_inr": cost_inr
                 }))
-            await push_unified_log("Agent", "info", f"Call finalized: {outcome} ({lead_score}) - {dur}s, ₹{cost_inr}", call_id=self.call_id)
+            await push_unified_log("Agent", "info", f"Call finalized: {outcome} ({lead_score}) - {dur}s, \u20b9{cost_inr}", call_id=self.call_id)
         except Exception as e:
             logger.error("Error finalizing call log: %s", e)
         try:

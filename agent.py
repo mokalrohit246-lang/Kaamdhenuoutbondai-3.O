@@ -107,6 +107,7 @@ async def entrypoint(ctx: agents.JobContext):
     campaign_id = None
     broker_phone = None
     custom_prompt = None
+    tool_ctx = None
 
     try:
         # Outbound Metadata parsing
@@ -216,26 +217,61 @@ async def entrypoint(ctx: agents.JobContext):
         logger.error(f"General error in entrypoint: {general_err}", exc_info=True)
 
     finally:
-        # ALWAYS LOG CALL DATA
+        # ALWAYS LOG CALL DATA WITH ALL QUALIFICATION FIELDS
         dur = max(1, int(time.time() - call_start_time))
         cost_inr = round((dur / 60.0) * 1.22, 2)
         clean_phone = phone_number or "Unknown"
-        lead_score = "Warm" if dur > 15 else "Cold"
-        summary = f"Call duration: {dur}s. Direction: {direction}. Qualified as {lead_score}."
+
+        # Extract from tool_ctx if available
+        t_client_name = getattr(tool_ctx, "client_name", "") or lead_name
+        t_location = getattr(tool_ctx, "current_location", "")
+        t_occupation = getattr(tool_ctx, "occupation", "")
+        t_bhk = getattr(tool_ctx, "bhk_requirement", "")
+        t_budget = getattr(tool_ctx, "budget", "")
+        t_purpose = getattr(tool_ctx, "purpose", "Self-Use")
+        t_possession = getattr(tool_ctx, "possession_timeline", "Ready-to-Move")
+        t_funding = getattr(tool_ctx, "funding_type", "Bank Loan")
+        t_lead_score = getattr(tool_ctx, "lead_score", "Warm" if dur > 15 else "Cold")
+        t_commitment = getattr(tool_ctx, "commitment_risk", "Low")
+        t_site_visit = getattr(tool_ctx, "site_visit_date", "")
+        t_pickup = getattr(tool_ctx, "pickup_required", False)
+        t_pickup_loc = getattr(tool_ctx, "pickup_location", "")
+        t_callback = getattr(tool_ctx, "next_callback", "")
+        t_objection = getattr(tool_ctx, "objection", "")
+        t_whatsapp = getattr(tool_ctx, "whatsapp_status", "— Not Requested")
+        t_outcome = getattr(tool_ctx, "outcome", "completed")
+
+        summary = f"{t_client_name} ({clean_phone}): {t_bhk or 'TBD'} | Budget: {t_budget or 'TBD'} | {t_purpose} | Score: {t_lead_score} | Duration: {dur}s"
+
         try:
             await log_call(
                 call_id=call_id,
                 phone_number=clean_phone,
                 called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
-                lead_name=lead_name,
+                lead_name=t_client_name,
                 direction=direction,
                 campaign_id=campaign_id,
-                outcome="completed",
-                lead_score=lead_score,
+                outcome=t_outcome,
+                lead_score=t_lead_score,
                 summary=summary,
                 reason="",
                 duration_seconds=dur,
-                cost_inr=cost_inr
+                cost_inr=cost_inr,
+                client_name=t_client_name,
+                current_location=t_location,
+                occupation=t_occupation,
+                bhk_requirement=t_bhk,
+                budget=t_budget,
+                purpose=t_purpose,
+                possession_timeline=t_possession,
+                funding_type=t_funding,
+                commitment_risk=t_commitment,
+                site_visit_date=t_site_visit,
+                pickup_required=t_pickup,
+                pickup_location=t_pickup_loc,
+                next_callback=t_callback,
+                objection=t_objection,
+                whatsapp_status=t_whatsapp
             )
             await push_unified_log("CRM", "info", f"Call log saved ({direction}): {clean_phone} - {dur}s, ₹{cost_inr}", call_id=call_id)
         except Exception as log_err:

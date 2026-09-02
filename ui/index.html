@@ -227,21 +227,27 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <span>📲 Outbound Dial Logs & AI Qualifications</span>
         <button class="btn btn-sm btn-cyan" onclick="loadCalls()">🔄 Refresh</button>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Lead</th>
-            <th>Phone</th>
-            <th>Score</th>
-            <th>Outcome</th>
-            <th>AI Summary</th>
-            <th>Duration</th>
-            <th>Cost</th>
-          </tr>
-        </thead>
-        <tbody id="tbl_outbound"></tbody>
-      </table>
+      <div style="overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px; border:1px solid #1E293B;">
+        <table style="min-width:1400px;">
+          <thead>
+            <tr>
+              <th>Time & Dur</th>
+              <th>Client & Phone</th>
+              <th>Location & Job</th>
+              <th>BHK & Budget</th>
+              <th>Timeline & Loan</th>
+              <th>Lead Score</th>
+              <th>Site Visit & Cab</th>
+              <th>Next Callback</th>
+              <th>Main Objection</th>
+              <th>WhatsApp</th>
+              <th>AI Ground Summary</th>
+              <th>Cost</th>
+            </tr>
+          </thead>
+          <tbody id="tbl_outbound"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -251,20 +257,27 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <span>📥 Inbound Calls & AI Qualifications</span>
         <button class="btn btn-sm btn-cyan" onclick="loadCalls()">🔄 Refresh</button>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Caller Phone</th>
-            <th>Score</th>
-            <th>Outcome</th>
-            <th>AI Summary</th>
-            <th>Duration</th>
-            <th>Cost</th>
-          </tr>
-        </thead>
-        <tbody id="tbl_inbound"></tbody>
-      </table>
+      <div style="overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px; border:1px solid #1E293B;">
+        <table style="min-width:1400px;">
+          <thead>
+            <tr>
+              <th>Time & Dur</th>
+              <th>Client & Phone</th>
+              <th>Location & Job</th>
+              <th>BHK & Budget</th>
+              <th>Timeline & Loan</th>
+              <th>Lead Score</th>
+              <th>Site Visit & Cab</th>
+              <th>Next Callback</th>
+              <th>Main Objection</th>
+              <th>WhatsApp</th>
+              <th>AI Ground Summary</th>
+              <th>Cost</th>
+            </tr>
+          </thead>
+          <tbody id="tbl_inbound"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -510,46 +523,61 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) {}
     };
 
+    const _scoreBadge = (s) => {
+        const sl = (s||'cold').toLowerCase();
+        if (sl === 'hot') return '<span style="background:#EF4444;color:#fff;padding:2px 8px;border-radius:6px;font-size:11px;">🔥 Hot</span>';
+        if (sl === 'warm') return '<span style="background:#F59E0B;color:#000;padding:2px 8px;border-radius:6px;font-size:11px;">🟡 Warm</span>';
+        if (sl === 'tp' || sl === 'not_interested') return '<span style="background:#64748B;color:#fff;padding:2px 8px;border-radius:6px;font-size:11px;">🚫 TP</span>';
+        return '<span style="background:#3B82F6;color:#fff;padding:2px 8px;border-radius:6px;font-size:11px;">❄️ Cold</span>';
+    };
+    const _waBadge = (s) => {
+        if (s && s.includes('Sent')) return '<span style="color:#10B981;font-weight:600;">✅ Sent Auto</span>';
+        return '<span style="color:#64748B;">— Not Requested</span>';
+    };
+    const _pickupInfo = (c) => {
+        const sv = c.site_visit_date || '';
+        const pu = c.pickup_required;
+        const loc = c.pickup_location || '';
+        let out = sv || '—';
+        if (pu && loc) out += `<br><span style="color:#06B6D4;">🚗 Pickup: ${loc}</span>`;
+        else if (sv) out += '<br><span style="color:#64748B;">❌ Self-Drive</span>';
+        return out;
+    };
+
+    const _renderRow = (c) => `
+        <tr>
+            <td>${c.timestamp ? c.timestamp.substring(11,16) : '-'} <span style="color:#94A3B8;">(${c.duration_seconds||0}s)</span></td>
+            <td><b>${c.client_name || c.lead_name || 'Lead'}</b><br><span style="color:#94A3B8;">${c.phone_number || '-'}</span></td>
+            <td>${c.current_location || '-'}<br><span style="color:#94A3B8;">${c.occupation || '-'}</span></td>
+            <td>${c.bhk_requirement || '-'}<br><span style="color:#F59E0B;">${c.budget || '-'}</span></td>
+            <td>${c.possession_timeline || '-'}<br><span style="color:#94A3B8;">${c.funding_type || '-'}</span></td>
+            <td>${_scoreBadge(c.lead_score)}</td>
+            <td>${_pickupInfo(c)}</td>
+            <td>${c.next_callback || '—'}</td>
+            <td>${c.objection || '—'}</td>
+            <td>${_waBadge(c.whatsapp_status)}</td>
+            <td style="max-width:200px;white-space:normal;">${c.summary || 'Property inquiry call.'}</td>
+            <td style="color:#10B981;font-weight:700;">₹${c.cost_inr || '0.00'}</td>
+        </tr>
+    `;
+
     const loadCalls = async () => {
         try {
-            // 1. Fetch Inbound Calls
             const resIn = await fetch('/api/calls?direction=inbound');
             if (resIn.ok) {
                 const calls = await resIn.json();
                 const tblIn = document.getElementById('tbl_inbound');
                 if (tblIn) {
-                    tblIn.innerHTML = calls.length ? calls.map(c => `
-                        <tr>
-                            <td>${c.timestamp ? c.timestamp.substring(11, 16) : '-'}</td>
-                            <td><b>${c.phone_number || '-'}</b></td>
-                            <td><span class="badge badge-${(c.lead_score||'cold').toLowerCase()}">${c.lead_score||'Cold'}</span></td>
-                            <td><span class="badge badge-booked">${c.outcome || 'Completed'}</span></td>
-                            <td>${c.summary || 'Property Inquiry call completed.'}</td>
-                            <td>${c.duration_seconds || 0}s</td>
-                            <td style="color:#10B981; font-weight:700;">₹${c.cost_inr || '0.00'}</td>
-                        </tr>
-                    `).join('') : '<tr><td colspan="7" style="text-align:center; color:#64748B; padding:20px;">No inbound calls recorded yet</td></tr>';
+                    tblIn.innerHTML = calls.length ? calls.map(_renderRow).join('') : '<tr><td colspan="12" style="text-align:center;color:#64748B;padding:20px;">No inbound calls recorded yet</td></tr>';
                 }
             }
 
-            // 2. Fetch Outbound Calls
             const resOut = await fetch('/api/calls?direction=outbound');
             if (resOut.ok) {
                 const calls = await resOut.json();
                 const tblOut = document.getElementById('tbl_outbound');
                 if (tblOut) {
-                    tblOut.innerHTML = calls.length ? calls.map(c => `
-                        <tr>
-                            <td>${c.timestamp ? c.timestamp.substring(11, 16) : '-'}</td>
-                            <td><b>${c.lead_name || 'Lead'}</b></td>
-                            <td><b>${c.phone_number || '-'}</b></td>
-                            <td><span class="badge badge-${(c.lead_score||'cold').toLowerCase()}">${c.lead_score||'Cold'}</span></td>
-                            <td><span class="badge badge-booked">${c.outcome || 'Completed'}</span></td>
-                            <td>${c.summary || 'Property Inquiry call completed.'}</td>
-                            <td>${c.duration_seconds || 0}s</td>
-                            <td style="color:#10B981; font-weight:700;">₹${c.cost_inr || '0.00'}</td>
-                        </tr>
-                    `).join('') : '<tr><td colspan="8" style="text-align:center; color:#64748B; padding:20px;">No outbound calls recorded yet</td></tr>';
+                    tblOut.innerHTML = calls.length ? calls.map(_renderRow).join('') : '<tr><td colspan="12" style="text-align:center;color:#64748B;padding:20px;">No outbound calls recorded yet</td></tr>';
                 }
             }
         } catch (e) {

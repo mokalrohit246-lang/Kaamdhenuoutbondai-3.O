@@ -1,8 +1,11 @@
+import logging
 import os
 import uuid
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
+
+logger = logging.getLogger("kaamdhenu-db")
 
 def _adb():
     from supabase._async.client import create_client
@@ -93,7 +96,18 @@ async def cancel_appointment(aid: str):
     await db.table("appointments").update({"status": "cancelled"}).eq("id", aid).execute()
     return True
 
-async def log_call(call_id: str, phone_number: str, called_to: str, lead_name: str, direction: str, campaign_id: Optional[str], outcome: str, lead_score: str, summary: str, reason: str, duration_seconds: int, cost_inr: float, recording_url: Optional[str] = None):
+async def log_call(
+    call_id: str, phone_number: str, called_to: str, lead_name: str,
+    direction: str, campaign_id: Optional[str], outcome: str, lead_score: str,
+    summary: str, reason: str, duration_seconds: int, cost_inr: float,
+    recording_url: Optional[str] = None,
+    client_name: str = "", current_location: str = "", occupation: str = "",
+    bhk_requirement: str = "", budget: str = "", purpose: str = "Self-Use",
+    possession_timeline: str = "Ready-to-Move", funding_type: str = "Bank Loan",
+    commitment_risk: str = "Low", site_visit_date: str = "",
+    pickup_required: bool = False, pickup_location: str = "",
+    next_callback: str = "", objection: str = "", whatsapp_status: str = "— Not Requested"
+):
     try:
         db = await _adb()
         row = {
@@ -107,7 +121,22 @@ async def log_call(call_id: str, phone_number: str, called_to: str, lead_name: s
             "summary": summary,
             "duration_seconds": int(duration_seconds),
             "cost_inr": float(cost_inr),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "client_name": client_name or lead_name,
+            "current_location": current_location,
+            "occupation": occupation,
+            "bhk_requirement": bhk_requirement,
+            "budget": budget,
+            "purpose": purpose,
+            "possession_timeline": possession_timeline,
+            "funding_type": funding_type,
+            "commitment_risk": commitment_risk,
+            "site_visit_date": site_visit_date,
+            "pickup_required": pickup_required,
+            "pickup_location": pickup_location,
+            "next_callback": next_callback,
+            "objection": objection,
+            "whatsapp_status": whatsapp_status
         }
         if campaign_id:
             row["campaign_id"] = campaign_id
