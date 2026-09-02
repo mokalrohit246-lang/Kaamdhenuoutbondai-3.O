@@ -106,7 +106,8 @@ async def log_call(
     possession_timeline: str = "Ready-to-Move", funding_type: str = "Bank Loan",
     commitment_risk: str = "Low", site_visit_date: str = "",
     pickup_required: bool = False, pickup_location: str = "",
-    next_callback: str = "", objection: str = "", whatsapp_status: str = "— Not Requested"
+    next_callback: str = "", objection: str = "", whatsapp_status: str = "— Not Requested",
+    **kwargs
 ):
     try:
         db = await _adb()
@@ -138,6 +139,8 @@ async def log_call(
             "objection": objection,
             "whatsapp_status": whatsapp_status
         }
+        for k, v in kwargs.items():
+            row[k] = v
         if campaign_id:
             row["campaign_id"] = campaign_id
         if recording_url:
@@ -201,3 +204,97 @@ async def save_settings_dict(data: dict):
     rows = [{"key": k, "value": str(v), "updated_at": now_iso} for k, v in data.items() if v is not None]
     if rows:
         await db.table("settings").upsert(rows, on_conflict="key").execute()
+
+
+# Agent Profiles CRUD
+async def list_agent_profiles():
+    db = await _adb()
+    res = await db.table("agent_profiles").select("*").order("created_at", desc=True).execute()
+    return res.data or []
+
+async def save_agent_profile(data: dict):
+    db = await _adb()
+    pid = data.get("id") or str(uuid.uuid4())
+    data["id"] = pid
+    data["created_at"] = datetime.utcnow().isoformat()
+    await db.table("agent_profiles").upsert(data, on_conflict="id").execute()
+    return pid
+
+async def delete_agent_profile(pid: str):
+    db = await _adb()
+    await db.table("agent_profiles").delete().eq("id", pid).execute()
+
+async def get_agent_profile(pid: str):
+    db = await _adb()
+    res = await db.table("agent_profiles").select("*").eq("id", pid).maybe_single().execute()
+    return res.data if res else None
+
+# Campaigns CRUD
+async def list_campaigns():
+    db = await _adb()
+    res = await db.table("campaigns").select("*").order("created_at", desc=True).execute()
+    return res.data or []
+
+async def create_campaign(data: dict):
+    db = await _adb()
+    cid = data.get("id") or str(uuid.uuid4())
+    data["id"] = cid
+    data["created_at"] = datetime.utcnow().isoformat()
+    data.setdefault("status", "active")
+    data.setdefault("consumed_minutes", 0)
+    await db.table("campaigns").upsert(data, on_conflict="id").execute()
+    return cid
+
+async def update_campaign_status(cid: str, status: str):
+    db = await _adb()
+    await db.table("campaigns").update({"status": status}).eq("id", cid).execute()
+
+async def add_campaign_minutes(campaign_id: str, minutes: float):
+    """Add consumed minutes. Auto-sets status to quota_exhausted if over limit."""
+    try:
+        db = await _adb()
+        res = await db.table("campaigns").select("consumed_minutes, allocated_minutes").eq("id", campaign_id).maybe_single().execute()
+        if res and res.data:
+            current = float(res.data.get("consumed_minutes", 0))
+            allocated = float(res.data.get("allocated_minutes", 999999))
+            new_total = round(current + minutes, 2)
+            update = {"consumed_minutes": new_total}
+            if new_total >= allocated:
+                update["status"] = "quota_exhausted"
+            await db.table("campaigns").update(update).eq("id", campaign_id).execute()
+    except Exception as e:
+        logger.error(f"Error adding campaign minutes: {e}")
+
+# Smart Context Routing
+async def find_recent_outbound_context(caller_phone: str):
+    """Find if this caller was recently called in an outbound campaign (last 7 days)."""
+    try:
+        db = await _adb()
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        clean = caller_phone.replace("+", "").replace("sip_", "").strip()
+        res = await db.table("call_logs").select("*").eq("direction", "outbound").ilike("phone_number", f"%{clean}%").gte("timestamp", cutoff).order("timestamp", desc=True).limit(1).execute()
+        if res.data and len(res.data) > 0:
+            row = res.data[0]
+            return {
+                "found": True,
+                "campaign_id": row.get("campaign_id", ""),
+                "lead_name": row.get("lead_name", "there"),
+                "project_name": row.get("client_name", "") or row.get("lead_name", ""),
+                "broker_phone": "",
+                "prompt": ""
+            }
+        return {"found": False}
+    except Exception as e:
+        logger.error(f"Error finding outbound context: {e}")
+        return {"found": False}
+
+async def find_campaign_by_inbound_number(number: str):
+    """Find campaign by dedicated inbound number."""
+    try:
+        db = await _adb()
+        clean = number.replace("+", "").replace("sip_", "").strip()
+        res = await db.table("campaigns").select("*").ilike("dedicated_inbound_number", f"%{clean}%").eq("status", "active").maybe_single().execute()
+        return res.data if res else None
+    except Exception:
+        return None

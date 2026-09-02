@@ -10,6 +10,7 @@ import certifi
 import aiohttp
 from pathlib import Path
 from typing import Optional, List
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -26,7 +27,9 @@ from db import (
     push_unified_log, get_unified_logs, clear_unified_logs,
     list_client_numbers, save_client_number, delete_client_number,
     get_calls, get_stats_data, get_all_appointments, cancel_appointment,
-    get_settings, save_settings_dict, get_contact_memory
+    get_settings, save_settings_dict, get_contact_memory,
+    list_agent_profiles, save_agent_profile, delete_agent_profile, get_agent_profile,
+    list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number
 )
 
 load_dotenv(".env", override=True)
@@ -312,3 +315,93 @@ async def api_dispatch(req: SingleCallReq):
     except Exception as e:
         await push_unified_log("API", "error", f"Dispatch failed: {e}")
         raise HTTPException(500, str(e))
+
+# Agent Profiles API
+@app.get("/api/agent-profiles")
+async def api_list_agents():
+    return await list_agent_profiles()
+
+@app.post("/api/agent-profiles")
+async def api_save_agent(req: Request):
+    data = await req.json()
+    pid = await save_agent_profile(data)
+    return {"status": "saved", "id": pid}
+
+@app.delete("/api/agent-profiles/{pid}")
+async def api_del_agent(pid: str):
+    await delete_agent_profile(pid)
+    return {"status": "deleted"}
+
+# Campaign APIs
+@app.get("/api/campaigns")
+async def api_list_campaigns():
+    return await list_campaigns()
+
+@app.post("/api/campaigns")
+async def api_create_campaign(req: Request):
+    # Handle multipart form data
+    form = await req.form()
+    data = {
+        "name": form.get("name", "Untitled"),
+        "agent_profile_id": form.get("agent_profile_id", ""),
+        "allocated_minutes": int(form.get("allocated_minutes", 500)),
+        "calling_window": form.get("calling_window", "regular"),
+        "daily_limit": int(form.get("daily_limit", 100)),
+        "dedicated_inbound_number": form.get("dedicated_inbound_number", ""),
+    }
+    # Parse contacts file if uploaded
+    contacts_file = form.get("contacts_file")
+    contacts = []
+    if contacts_file and hasattr(contacts_file, 'read'):
+        content = await contacts_file.read()
+        text = content.decode('utf-8', errors='ignore')
+        reader = csv.reader(io.StringIO(text))
+        for row in reader:
+            if len(row) >= 2:
+                contacts.append({"name": row[0].strip(), "phone": row[1].strip(), "notes": row[2].strip() if len(row) > 2 else ""})
+    data["contacts"] = json.dumps(contacts)
+    data["total_contacts"] = len(contacts)
+    cid = await create_campaign(data)
+    return {"status": "created", "id": cid, "total_contacts": len(contacts)}
+
+@app.post("/api/campaigns/{cid}/pause")
+async def api_pause_campaign(cid: str):
+    await update_campaign_status(cid, "paused")
+    return {"status": "paused"}
+
+@app.post("/api/campaigns/{cid}/resume")
+async def api_resume_campaign(cid: str):
+    await update_campaign_status(cid, "active")
+    return {"status": "resumed"}
+
+@app.get("/api/campaigns/{cid}/logs")
+async def api_campaign_logs(cid: str, category: str = "outbound"):
+    if category == "outbound":
+        return await get_calls(direction="outbound", campaign_id=cid)
+    elif category == "callback":
+        # Return inbound calls that match this campaign
+        return await get_calls(direction="inbound", campaign_id=cid)
+    else:
+        return await get_calls(campaign_id=cid)
+
+@app.get("/api/campaigns/{cid}/export-csv")
+async def api_campaign_export(cid: str, type: str = "full"):
+    calls = await get_calls(campaign_id=cid, limit=5000)
+    if type == "daily":
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        calls = [c for c in calls if c.get("timestamp", "").startswith(today)]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Time", "Client", "Phone", "Location", "Occupation", "BHK", "Budget", "Timeline", "Funding", "Lead Score", "Site Visit", "Pickup", "Callback", "Objection", "WhatsApp", "Summary", "Duration", "Cost"])
+    for c in calls:
+        writer.writerow([
+            c.get("timestamp", ""), c.get("client_name", c.get("lead_name", "")), c.get("phone_number", ""),
+            c.get("current_location", ""), c.get("occupation", ""), c.get("bhk_requirement", ""),
+            c.get("budget", ""), c.get("possession_timeline", ""), c.get("funding_type", ""),
+            c.get("lead_score", "Cold"), c.get("site_visit_date", ""), c.get("pickup_location", ""),
+            c.get("next_callback", ""), c.get("objection", ""), c.get("whatsapp_status", ""),
+            c.get("summary", ""), c.get("duration_seconds", 0), c.get("cost_inr", 0.0)
+        ])
+    output.seek(0)
+    fname = f"campaign_{cid[:8]}_{type}_report.csv"
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={fname}"})

@@ -38,7 +38,7 @@ try:
 except ImportError:
     pass
 
-from db import push_unified_log, log_call
+from db import push_unified_log, log_call, find_recent_outbound_context, add_campaign_minutes, find_campaign_by_inbound_number
 from prompts import build_prompt
 from tools import RealEstateTools
 
@@ -108,6 +108,7 @@ async def entrypoint(ctx: agents.JobContext):
     broker_phone = None
     custom_prompt = None
     tool_ctx = None
+    log_category = "general"
 
     try:
         # Outbound Metadata parsing
@@ -132,6 +133,24 @@ async def entrypoint(ctx: agents.JobContext):
             lead_name = "Caller"
             match = re.search(r'(\d{10,12})', call_id)
             phone_number = f"+{match.group(1)}" if match else "+918065353767"
+            
+            # Smart context routing for inbound
+            log_category = "direct_inbound"
+            if direction == "inbound":
+                # Check dedicated campaign number
+                camp = await find_campaign_by_inbound_number(phone_number)
+                if camp:
+                    campaign_id = camp.get("id")
+                    log_category = "dedicated_inbound"
+                    await push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id)
+                else:
+                    # Check recent outbound context
+                    ctx_info = await find_recent_outbound_context(phone_number)
+                    if ctx_info.get("found"):
+                        campaign_id = ctx_info.get("campaign_id") or campaign_id
+                        lead_name = ctx_info.get("lead_name", lead_name)
+                        log_category = "campaign_callback"
+                        await push_unified_log("CRM", "info", f"Callback detected from prior campaign lead: {lead_name}", call_id=call_id)
 
         # Build prompt safely
         system_prompt = build_prompt(
@@ -222,6 +241,14 @@ async def entrypoint(ctx: agents.JobContext):
         cost_inr = round((dur / 60.0) * 1.22, 2)
         clean_phone = phone_number or "Unknown"
 
+        # Minute quota deduction
+        dur_mins = round(dur / 60.0, 2)
+        if campaign_id:
+            try:
+                await add_campaign_minutes(campaign_id, dur_mins)
+            except Exception:
+                pass
+
         # Extract from tool_ctx if available
         t_client_name = getattr(tool_ctx, "client_name", "") or lead_name
         t_location = getattr(tool_ctx, "current_location", "")
@@ -271,7 +298,8 @@ async def entrypoint(ctx: agents.JobContext):
                 pickup_location=t_pickup_loc,
                 next_callback=t_callback,
                 objection=t_objection,
-                whatsapp_status=t_whatsapp
+                whatsapp_status=t_whatsapp,
+                log_category=log_category
             )
             await push_unified_log("CRM", "info", f"Call log saved ({direction}): {clean_phone} - {dur}s, ₹{cost_inr}", call_id=call_id)
         except Exception as log_err:

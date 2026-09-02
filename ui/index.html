@@ -58,6 +58,14 @@ th { color: var(--text-muted); font-weight: 600; background: var(--card-bg); }
 label { font-size: 11.5px; color: var(--text-muted); }
 input, select, textarea { background: var(--card-bg); border: 1px solid var(--border-color); color: #FFF; padding: 8px 12px; border-radius: 6px; font-size: 12.5px; }
 input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
+.agents-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; margin-top: 16px; }
+.agent-card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; }
+.agent-card h4 { color: var(--accent-cyan); margin-bottom: 8px; }
+.progress-bar { width:100%; height:12px; background:var(--card-bg); border-radius:6px; overflow:hidden; border:1px solid var(--border-color); }
+.progress-fill { height:100%; border-radius:6px; transition:width 0.3s; }
+.camp-subtabs { display:flex; gap:0; margin-bottom:14px; }
+.camp-subtab { padding:8px 14px; cursor:pointer; color:var(--text-muted); border-bottom:2px solid transparent; font-size:12px; font-weight:500; }
+.camp-subtab.active { color:var(--primary-emerald); border-bottom-color:var(--primary-emerald); }
 </style>
 </head>
 <body>
@@ -74,17 +82,14 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
 <nav class="nav-container">
   <div class="nav-tab active" data-tab="view_stats">📊 Stats</div>
   <div class="nav-tab" data-tab="view_single_call">📞 Single Call</div>
-  <div class="nav-tab" data-tab="view_batch_call">📋 Batch Call</div>
   <div class="nav-tab" data-tab="view_campaigns">🚀 Campaigns</div>
-  <div class="nav-tab" data-tab="view_agents">🤖 Agents</div>
-  <div class="nav-tab" data-tab="view_prompt">✏️ AI Prompt</div>
+  <div class="nav-tab" data-tab="view_agents">🤖 Agents Studio</div>
   <div class="nav-tab" data-tab="view_visits">📅 Appointments</div>
   <div class="nav-tab" data-tab="view_outbound">📲 Outbound Logs</div>
   <div class="nav-tab" data-tab="view_inbound">📥 Inbound Logs</div>
   <div class="nav-tab" data-tab="view_crm">👥 CRM</div>
   <div class="nav-tab" data-tab="view_settings">⚙️ Settings</div>
   <div class="nav-tab" data-tab="view_logs">📋 Logs</div>
-  <div class="nav-tab" data-tab="view_setup">🔧 Setup</div>
 </nav>
 
 <main class="main-content">
@@ -150,64 +155,59 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
     </div>
   </div>
 
-  <div id="view_batch_call" class="tab-view">
-    <div class="card">
-      <div class="card-header"><span>Batch Call Dispatcher</span></div>
-      <form id="form_batch" class="form-grid">
-        <div class="form-group" style="grid-column: 1 / -1;">
-          <label>Paste Numbers List (Format: Phone, Name per line)</label>
-          <textarea id="batch_numbers" rows="6" placeholder="+919876543210, Rahul&#10;+919876543211, Amit"></textarea>
-        </div>
-        <div class="form-group"><label>Delay Between Calls (Seconds)</label><input type="number" id="batch_delay" value="3" /></div>
-        <div class="form-group"><label>Default Requirement</label><input type="text" id="batch_service" value="Luxury 2BHK/3BHK Flats" /></div>
-        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn btn-cyan">⚡ Launch Batch</button></div>
-      </form>
-    </div>
-  </div>
-
   <div id="view_campaigns" class="tab-view">
     <div class="card">
-      <div class="card-header"><span>Campaign Manager & Client CSV Export</span></div>
-      <table>
-        <thead><tr><th>Campaign Name</th><th>Total Contacts</th><th>Status</th><th>Sheets Webhook</th><th>Actions</th></tr></thead>
-        <tbody id="tbl_campaigns">
-          <tr>
-            <td><b>Kaamdhenu Horizon Launch</b></td>
-            <td>150 Leads</td>
-            <td><span class="badge badge-booked">Active</span></td>
-            <td>Google Sheets Synced</td>
-            <td><a href="/api/campaigns/default/export" class="btn btn-sm btn-cyan">📥 Download Client CSV</a></td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="card-header"><span>🚀 Campaign Manager — Smart Minute Quota Engine</span></div>
+      <form id="form_campaign" class="form-grid">
+        <div class="form-group"><label>Campaign Name</label><input type="text" id="camp_name" placeholder="Horizon Phase-1 Launch" required /></div>
+        <div class="form-group"><label>Select Agent</label><select id="camp_agent"><option value="">-- Select Agent Profile --</option></select></div>
+        <div class="form-group"><label>Minute Budget Allocation</label><input type="number" id="camp_minutes" value="500" min="1" /><small style="color:#94A3B8;">Auto-stops when exhausted</small></div>
+        <div class="form-group"><label>Calling Window</label><select id="camp_window"><option value="regular">Regular Hours (10AM - 7PM)</option><option value="custom">Custom Peak Hours</option></select></div>
+        <div class="form-group"><label>Daily Call Limit</label><input type="number" id="camp_daily_limit" value="100" /></div>
+        <div class="form-group"><label>Dedicated Inbound Number (Optional)</label><input type="text" id="camp_inbound_num" placeholder="+918065353767" /></div>
+        <div class="form-group" style="grid-column:1/-1;">
+          <label>Upload Contacts (CSV/XLSX: Name, Phone, Budget/Notes)</label>
+          <input type="file" id="camp_file" accept=".csv,.xlsx" style="padding:12px;" />
+          <span id="camp_file_badge" style="color:#10B981; font-size:12px;"></span>
+        </div>
+        <div class="form-group" style="grid-column:1/-1; display:flex; gap:10px;">
+          <button type="submit" class="btn" style="font-size:14px; padding:10px 20px;">🚀 Launch Campaign</button>
+          <button type="button" class="btn btn-danger" onclick="pauseCampaign()" style="font-size:14px; padding:10px 20px;">⏸️ Pause Campaign</button>
+        </div>
+      </form>
+    </div>
+    <div class="card">
+      <div class="card-header"><span>📊 Active Campaigns</span><button class="btn btn-sm btn-cyan" onclick="loadCampaigns()">🔄 Refresh</button></div>
+      <div id="campaigns_list"></div>
     </div>
   </div>
 
   <div id="view_agents" class="tab-view">
     <div class="card">
-      <div class="card-header"><span>Configured Inbound Vobiz DIDs & Personas</span></div>
-      <form id="form_client_num" class="form-grid" style="margin-bottom: 20px;">
-        <div class="form-group"><label>Vobiz DID Number</label><input type="text" id="cn_phone" placeholder="+918065353767" required /></div>
-        <div class="form-group"><label>Business / Project Name</label><input type="text" id="cn_biz" placeholder="Kaamdhenu Horizon" required /></div>
-        <div class="form-group"><label>AI Agent Name</label><input type="text" id="cn_agent" value="Priya" /></div>
-        <div class="form-group"><label>Assigned Broker WhatsApp</label><input type="text" id="cn_broker" placeholder="+918065353767" /></div>
-        <div class="form-group" style="grid-column: 1 / -1;"><button type="submit" class="btn btn-cyan">Save Persona Mapping</button></div>
+      <div class="card-header"><span>🤖 AI Agent Builder & Persona Studio</span></div>
+      <form id="form_agent" class="form-grid">
+        <div class="form-group"><label>Agent Name</label><input type="text" id="ag_name" placeholder="Priya" required /></div>
+        <div class="form-group"><label>Business / Project Name</label><input type="text" id="ag_business" placeholder="Kaamdhenu Horizon" required /></div>
+        <div class="form-group"><label>Voice Selection</label><select id="ag_voice">
+          <option value="Aoede">Aoede (Female - Warm & Conversational)</option>
+          <option value="Kore">Kore (Female - Professional & Crisp)</option>
+          <option value="Puck">Puck (Male - Friendly & Energetic)</option>
+          <option value="Charon">Charon (Male - Deep & Confident)</option>
+          <option value="Fenrir">Fenrir (Male - Authoritative Business)</option>
+        </select></div>
+        <div class="form-group"><label>Assigned DID</label><input type="text" id="ag_did" placeholder="+918065353767" /></div>
+        <div class="form-group"><label>Broker WhatsApp Alert Number</label><input type="text" id="ag_broker" placeholder="+919892057717" /></div>
+        <div class="form-group"><label>Service Type</label><input type="text" id="ag_service" value="Luxury 2BHK/3BHK Apartments" /></div>
+        <div class="form-group" style="grid-column:1/-1;"><label>System Prompt</label><textarea id="ag_prompt" rows="6" style="font-family:monospace; font-size:12px; height:200px;" placeholder="You are {agent_name} from {business_name}..."></textarea></div>
+        <div class="form-group" style="grid-column:1/-1; display:flex; gap:10px;">
+          <button type="submit" class="btn">💾 Save Agent Profile</button>
+          <button type="button" class="btn btn-cyan" onclick="document.getElementById('form_agent').reset()">🔄 Reset</button>
+        </div>
       </form>
-      <table>
-        <thead><tr><th>Number</th><th>Business</th><th>Agent</th><th>Broker WhatsApp</th><th>Action</th></tr></thead>
-        <tbody id="tbl_clients"></tbody>
-      </table>
     </div>
-  </div>
-
-  <div id="view_prompt" class="tab-view">
     <div class="card">
-      <div class="card-header"><span>System Prompt Customizer</span></div>
-      <div class="form-group">
-        <label>System Instructions (Supports {lead_name}, {business_name}, {service_type}, {agent_name})</label>
-        <textarea id="prompt_text" rows="12" style="font-family: monospace; font-size: 12px;"></textarea>
-      </div>
-      <div style="margin-top:12px;"><button class="btn" onclick="saveCustomPrompt()">💾 Save Prompt</button></div>
+      <div class="card-header"><span>📋 Saved Agent Profiles</span><button class="btn btn-sm btn-cyan" onclick="loadAgents()">🔄 Refresh</button></div>
+      <div class="agents-grid" id="agents_grid"></div>
     </div>
   </div>
 
@@ -450,26 +450,81 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       </table>
     </div>
   </div>
-
-  <div id="view_setup" class="tab-view">
-    <div class="card">
-      <div class="card-header"><span>SIP Trunk Verification & Health Status</span></div>
-      <div style="line-height: 1.8;">
-        <p>✔ <b>Active Outbound Trunk:</b> <code>ST_5fBqM5ZaW7pn</code></p>
-        <p>✔ <b>SIP Domain:</b> <code>1d3f4bb4.sip.vobiz.ai</code></p>
-        <p>✔ <b>LiveKit Cluster:</b> <code>kaamdhenu-ai-hlb4n5lc.livekit.cloud</code></p>
-        <p>✔ <b>AI Audio Engine:</b> Gemini Live Realtime (Sub-100ms Latency)</p>
-      </div>
-    </div>
-  </div>
 </main>
 
 <script>
 let chartOutcomesInstance = null;
 let chartTimelineInstance = null;
 
+// Agent Profiles
+const loadAgents = async () => {
+    try {
+        const res = await fetch('/api/agent-profiles');
+        if (res.ok) {
+            const agents = await res.json();
+            document.getElementById('agents_grid').innerHTML = agents.length ? agents.map(a => `
+                <div class="agent-card">
+                    <h4>${a.agent_name || 'Agent'}</h4>
+                    <p style="color:#94A3B8;font-size:12px;margin-bottom:6px;">🏢 ${a.business_name || '-'}</p>
+                    <p style="font-size:12px;">🎙️ <span class="badge badge-booked">${a.voice || 'Aoede'}</span></p>
+                    <p style="font-size:12px;color:#94A3B8;">📞 ${a.assigned_did || '-'} | 📱 ${a.broker_phone || '-'}</p>
+                    <p style="font-size:11px;color:#64748B;margin-top:6px;max-height:40px;overflow:hidden;">${(a.system_prompt||'').substring(0,100)}...</p>
+                    <div style="margin-top:8px;display:flex;gap:6px;">
+                        <button class="btn btn-sm btn-cyan" onclick="editAgent('${a.id}')">Edit</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteAgent('${a.id}')">Delete</button>
+                    </div>
+                </div>
+            `).join('') : '<p style="color:#64748B; text-align:center; padding:20px;">No agent profiles created yet</p>';
+            // Also populate campaign agent dropdown
+            const sel = document.getElementById('camp_agent');
+            if (sel) {
+                sel.innerHTML = '<option value="">-- Select Agent Profile --</option>' + agents.map(a => `<option value="${a.id}">${a.agent_name} (${a.business_name})</option>`).join('');
+            }
+        }
+    } catch(e) { console.error('Error loading agents:', e); }
+};
+
+async function deleteAgent(id) {
+    if (!confirm('Delete this agent profile?')) return;
+    await fetch('/api/agent-profiles/' + id, { method: 'DELETE' });
+    loadAgents();
+}
+
+function editAgent(id) {
+    // For now, just scroll to form - full edit can be added later
+    document.querySelector('[data-tab="view_agents"]').click();
+}
+
+// Campaigns
+const loadCampaigns = async () => {
+    try {
+        const res = await fetch('/api/campaigns');
+        if (res.ok) {
+            const camps = await res.json();
+            document.getElementById('campaigns_list').innerHTML = camps.length ? camps.map(c => {
+                const pct = c.allocated_minutes ? Math.min(100, Math.round((c.consumed_minutes||0) / c.allocated_minutes * 100)) : 0;
+                const barColor = pct >= 100 ? '#EF4444' : pct >= 80 ? '#F59E0B' : '#10B981';
+                return `
+                <div class="card" style="margin-bottom:12px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                        <div><b>${c.name}</b> <span class="badge badge-${c.status === 'active' ? 'booked' : (c.status === 'paused' ? 'warm' : 'hot')}">${c.status}</span></div>
+                        <div style="display:flex;gap:6px;">
+                            <a href="/api/campaigns/${c.id}/export-csv?type=daily" class="btn btn-sm btn-cyan">📥 Daily CSV</a>
+                            <a href="/api/campaigns/${c.id}/export-csv?type=full" class="btn btn-sm btn-cyan">📥 Full CSV</a>
+                        </div>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${barColor};"></div></div>
+                    <p style="font-size:11px;color:#94A3B8;margin-top:4px;">Consumed: ${c.consumed_minutes||0} / ${c.allocated_minutes||0} Mins (${pct}%)</p>
+                </div>`;
+            }).join('') : '<p style="color:#64748B;text-align:center;padding:20px;">No campaigns created yet</p>';
+        }
+    } catch(e) { console.error('Error loading campaigns:', e); }
+};
+
+function pauseCampaign() { /* placeholder */ }
+
 document.addEventListener('DOMContentLoaded', () => {
-    // 13-Tab Navigation (Zero popups)
+    // Nav Navigation (Zero popups)
     const tabs = document.querySelectorAll('.nav-tab');
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
@@ -478,7 +533,14 @@ document.addEventListener('DOMContentLoaded', () => {
             tab.classList.add('active');
             const target = document.getElementById(tab.dataset.tab);
             if (target) target.classList.add('active');
-            if (tab.dataset.tab === 'view_settings') loadSettings();
+            
+            const tabName = tab.dataset.tab;
+            if (tabName === 'view_settings') loadSettings();
+            if (tabName === 'view_agents') loadAgents();
+            if (tabName === 'view_campaigns') loadCampaigns();
+            if (tabName === 'view_outbound' || tabName === 'view_inbound') loadCalls();
+            if (tabName === 'view_crm') loadCRM();
+            if (tabName === 'view_stats') loadStats();
         });
     });
 
@@ -628,15 +690,18 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await fetch('/api/client-numbers');
             if (res.ok) {
                 const list = await res.json();
-                document.getElementById('tbl_clients').innerHTML = list.map(c => `
-                    <tr>
-                        <td><b>${c.inbound_number}</b></td>
-                        <td>${c.business_name}</td>
-                        <td>${c.agent_name}</td>
-                        <td>${c.broker_whatsapp_number || '-'}</td>
-                        <td><button class="btn btn-danger btn-sm" onclick="deleteClient('${c.id}')">Delete</button></td>
-                    </tr>
-                `).join('');
+                const clientsEl = document.getElementById('tbl_clients');
+                if (clientsEl) {
+                    clientsEl.innerHTML = list.map(c => `
+                        <tr>
+                            <td><b>${c.inbound_number}</b></td>
+                            <td>${c.business_name}</td>
+                            <td>${c.agent_name}</td>
+                            <td>${c.broker_whatsapp_number || '-'}</td>
+                            <td><button class="btn btn-danger btn-sm" onclick="deleteClient('${c.id}')">Delete</button></td>
+                        </tr>
+                    `).join('');
+                }
             }
         } catch (e) {}
     };
@@ -695,22 +760,47 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Inbound Persona Submit
-    document.getElementById('form_client_num').addEventListener('submit', async (e) => {
+    // Agent form submit
+    document.getElementById('form_agent').addEventListener('submit', async (e) => {
         e.preventDefault();
         const payload = {
-            inbound_number: document.getElementById('cn_phone').value,
-            business_name: document.getElementById('cn_biz').value,
-            agent_name: document.getElementById('cn_agent').value,
-            broker_whatsapp_number: document.getElementById('cn_broker').value
+            agent_name: document.getElementById('ag_name').value.trim(),
+            business_name: document.getElementById('ag_business').value.trim(),
+            voice: document.getElementById('ag_voice').value,
+            assigned_did: document.getElementById('ag_did').value.trim(),
+            broker_phone: document.getElementById('ag_broker').value.trim(),
+            service_type: document.getElementById('ag_service').value.trim(),
+            system_prompt: document.getElementById('ag_prompt').value.trim()
         };
-        await fetch('/api/client-numbers', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        loadClients();
+        await fetch('/api/agent-profiles', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+        document.getElementById('form_agent').reset();
+        loadAgents();
     });
+
+    // Campaign form submit
+    document.getElementById('form_campaign').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData();
+        formData.append('name', document.getElementById('camp_name').value.trim());
+        formData.append('agent_profile_id', document.getElementById('camp_agent').value);
+        formData.append('allocated_minutes', document.getElementById('camp_minutes').value);
+        formData.append('calling_window', document.getElementById('camp_window').value);
+        formData.append('daily_limit', document.getElementById('camp_daily_limit').value);
+        formData.append('dedicated_inbound_number', document.getElementById('camp_inbound_num').value.trim());
+        const file = document.getElementById('camp_file').files[0];
+        if (file) formData.append('contacts_file', file);
+        await fetch('/api/campaigns', { method: 'POST', body: formData });
+        loadCampaigns();
+    });
+
+    // File upload badge
+    const fileInput = document.getElementById('camp_file');
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            const f = e.target.files[0];
+            document.getElementById('camp_file_badge').textContent = f ? `✅ Total Contacts: parsing...` : '';
+        });
+    }
 
     loadStats();
     loadCalls();
@@ -719,22 +809,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadClients();
     loadCRM();
     loadSettings();
-
-    // Auto-fetch calls whenever user clicks Outbound Logs or Inbound Logs tabs
-    document.querySelectorAll('.nav-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            const tabName = tab.dataset.tab;
-            if (tabName === 'view_outbound' || tabName === 'view_inbound') {
-                loadCalls();
-            }
-            if (tabName === 'view_crm') {
-                loadCRM();
-            }
-            if (tabName === 'view_stats') {
-                loadStats();
-            }
-        });
-    });
+    loadAgents();
+    loadCampaigns();
 
     // Real-time background polling
     setInterval(loadCalls, 4000);
