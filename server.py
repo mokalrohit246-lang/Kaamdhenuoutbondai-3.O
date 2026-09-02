@@ -39,13 +39,17 @@ logger = logging.getLogger("server")
 app = FastAPI(title="Kaamdhenu 3.0 Voice Platform", version="3.0.0")
 
 class SingleCallReq(BaseModel):
-    phone: str
+    phone: Optional[str] = None
+    phone_number: Optional[str] = None
     lead_name: str = "there"
+    agent_id: Optional[str] = None
     agent_name: str = "Priya"
+    agent_voice: Optional[str] = None
     business_name: str = "Kaamdhenu Real Estate"
     service_type: str = "Luxury 2BHK/3BHK Apartments"
     broker_phone: Optional[str] = None
     system_prompt: Optional[str] = None
+    custom_prompt: Optional[str] = None
 
 class ClientNumReq(BaseModel):
     id: Optional[str] = None
@@ -276,6 +280,7 @@ async def api_provision_inbound():
         await push_unified_log("SIP", "error", f"Inbound provisioning error: {e}")
         raise HTTPException(500, str(e))
 
+@app.post("/api/dispatch-call")
 @app.post("/api/call")
 async def api_dispatch(req: SingleCallReq):
     url = os.getenv("LIVEKIT_URL")
@@ -284,17 +289,39 @@ async def api_dispatch(req: SingleCallReq):
     if not (url and key and secret):
         raise HTTPException(400, "LiveKit credentials missing")
 
-    phone = req.phone.strip()
+    phone = (req.phone or req.phone_number or "").strip()
+    if not phone:
+        raise HTTPException(400, "Phone number required")
+
+    agent_name = req.agent_name
+    agent_voice = req.agent_voice or os.getenv("GEMINI_TTS_VOICE", "Aoede")
+    business_name = req.business_name
+    service_type = req.service_type
+    broker_phone = req.broker_phone
+    system_prompt = req.custom_prompt or req.system_prompt
+
+    if req.agent_id:
+        profile = await get_agent_profile(req.agent_id)
+        if profile:
+            agent_name = profile.get("agent_name") or profile.get("name") or agent_name
+            agent_voice = profile.get("voice") or agent_voice
+            business_name = profile.get("business_name") or business_name
+            service_type = profile.get("service_type") or service_type
+            system_prompt = req.custom_prompt or req.system_prompt or profile.get("system_prompt")
+            broker_phone = req.broker_phone or profile.get("broker_phone") or profile.get("broker_whatsapp")
+
     room_name = f"outbound-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
     meta = {
         "direction": "outbound",
         "phone_number": phone,
         "lead_name": req.lead_name,
-        "agent_name": req.agent_name,
-        "business_name": req.business_name,
-        "service_type": req.service_type,
-        "broker_phone": req.broker_phone,
-        "system_prompt": req.system_prompt
+        "agent_id": req.agent_id,
+        "agent_name": agent_name,
+        "agent_voice": agent_voice,
+        "business_name": business_name,
+        "service_type": service_type,
+        "broker_phone": broker_phone,
+        "system_prompt": system_prompt
     }
 
     try:
@@ -310,8 +337,8 @@ async def api_dispatch(req: SingleCallReq):
         )
         await lk.aclose()
         await session.close()
-        await push_unified_log("API", "info", f"Call dispatched to {phone} ({req.agent_name})", call_id=room_name)
-        return {"status": "dispatched", "room": room_name, "phone": phone}
+        await push_unified_log("API", "info", f"Call dispatched to {phone} ({agent_name})", call_id=room_name)
+        return {"status": "dispatched", "room": room_name, "phone": phone, "agent": agent_name}
     except Exception as e:
         await push_unified_log("API", "error", f"Dispatch failed: {e}")
         raise HTTPException(500, str(e))

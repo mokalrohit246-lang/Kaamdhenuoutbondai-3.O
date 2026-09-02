@@ -129,12 +129,14 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
           <input type="text" id="sc_name" placeholder="Rahul Sharma" />
         </div>
         <div class="form-group">
-          <label>AI Agent Name (Persona)</label>
-          <input type="text" id="sc_agent_name" value="Priya" placeholder="Priya / Rahul / Neha" />
+          <label style="font-size: 13px; color: #94A3B8; display: block; margin-bottom: 6px;">Select AI Agent *</label>
+          <select id="single_agent_select" class="form-control" style="width: 100%; background: #0F172A; color: #fff; border: 1px solid #334155; padding: 10px; border-radius: 8px;">
+            <option value="">-- Choose Saved Agent --</option>
+          </select>
         </div>
         <div class="form-group">
           <label>Business / Project Name</label>
-          <input type="text" id="sc_biz_name" value="Kaamdhenu Horizon" placeholder="Kaamdhenu Real Estate" />
+          <input type="text" id="single_business_name" value="Kaamdhenu Horizon" placeholder="Kaamdhenu Real Estate" />
         </div>
         <div class="form-group">
           <label>Property Requirement / Service</label>
@@ -142,11 +144,11 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         </div>
         <div class="form-group">
           <label>Assigned On-Site Broker WhatsApp (For Hot Leads)</label>
-          <input type="text" id="sc_broker" placeholder="+918065353767" />
+          <input type="text" id="single_broker_phone" placeholder="+918065353767" />
         </div>
         <div class="form-group" style="grid-column: 1 / -1;">
           <label>Custom System Prompt Override (Optional — Leave blank to use default)</label>
-          <textarea id="sc_prompt" rows="3" placeholder="You are Priya calling Rahul to offer a special preview slot for 3BHK luxury flats..."></textarea>
+          <textarea id="single_system_prompt" rows="3" placeholder="You are Priya calling Rahul to offer a special preview slot for 3BHK luxury flats..."></textarea>
         </div>
         <div class="form-group" style="grid-column: 1 / -1;">
           <button type="submit" class="btn" style="font-size:14px; padding:10px 20px;">🚀 Launch Immediate Call</button>
@@ -569,11 +571,14 @@ let chartOutcomesInstance = null;
 let chartTimelineInstance = null;
 
 // Agent Profiles
+let allAgentProfiles = [];
+
 const loadAgents = async () => {
     try {
         const res = await fetch('/api/agent-profiles');
         if (res.ok) {
             const agents = await res.json();
+            allAgentProfiles = agents;
             document.getElementById('agents_grid').innerHTML = agents.length ? agents.map(a => `
                 <div class="agent-card">
                     <h4>${a.agent_name || 'Agent'}</h4>
@@ -587,10 +592,19 @@ const loadAgents = async () => {
                     </div>
                 </div>
             `).join('') : '<p style="color:#64748B; text-align:center; padding:20px;">No agent profiles created yet</p>';
-            // Also populate campaign agent dropdown
-            const sel = document.getElementById('camp_agent');
-            if (sel) {
-                sel.innerHTML = '<option value="">-- Select Agent Profile --</option>' + agents.map(a => `<option value="${a.id}">${a.agent_name} (${a.business_name})</option>`).join('');
+
+            const optHtml = '<option value="">-- Select Agent Profile --</option>' + agents.map(a => `<option value="${a.id}">${a.agent_name} (${a.business_name})</option>`).join('');
+
+            // Populate campaign agent dropdown
+            const campSel = document.getElementById('camp_agent_select') || document.getElementById('camp_agent');
+            if (campSel) campSel.innerHTML = optHtml;
+
+            // Populate single call agent dropdown
+            const singleSel = document.getElementById('single_agent_select');
+            if (singleSel) {
+                const cur = singleSel.value;
+                singleSel.innerHTML = '<option value="">-- Choose Saved Agent --</option>' + agents.map(a => `<option value="${a.id}">${a.agent_name} (${a.business_name || 'Agent'})</option>`).join('');
+                if (cur) singleSel.value = cur;
             }
         }
     } catch(e) { console.error('Error loading agents:', e); }
@@ -895,6 +909,25 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch(e) {}
     };
 
+    // Single Call Agent Selection Auto-fill
+    document.getElementById('single_agent_select')?.addEventListener('change', function() {
+        const selectedId = this.value;
+        const profile = allAgentProfiles.find(a => a.id === selectedId);
+        if (profile) {
+            const bizEl = document.getElementById('single_business_name') || document.getElementById('sc_biz_name');
+            if (bizEl) bizEl.value = profile.business_name || '';
+
+            const brokerEl = document.getElementById('single_broker_phone') || document.getElementById('sc_broker');
+            if (brokerEl) brokerEl.value = profile.broker_phone || profile.broker_whatsapp || '';
+
+            const promptEl = document.getElementById('single_system_prompt') || document.getElementById('sc_prompt');
+            if (promptEl) promptEl.value = profile.system_prompt || '';
+
+            const srvEl = document.getElementById('sc_service');
+            if (srvEl && profile.service_type) srvEl.value = profile.service_type;
+        }
+    });
+
     // Single Call Submit
     document.getElementById('form_single_call').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -902,18 +935,31 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.disabled = true;
         btn.textContent = "⏳ Dispatching Pre-Warmed Call...";
         
+        const agentId = document.getElementById('single_agent_select')?.value || null;
+        const selProfile = allAgentProfiles.find(a => a.id === agentId);
+
+        const phoneVal = (document.getElementById('sc_phone')?.value || '').trim();
+        const leadVal = (document.getElementById('sc_name')?.value || '').trim() || 'there';
+        const bizVal = (document.getElementById('single_business_name') || document.getElementById('sc_biz_name'))?.value.trim() || (selProfile?.business_name || 'Kaamdhenu Real Estate');
+        const srvVal = document.getElementById('sc_service')?.value.trim() || 'Luxury Properties';
+        const brokerVal = (document.getElementById('single_broker_phone') || document.getElementById('sc_broker'))?.value.trim() || null;
+        const promptVal = (document.getElementById('single_system_prompt') || document.getElementById('sc_prompt'))?.value.trim() || null;
+
         const payload = {
-            phone: document.getElementById('sc_phone').value.trim(),
-            lead_name: document.getElementById('sc_name').value.trim() || 'there',
-            agent_name: document.getElementById('sc_agent_name').value.trim() || 'Priya',
-            business_name: document.getElementById('sc_biz_name').value.trim() || 'Kaamdhenu Real Estate',
-            service_type: document.getElementById('sc_service').value.trim() || 'Luxury Properties',
-            broker_phone: document.getElementById('sc_broker').value.trim() || null,
-            system_prompt: document.getElementById('sc_prompt').value.trim() || null
+            agent_id: agentId,
+            agent_name: selProfile ? selProfile.agent_name : 'Priya',
+            agent_voice: selProfile ? selProfile.voice : 'Aoede',
+            phone: phoneVal,
+            phone_number: phoneVal,
+            lead_name: leadVal,
+            business_name: bizVal,
+            service_type: srvVal,
+            broker_phone: brokerVal,
+            system_prompt: promptVal
         };
 
         try {
-            const res = await fetch('/api/call', {
+            const res = await fetch('/api/dispatch-call', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload)

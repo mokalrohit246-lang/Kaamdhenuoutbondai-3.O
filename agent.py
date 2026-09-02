@@ -46,9 +46,9 @@ load_dotenv(".env", override=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kaamdhenu-agent")
 
-def _build_session(tools: list, system_prompt: str) -> AgentSession:
+def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSession:
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
-    gemini_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
+    gemini_voice = voice or os.getenv("GEMINI_TTS_VOICE", "Aoede")
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
@@ -59,7 +59,7 @@ def _build_session(tools: list, system_prompt: str) -> AgentSession:
             input_cfg = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=600,
+                    silence_duration_ms=500,
                     prefix_padding_ms=100
                 )
             )
@@ -104,6 +104,7 @@ async def entrypoint(ctx: agents.JobContext):
     business_name = "Kaamdhenu Real Estate"
     service_type = "Luxury Properties"
     agent_name = "Priya"
+    agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
     campaign_id = None
     broker_phone = None
     custom_prompt = None
@@ -121,6 +122,7 @@ async def entrypoint(ctx: agents.JobContext):
                 business_name = m.get("business_name", business_name)
                 service_type = m.get("service_type", service_type)
                 agent_name = m.get("agent_name", agent_name)
+                agent_voice = m.get("agent_voice") or agent_voice
                 campaign_id = m.get("campaign_id")
                 broker_phone = m.get("broker_phone")
                 custom_prompt = m.get("system_prompt")
@@ -175,7 +177,7 @@ async def entrypoint(ctx: agents.JobContext):
         await ctx.connect()
         await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
 
-        session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt)
+        session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt, voice=agent_voice)
 
         session_start_task = asyncio.create_task(session.start(
             room=ctx.room,
