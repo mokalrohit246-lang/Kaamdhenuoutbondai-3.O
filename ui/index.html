@@ -162,7 +162,28 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <div class="form-group"><label>Campaign Name</label><input type="text" id="camp_name" placeholder="Horizon Phase-1 Launch" required /></div>
         <div class="form-group"><label>Select Agent</label><select id="camp_agent"><option value="">-- Select Agent Profile --</option></select></div>
         <div class="form-group"><label>Minute Budget Allocation</label><input type="number" id="camp_minutes" value="500" min="1" /><small style="color:#94A3B8;">Auto-stops when exhausted</small></div>
-        <div class="form-group"><label>Calling Window</label><select id="camp_window"><option value="regular">Regular Hours (10AM - 7PM)</option><option value="custom">Custom Peak Hours</option></select></div>
+        <div class="form-group">
+          <label>Calling Window</label>
+          <select id="camp_calling_mode">
+            <option value="regular">Regular Hours (10:00 AM - 07:00 PM)</option>
+            <option value="custom_peak">Custom Peak Hours</option>
+          </select>
+        </div>
+        <div id="custom_peak_container" style="display: none; margin-top: 10px; background: rgba(30, 41, 59, 0.5); padding: 12px; border-radius: 8px; border: 1px solid #334155; grid-column: 1 / -1;">
+          <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+            <div>
+              <label style="font-size: 12px; color: #94A3B8; display: block; margin-bottom: 4px;">⏰ Peak Start Time</label>
+              <input type="time" id="camp_peak_start" value="18:00" class="form-control" style="width: 140px; background: #0F172A; color: #fff; border: 1px solid #475569; padding: 6px 10px; border-radius: 6px;">
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #94A3B8; display: block; margin-bottom: 4px;">⏰ Peak End Time</label>
+              <input type="time" id="camp_peak_end" value="21:00" class="form-control" style="width: 140px; background: #0F172A; color: #fff; border: 1px solid #475569; padding: 6px 10px; border-radius: 6px;">
+            </div>
+            <div style="font-size: 12px; color: #10B981; margin-top: 18px;">
+              ⚡ Calls will strictly dial out between these hours only.
+            </div>
+          </div>
+        </div>
         <div class="form-group"><label>Daily Call Limit</label><input type="number" id="camp_daily_limit" value="100" /></div>
         <div class="form-group"><label>Dedicated Inbound Number (Optional)</label><input type="text" id="camp_inbound_num" placeholder="+918065353767" /></div>
         <div class="form-group" style="grid-column:1/-1;">
@@ -179,6 +200,97 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
     <div class="card">
       <div class="card-header"><span>📊 Active Campaigns</span><button class="btn btn-sm btn-cyan" onclick="loadCampaigns()">🔄 Refresh</button></div>
       <div id="campaigns_list"></div>
+    </div>
+    <div class="card" style="margin-top: 18px;">
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <span>📑 3-Way Dedicated Campaign Logs</span>
+          <select id="sel_campaign_filter" onchange="loadSelectedCampaignLogs()" style="padding: 5px 10px; font-size: 12px; background: var(--card-bg); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 6px;">
+            <option value="all">All Campaigns</option>
+          </select>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+          <button class="btn btn-sm btn-cyan" onclick="downloadCampaignReport('daily')">📥 Download Daily Client CSV</button>
+          <button class="btn btn-sm btn-cyan" onclick="downloadCampaignReport('full')">📥 Download Full Campaign Audit CSV</button>
+          <button class="btn btn-sm" style="background: var(--card-bg); border: 1px solid var(--border-color); color: var(--text-main);" onclick="loadSelectedCampaignLogs()">🔄 Refresh Logs</button>
+        </div>
+      </div>
+
+      <!-- Sub-tabs -->
+      <div class="camp-subtabs" style="border-bottom: 1px solid var(--border-color); margin-bottom: 14px; display: flex; gap: 0;">
+        <div class="camp-subtab active" id="tab_camp_outbound" onclick="switchCampTab('outbound')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid var(--primary-emerald); color: var(--primary-emerald); font-weight: 600; font-size: 12.5px;">📲 Campaign Outbound Logs</div>
+        <div class="camp-subtab" id="tab_camp_callbacks" onclick="switchCampTab('callbacks')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 12.5px;">🔄 Inbound Callbacks</div>
+        <div class="camp-subtab" id="tab_camp_dedicated" onclick="switchCampTab('dedicated')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 12.5px;">🏢 Dedicated Inbound Logs</div>
+      </div>
+
+      <!-- Outbound Container -->
+      <div id="subview_camp_outbound" style="overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px; border:1px solid #1E293B;">
+        <table style="min-width:1400px;">
+          <thead>
+            <tr>
+              <th>Time & Dur</th>
+              <th>Client & Phone</th>
+              <th>Location & Job</th>
+              <th>BHK & Budget</th>
+              <th>Timeline & Loan</th>
+              <th>Lead Score</th>
+              <th>Site Visit & Cab</th>
+              <th>Next Callback</th>
+              <th>Main Objection</th>
+              <th>WhatsApp Status</th>
+              <th>AI Ground Summary</th>
+              <th>Cost</th>
+            </tr>
+          </thead>
+          <tbody id="tbl_camp_outbound"></tbody>
+        </table>
+      </div>
+
+      <!-- Callbacks Container -->
+      <div id="subview_camp_callbacks" style="display:none; overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px; border:1px solid #1E293B;">
+        <table style="min-width:1400px;">
+          <thead>
+            <tr>
+              <th>Time & Dur</th>
+              <th>Client & Phone</th>
+              <th>Location & Job</th>
+              <th>BHK & Budget</th>
+              <th>Timeline & Loan</th>
+              <th>Lead Score</th>
+              <th>Site Visit & Cab</th>
+              <th>Next Callback</th>
+              <th>Main Objection</th>
+              <th>WhatsApp Status</th>
+              <th>AI Ground Summary</th>
+              <th>Cost</th>
+            </tr>
+          </thead>
+          <tbody id="tbl_camp_callbacks"></tbody>
+        </table>
+      </div>
+
+      <!-- Dedicated Inbound Container -->
+      <div id="subview_camp_dedicated" style="display:none; overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px; border:1px solid #1E293B;">
+        <table style="min-width:1400px;">
+          <thead>
+            <tr>
+              <th>Time & Dur</th>
+              <th>Client & Phone</th>
+              <th>Location & Job</th>
+              <th>BHK & Budget</th>
+              <th>Timeline & Loan</th>
+              <th>Lead Score</th>
+              <th>Site Visit & Cab</th>
+              <th>Next Callback</th>
+              <th>Main Objection</th>
+              <th>WhatsApp Status</th>
+              <th>AI Ground Summary</th>
+              <th>Cost</th>
+            </tr>
+          </thead>
+          <tbody id="tbl_camp_dedicated"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -496,6 +608,59 @@ function editAgent(id) {
 }
 
 // Campaigns
+let currentCampSubTab = 'outbound';
+
+function switchCampTab(tab) {
+    currentCampSubTab = tab;
+    const tabs = ['outbound', 'callbacks', 'dedicated'];
+    tabs.forEach(t => {
+        const tabEl = document.getElementById(`tab_camp_${t}`);
+        const viewEl = document.getElementById(`subview_camp_${t}`);
+        if (tabEl) {
+            if (t === tab) {
+                tabEl.classList.add('active');
+                tabEl.style.borderBottomColor = 'var(--primary-emerald)';
+                tabEl.style.color = 'var(--primary-emerald)';
+                tabEl.style.fontWeight = '600';
+            } else {
+                tabEl.classList.remove('active');
+                tabEl.style.borderBottomColor = 'transparent';
+                tabEl.style.color = 'var(--text-muted)';
+                tabEl.style.fontWeight = 'normal';
+            }
+        }
+        if (viewEl) {
+            viewEl.style.display = (t === tab) ? 'block' : 'none';
+        }
+    });
+    loadSelectedCampaignLogs();
+}
+
+async function loadSelectedCampaignLogs() {
+    try {
+        const selEl = document.getElementById('sel_campaign_filter');
+        const cid = selEl ? selEl.value : 'all';
+        const res = await fetch(`/api/campaigns/${cid}/logs?category=${currentCampSubTab}`);
+        if (res.ok) {
+            const calls = await res.json();
+            const tblId = currentCampSubTab === 'outbound' ? 'tbl_camp_outbound' : (currentCampSubTab === 'callbacks' ? 'tbl_camp_callbacks' : 'tbl_camp_dedicated');
+            const tbl = document.getElementById(tblId);
+            if (tbl) {
+                const emptyMsg = currentCampSubTab === 'outbound' ? 'No campaign outbound calls dialed yet' : (currentCampSubTab === 'callbacks' ? 'No inbound callbacks recorded for this campaign' : 'No dedicated inbound calls received on this DID');
+                tbl.innerHTML = calls.length ? calls.map(_renderRow).join('') : `<tr><td colspan="12" style="text-align:center;color:#64748B;padding:20px;">${emptyMsg}</td></tr>`;
+            }
+        }
+    } catch(e) {
+        console.error('Error loading campaign logs:', e);
+    }
+}
+
+function downloadCampaignReport(type) {
+    const selEl = document.getElementById('sel_campaign_filter');
+    const cid = selEl ? selEl.value : 'all';
+    window.location.href = `/api/campaigns/${cid}/export-csv?type=${type}`;
+}
+
 const loadCampaigns = async () => {
     try {
         const res = await fetch('/api/campaigns');
@@ -506,7 +671,7 @@ const loadCampaigns = async () => {
                 const barColor = pct >= 100 ? '#EF4444' : pct >= 80 ? '#F59E0B' : '#10B981';
                 return `
                 <div class="card" style="margin-bottom:12px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
                         <div><b>${c.name}</b> <span class="badge badge-${c.status === 'active' ? 'booked' : (c.status === 'paused' ? 'warm' : 'hot')}">${c.status}</span></div>
                         <div style="display:flex;gap:6px;">
                             <a href="/api/campaigns/${c.id}/export-csv?type=daily" class="btn btn-sm btn-cyan">📥 Daily CSV</a>
@@ -517,6 +682,14 @@ const loadCampaigns = async () => {
                     <p style="font-size:11px;color:#94A3B8;margin-top:4px;">Consumed: ${c.consumed_minutes||0} / ${c.allocated_minutes||0} Mins (${pct}%)</p>
                 </div>`;
             }).join('') : '<p style="color:#64748B;text-align:center;padding:20px;">No campaigns created yet</p>';
+
+            // Populate campaign filter dropdown
+            const filterSel = document.getElementById('sel_campaign_filter');
+            if (filterSel) {
+                const currentVal = filterSel.value;
+                filterSel.innerHTML = '<option value="all">All Campaigns</option>' + camps.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+                if (currentVal) filterSel.value = currentVal;
+            }
         }
     } catch(e) { console.error('Error loading campaigns:', e); }
 };
@@ -537,7 +710,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const tabName = tab.dataset.tab;
             if (tabName === 'view_settings') loadSettings();
             if (tabName === 'view_agents') loadAgents();
-            if (tabName === 'view_campaigns') loadCampaigns();
+            if (tabName === 'view_campaigns') { loadCampaigns(); loadSelectedCampaignLogs(); }
             if (tabName === 'view_outbound' || tabName === 'view_inbound') loadCalls();
             if (tabName === 'view_crm') loadCRM();
             if (tabName === 'view_stats') loadStats();
@@ -777,20 +950,34 @@ document.addEventListener('DOMContentLoaded', () => {
         loadAgents();
     });
 
+    // Calling mode dynamic peak container listener
+    document.getElementById('camp_calling_mode')?.addEventListener('change', function() {
+        const container = document.getElementById('custom_peak_container');
+        if (container) {
+            container.style.display = this.value === 'custom_peak' ? 'block' : 'none';
+        }
+    });
+
     // Campaign form submit
     document.getElementById('form_campaign').addEventListener('submit', async (e) => {
         e.preventDefault();
+        const mode = (document.getElementById('camp_calling_mode') || document.getElementById('camp_window'))?.value || 'regular';
         const formData = new FormData();
         formData.append('name', document.getElementById('camp_name').value.trim());
         formData.append('agent_profile_id', document.getElementById('camp_agent').value);
         formData.append('allocated_minutes', document.getElementById('camp_minutes').value);
-        formData.append('calling_window', document.getElementById('camp_window').value);
+        formData.append('calling_window', mode);
+        if (mode === 'custom_peak') {
+            formData.append('peak_start', document.getElementById('camp_peak_start')?.value || '18:00');
+            formData.append('peak_end', document.getElementById('camp_peak_end')?.value || '21:00');
+        }
         formData.append('daily_limit', document.getElementById('camp_daily_limit').value);
         formData.append('dedicated_inbound_number', document.getElementById('camp_inbound_num').value.trim());
         const file = document.getElementById('camp_file').files[0];
         if (file) formData.append('contacts_file', file);
         await fetch('/api/campaigns', { method: 'POST', body: formData });
         loadCampaigns();
+        loadSelectedCampaignLogs();
     });
 
     // File upload badge
@@ -811,12 +998,14 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSettings();
     loadAgents();
     loadCampaigns();
+    loadSelectedCampaignLogs();
 
     // Real-time background polling
     setInterval(loadCalls, 4000);
     setInterval(loadCRM, 5000);
     setInterval(loadStats, 6000);
     setInterval(loadUnifiedLogs, 3000);
+    setInterval(loadSelectedCampaignLogs, 5000);
 });
 
 function onEngineChange() {

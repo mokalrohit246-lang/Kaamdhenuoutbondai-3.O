@@ -153,7 +153,7 @@ async def get_calls(direction: Optional[str] = None, campaign_id: Optional[str] 
     db = await _adb()
     q = db.table("call_logs").select("*").order("timestamp", desc=True).limit(limit)
     if direction: q = q.eq("direction", direction)
-    if campaign_id: q = q.eq("campaign_id", campaign_id)
+    if campaign_id and campaign_id != "all": q = q.eq("campaign_id", campaign_id)
     res = await q.execute()
     return res.data or []
 

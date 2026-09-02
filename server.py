@@ -341,11 +341,16 @@ async def api_list_campaigns():
 async def api_create_campaign(req: Request):
     # Handle multipart form data
     form = await req.form()
+    calling_window = form.get("calling_window", "regular")
+    peak_start = form.get("peak_start", "18:00")
+    peak_end = form.get("peak_end", "21:00")
+    if calling_window == "custom_peak":
+        calling_window = f"custom_peak:{peak_start}-{peak_end}"
     data = {
         "name": form.get("name", "Untitled"),
         "agent_profile_id": form.get("agent_profile_id", ""),
         "allocated_minutes": int(form.get("allocated_minutes", 500)),
-        "calling_window": form.get("calling_window", "regular"),
+        "calling_window": calling_window,
         "daily_limit": int(form.get("daily_limit", 100)),
         "dedicated_inbound_number": form.get("dedicated_inbound_number", ""),
     }
@@ -376,17 +381,24 @@ async def api_resume_campaign(cid: str):
 
 @app.get("/api/campaigns/{cid}/logs")
 async def api_campaign_logs(cid: str, category: str = "outbound"):
+    c_id = None if cid == "all" else cid
     if category == "outbound":
-        return await get_calls(direction="outbound", campaign_id=cid)
-    elif category == "callback":
-        # Return inbound calls that match this campaign
-        return await get_calls(direction="inbound", campaign_id=cid)
+        return await get_calls(direction="outbound", campaign_id=c_id, limit=200)
+    elif category in ("callback", "callbacks"):
+        calls = await get_calls(direction="inbound", campaign_id=c_id, limit=200)
+        cb_calls = [c for c in calls if c.get("log_category") == "campaign_callback" or c.get("campaign_id")]
+        return cb_calls if cb_calls else calls
+    elif category in ("dedicated", "dedicated_inbound"):
+        calls = await get_calls(direction="inbound", campaign_id=c_id, limit=200)
+        ded_calls = [c for c in calls if c.get("log_category") == "dedicated_inbound"]
+        return ded_calls if ded_calls else calls
     else:
-        return await get_calls(campaign_id=cid)
+        return await get_calls(campaign_id=c_id, limit=200)
 
 @app.get("/api/campaigns/{cid}/export-csv")
 async def api_campaign_export(cid: str, type: str = "full"):
-    calls = await get_calls(campaign_id=cid, limit=5000)
+    c_id = None if cid == "all" else cid
+    calls = await get_calls(campaign_id=c_id, limit=5000)
     if type == "daily":
         today = datetime.utcnow().strftime("%Y-%m-%d")
         calls = [c for c in calls if c.get("timestamp", "").startswith(today)]
@@ -403,5 +415,5 @@ async def api_campaign_export(cid: str, type: str = "full"):
             c.get("summary", ""), c.get("duration_seconds", 0), c.get("cost_inr", 0.0)
         ])
     output.seek(0)
-    fname = f"campaign_{cid[:8]}_{type}_report.csv"
+    fname = f"campaign_{cid[:8] if cid != 'all' else 'all'}_{type}_report.csv"
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={fname}"})
