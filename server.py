@@ -48,6 +48,8 @@ class SingleCallReq(BaseModel):
     business_name: str = "Kaamdhenu Real Estate"
     service_type: str = "Luxury 2BHK/3BHK Apartments"
     broker_phone: Optional[str] = None
+    broker_email: Optional[str] = None
+    calcom_event_type_id: Optional[str] = None
     system_prompt: Optional[str] = None
     custom_prompt: Optional[str] = None
 
@@ -157,7 +159,10 @@ async def api_get_settings():
         "OUTBOUND_TRUNK_ID": db_s.get("OUTBOUND_TRUNK_ID") or os.getenv("OUTBOUND_TRUNK_ID", "ST_5fBqM5ZaW7pn"),
         "INBOUND_TRUNK_ID": db_s.get("INBOUND_TRUNK_ID") or os.getenv("INBOUND_TRUNK_ID", ""),
         "INBOUND_DISPATCH_RULE_ID": db_s.get("INBOUND_DISPATCH_RULE_ID") or os.getenv("INBOUND_DISPATCH_RULE_ID", ""),
-        "VOBIZ_API_URL": db_s.get("VOBIZ_API_URL") or os.getenv("VOBIZ_API_URL", "https://api.vobiz.ai/v1")
+        "VOBIZ_API_URL": db_s.get("VOBIZ_API_URL") or os.getenv("VOBIZ_API_URL", "https://api.vobiz.ai/v1"),
+        "CALCOM_API_KEY": db_s.get("CALCOM_API_KEY") or os.getenv("CALCOM_API_KEY", ""),
+        "CALCOM_EVENT_TYPE_ID": db_s.get("CALCOM_EVENT_TYPE_ID") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775"),
+        "CALCOM_TIMEZONE": db_s.get("CALCOM_TIMEZONE") or os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
     }
 
 @app.post("/api/settings")
@@ -298,6 +303,8 @@ async def api_dispatch(req: SingleCallReq):
     business_name = req.business_name
     service_type = req.service_type
     broker_phone = req.broker_phone
+    broker_email = req.broker_email or os.getenv("DEFAULT_BROKER_EMAIL", "")
+    calcom_event_type_id = req.calcom_event_type_id or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
     system_prompt = req.custom_prompt or req.system_prompt
 
     if req.agent_id:
@@ -309,6 +316,8 @@ async def api_dispatch(req: SingleCallReq):
             service_type = profile.get("service_type") or service_type
             system_prompt = req.custom_prompt or req.system_prompt or profile.get("system_prompt")
             broker_phone = req.broker_phone or profile.get("broker_phone") or profile.get("broker_whatsapp")
+            broker_email = req.broker_email or profile.get("broker_email") or broker_email
+            calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or calcom_event_type_id
 
     room_name = f"outbound-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
     meta = {
@@ -321,6 +330,8 @@ async def api_dispatch(req: SingleCallReq):
         "business_name": business_name,
         "service_type": service_type,
         "broker_phone": broker_phone,
+        "broker_email": broker_email,
+        "calcom_event_type_id": calcom_event_type_id,
         "system_prompt": system_prompt
     }
 
@@ -368,9 +379,9 @@ async def api_list_campaigns():
 async def api_create_campaign(req: Request):
     # Handle multipart form data
     form = await req.form()
-    calling_window = form.get("calling_window", "regular")
-    peak_start = form.get("peak_start", "18:00")
-    peak_end = form.get("peak_end", "21:00")
+    calling_window = form.get("calling_mode") or form.get("calling_window", "regular")
+    peak_start = form.get("peak_start_time") or form.get("peak_start", "18:00")
+    peak_end = form.get("peak_end_time") or form.get("peak_end", "21:00")
     if calling_window == "custom_peak":
         calling_window = f"custom_peak:{peak_start}-{peak_end}"
     data = {
@@ -378,8 +389,10 @@ async def api_create_campaign(req: Request):
         "agent_profile_id": form.get("agent_profile_id", ""),
         "allocated_minutes": int(form.get("allocated_minutes", 500)),
         "calling_window": calling_window,
-        "daily_limit": int(form.get("daily_limit", 100)),
+        "daily_limit": int(form.get("daily_call_limit") or form.get("daily_limit", 100)),
         "dedicated_inbound_number": form.get("dedicated_inbound_number", ""),
+        "broker_email": form.get("broker_email", ""),
+        "calcom_event_type_id": form.get("calcom_event_type_id", ""),
     }
     # Parse contacts file if uploaded
     contacts_file = form.get("contacts_file")

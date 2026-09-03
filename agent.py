@@ -38,7 +38,7 @@ try:
 except ImportError:
     pass
 
-from db import push_unified_log, log_call, find_recent_outbound_context, add_campaign_minutes, find_campaign_by_inbound_number
+from db import push_unified_log, log_call, find_recent_outbound_context, add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile
 from prompts import build_prompt
 from tools import RealEstateTools
 
@@ -107,6 +107,9 @@ async def entrypoint(ctx: agents.JobContext):
     agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
     campaign_id = None
     broker_phone = None
+    broker_email = None
+    calcom_api_key = None
+    calcom_event_type_id = None
     custom_prompt = None
     tool_ctx = None
     log_category = "general"
@@ -125,6 +128,9 @@ async def entrypoint(ctx: agents.JobContext):
                 agent_voice = m.get("agent_voice") or agent_voice
                 campaign_id = m.get("campaign_id")
                 broker_phone = m.get("broker_phone")
+                broker_email = m.get("broker_email")
+                calcom_api_key = m.get("calcom_api_key")
+                calcom_event_type_id = m.get("calcom_event_type_id")
                 custom_prompt = m.get("system_prompt")
             except Exception as e:
                 logger.warning(f"Metadata parse warning: {e}")
@@ -144,14 +150,33 @@ async def entrypoint(ctx: agents.JobContext):
                 if camp:
                     campaign_id = camp.get("id")
                     log_category = "dedicated_inbound"
+                    ag_id = camp.get("agent_profile_id")
+                    if ag_id:
+                        ag_prof = await get_agent_profile(ag_id)
+                        if ag_prof:
+                            agent_name = ag_prof.get("agent_name") or agent_name
+                            agent_voice = ag_prof.get("voice") or agent_voice
+                            business_name = ag_prof.get("business_name") or business_name
+                            service_type = ag_prof.get("service_type") or service_type
+                            broker_phone = ag_prof.get("broker_phone") or broker_phone
+                            broker_email = ag_prof.get("broker_email") or broker_email
+                            custom_prompt = ag_prof.get("system_prompt") or custom_prompt
+                            calcom_event_type_id = ag_prof.get("calcom_event_type_id") or camp.get("calcom_event_type_id") or calcom_event_type_id
                     await push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id)
                 else:
-                    # Check recent outbound context
+                    # Check recent outbound context (last 7 days)
                     ctx_info = await find_recent_outbound_context(phone_number)
                     if ctx_info.get("found"):
                         campaign_id = ctx_info.get("campaign_id") or campaign_id
                         lead_name = ctx_info.get("lead_name", lead_name)
+                        proj_name = ctx_info.get("project_name") or business_name
                         log_category = "campaign_callback"
+                        custom_prompt = (
+                            f"You are {agent_name}, Senior Property Consultant for Kaamdhenu Real Estate.\n"
+                            f"Important context: The client {lead_name} was recently called regarding {proj_name}.\n"
+                            f"Greeting: Speak this opening line: 'Namaste {lead_name}! Main {agent_name} Kaamdhenu Real Estate se baat kar rahi hoon. Aapko humare {proj_name} ke regarding call gaya tha... Batayein main aapki kya madad kar sakti hoon?'\n"
+                            f"Speak naturally in polite Hindi/Hinglish."
+                        )
                         await push_unified_log("CRM", "info", f"Callback detected from prior campaign lead: {lead_name}", call_id=call_id)
 
         # Build prompt safely
@@ -170,7 +195,10 @@ async def entrypoint(ctx: agents.JobContext):
             direction=direction,
             call_id=call_id,
             campaign_id=campaign_id,
-            broker_phone=broker_phone
+            broker_phone=broker_phone,
+            broker_email=broker_email,
+            calcom_api_key=calcom_api_key,
+            calcom_event_type_id=calcom_event_type_id
         )
 
         # Connect immediately

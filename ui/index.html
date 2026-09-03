@@ -146,6 +146,8 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
           <label>Assigned On-Site Broker WhatsApp (For Hot Leads)</label>
           <input type="text" id="single_broker_phone" placeholder="+918065353767" />
         </div>
+        <input type="hidden" id="single_calcom_event_type_id" />
+        <input type="hidden" id="single_broker_email" />
         <div class="form-group" style="grid-column: 1 / -1;">
           <label>Custom System Prompt Override (Optional — Leave blank to use default)</label>
           <textarea id="single_system_prompt" rows="3" placeholder="You are Priya calling Rahul to offer a special preview slot for 3BHK luxury flats..."></textarea>
@@ -188,6 +190,8 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         </div>
         <div class="form-group"><label>Daily Call Limit</label><input type="number" id="camp_daily_limit" value="100" /></div>
         <div class="form-group"><label>Dedicated Inbound Number (Optional)</label><input type="text" id="camp_inbound_num" placeholder="+918065353767" /></div>
+        <div class="form-group"><label>Broker Email (For Calendar Invites)</label><input type="email" id="camp_broker_email" placeholder="sales@project.com" /></div>
+        <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="camp_event_type_id" placeholder="Leave blank to use default 6934775" /></div>
         <div class="form-group" style="grid-column:1/-1;">
           <label>Upload Contacts (CSV/XLSX: Name, Phone, Budget/Notes)</label>
           <input type="file" id="camp_file" accept=".csv,.xlsx" style="padding:12px;" />
@@ -311,6 +315,8 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         </select></div>
         <div class="form-group"><label>Assigned DID</label><input type="text" id="ag_did" placeholder="+918065353767" /></div>
         <div class="form-group"><label>Broker WhatsApp Alert Number</label><input type="text" id="ag_broker" placeholder="+919892057717" /></div>
+        <div class="form-group"><label>Broker Email (Calendar Invites)</label><input type="email" id="ag_broker_email" placeholder="sales@project.com" /></div>
+        <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="ag_event_type_id" placeholder="6934775" /></div>
         <div class="form-group"><label>Service Type</label><input type="text" id="ag_service" value="Luxury 2BHK/3BHK Apartments" /></div>
         <div class="form-group" style="grid-column:1/-1;"><label>System Prompt</label><textarea id="ag_prompt" rows="6" style="font-family:monospace; font-size:12px; height:200px;" placeholder="You are {agent_name} from {business_name}..."></textarea></div>
         <div class="form-group" style="grid-column:1/-1; display:flex; gap:10px;">
@@ -451,6 +457,37 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       </div>
       <div style="margin-top: 16px;">
         <button class="btn" style="background:#F59E0B; color:#000; font-weight:700;" onclick="saveVoiceSettings()">⚡ Save Voice Configuration</button>
+      </div>
+    </div>
+
+    <!-- Cal.com Master Calendar Sync Card -->
+    <div class="card" style="border: 1px solid #10B981; background: #0F172A; margin-bottom: 20px;">
+      <div class="card-header" style="border-bottom: 1px solid #334155; padding-bottom: 12px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:16px;">📅</span>
+          <span style="font-size:15px; font-weight:700; color:#F8FAFC;">Cal.com Master Calendar Sync</span>
+          <span class="badge" id="calcom_status_badge" style="background:rgba(16,185,129,0.2); color:#10B981;">CONFIGURED</span>
+        </div>
+      </div>
+      <p style="color:#94A3B8; font-size:12px; margin: 10px 0 16px 0;">Configure Cal.com master booking API key, default event type ID, and timezone for zero-latency multi-calendar appointment bookings.</p>
+      
+      <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px;">
+        <div class="form-group">
+          <label>Cal.com Master API Key</label>
+          <input type="password" id="setting_calcom_api_key" placeholder="cal_live_..." />
+        </div>
+        <div class="form-group">
+          <label>Default Event Type ID</label>
+          <input type="text" id="setting_calcom_event_type_id" placeholder="6934775" />
+        </div>
+        <div class="form-group">
+          <label>Timezone</label>
+          <input type="text" id="setting_calcom_timezone" value="Asia/Kolkata" />
+        </div>
+      </div>
+      <div style="margin-top: 16px; display: flex; align-items: center; justify-content: space-between;">
+        <button class="btn" style="background:#10B981; color:#000; font-weight:700;" onclick="saveCalcomSettings()">💾 Save Calendar Settings</button>
+        <span id="calcom_connected_indicator" style="color: #10B981; font-weight: 600; font-size: 13px; display: none;">✅ Connected to Cal.com</span>
       </div>
     </div>
 
@@ -617,8 +654,20 @@ async function deleteAgent(id) {
 }
 
 function editAgent(id) {
-    // For now, just scroll to form - full edit can be added later
+    const a = allAgentProfiles.find(x => x.id === id);
+    if (!a) return;
     document.querySelector('[data-tab="view_agents"]').click();
+    document.getElementById('ag_name').value = a.agent_name || '';
+    document.getElementById('ag_business').value = a.business_name || '';
+    if (a.voice) document.getElementById('ag_voice').value = a.voice;
+    document.getElementById('ag_did').value = a.assigned_did || '';
+    document.getElementById('ag_broker').value = a.broker_phone || '';
+    const emailEl = document.getElementById('ag_broker_email');
+    if (emailEl) emailEl.value = a.broker_email || '';
+    const eventEl = document.getElementById('ag_event_type_id');
+    if (eventEl) eventEl.value = a.calcom_event_type_id || '';
+    document.getElementById('ag_service').value = a.service_type || 'Luxury 2BHK/3BHK Apartments';
+    document.getElementById('ag_prompt').value = a.system_prompt || '';
 }
 
 // Campaigns
@@ -925,6 +974,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const srvEl = document.getElementById('sc_service');
             if (srvEl && profile.service_type) srvEl.value = profile.service_type;
+
+            const calEl = document.getElementById('single_calcom_event_type_id');
+            if (calEl) calEl.value = profile.calcom_event_type_id || '';
+
+            const emailEl = document.getElementById('single_broker_email');
+            if (emailEl) emailEl.value = profile.broker_email || '';
         }
     });
 
@@ -944,6 +999,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const srvVal = document.getElementById('sc_service')?.value.trim() || 'Luxury Properties';
         const brokerVal = (document.getElementById('single_broker_phone') || document.getElementById('sc_broker'))?.value.trim() || null;
         const promptVal = (document.getElementById('single_system_prompt') || document.getElementById('sc_prompt'))?.value.trim() || null;
+        const calIdVal = document.getElementById('single_calcom_event_type_id')?.value || selProfile?.calcom_event_type_id || null;
+        const emailVal = document.getElementById('single_broker_email')?.value || selProfile?.broker_email || null;
 
         const payload = {
             agent_id: agentId,
@@ -955,6 +1012,8 @@ document.addEventListener('DOMContentLoaded', () => {
             business_name: bizVal,
             service_type: srvVal,
             broker_phone: brokerVal,
+            broker_email: emailVal,
+            calcom_event_type_id: calIdVal,
             system_prompt: promptVal
         };
 
@@ -988,6 +1047,8 @@ document.addEventListener('DOMContentLoaded', () => {
             voice: document.getElementById('ag_voice').value,
             assigned_did: document.getElementById('ag_did').value.trim(),
             broker_phone: document.getElementById('ag_broker').value.trim(),
+            broker_email: document.getElementById('ag_broker_email')?.value.trim() || '',
+            calcom_event_type_id: document.getElementById('ag_event_type_id')?.value.trim() || '',
             service_type: document.getElementById('ag_service').value.trim(),
             system_prompt: document.getElementById('ag_prompt').value.trim()
         };
@@ -1019,6 +1080,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         formData.append('daily_limit', document.getElementById('camp_daily_limit').value);
         formData.append('dedicated_inbound_number', document.getElementById('camp_inbound_num').value.trim());
+        formData.append('broker_email', document.getElementById('camp_broker_email')?.value.trim() || '');
+        formData.append('calcom_event_type_id', document.getElementById('camp_event_type_id')?.value.trim() || '');
         const file = document.getElementById('camp_file').files[0];
         if (file) formData.append('contacts_file', file);
         await fetch('/api/campaigns', { method: 'POST', body: formData });
@@ -1125,12 +1188,53 @@ async function loadSettings() {
             if (d.INBOUND_TRUNK_ID) document.getElementById('cfg_vob_inbound_trunk').value = d.INBOUND_TRUNK_ID;
             if (d.INBOUND_DISPATCH_RULE_ID) document.getElementById('cfg_vob_dispatch_rule').value = d.INBOUND_DISPATCH_RULE_ID;
             if (d.VOBIZ_API_URL) document.getElementById('cfg_vob_api_url').value = d.VOBIZ_API_URL;
+            if (d.CALCOM_API_KEY) {
+                const el = document.getElementById('setting_calcom_api_key');
+                if (el) el.value = d.CALCOM_API_KEY;
+                const ind = document.getElementById('calcom_connected_indicator');
+                if (ind) ind.style.display = 'inline';
+            }
+            if (d.CALCOM_EVENT_TYPE_ID) {
+                const el = document.getElementById('setting_calcom_event_type_id');
+                if (el) el.value = d.CALCOM_EVENT_TYPE_ID;
+            }
+            if (d.CALCOM_TIMEZONE) {
+                const el = document.getElementById('setting_calcom_timezone');
+                if (el) el.value = d.CALCOM_TIMEZONE;
+            }
             
             const cleanDid = (d.VOBIZ_OUTBOUND_NUMBER || '').replace('+', '');
             const lkHost = (d.LIVEKIT_URL || '').replace('wss://', '').replace('.livekit.cloud', '.sip.livekit.cloud');
             document.getElementById('cfg_lk_sip_uri').value = `sip:${cleanDid}@${lkHost}`;
         }
     } catch (e) {}
+}
+
+async function saveCalcomSettings() {
+    const key = (document.getElementById('setting_calcom_api_key')?.value || '').trim();
+    const eventId = (document.getElementById('setting_calcom_event_type_id')?.value || '').trim();
+    const tz = (document.getElementById('setting_calcom_timezone')?.value || '').trim() || 'Asia/Kolkata';
+    const payload = {
+        CALCOM_API_KEY: key,
+        CALCOM_EVENT_TYPE_ID: eventId,
+        CALCOM_TIMEZONE: tz
+    };
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+            const ind = document.getElementById('calcom_connected_indicator');
+            if (ind && key) ind.style.display = 'inline';
+            alert("Cal.com Calendar Settings Saved Successfully!");
+        } else {
+            alert("Failed to save Cal.com settings");
+        }
+    } catch(e) {
+        alert("Error saving settings: " + e);
+    }
 }
 
 async function saveVoiceSettings() {

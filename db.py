@@ -59,15 +59,50 @@ async def delete_client_number(cid: str):
     db = await _adb()
     await db.table("client_numbers").delete().eq("id", cid).execute()
 
-async def insert_appointment(name: str, phone: str, date: str, time: str, service: str, budget: str = "", property_type: str = ""):
+async def insert_appointment(
+    name: str, phone: str, date: str, time: str, service: str = "Site Visit",
+    budget: str = "", property_type: str = "", pickup_required: bool = False,
+    pickup_address: str = "", calcom_booking_uid: str = "", **kwargs
+):
     full_id = str(uuid.uuid4())
     db = await _adb()
-    await db.table("appointments").insert({
+    row = {
         "id": full_id, "name": name, "phone": phone, "date": date, "time": time,
         "service": service, "budget": budget, "property_type": property_type,
+        "pickup_required": pickup_required, "pickup_address": pickup_address,
+        "calcom_booking_uid": calcom_booking_uid,
         "status": "booked", "created_at": datetime.utcnow().isoformat()
-    }).execute()
+    }
+    for k, v in kwargs.items():
+        row[k] = v
+    try:
+        await db.table("appointments").insert(row).execute()
+    except Exception as e:
+        # Fallback without extra columns if schema not yet updated
+        logger.warning(f"insert_appointment fallback due to: {e}")
+        await db.table("appointments").insert({
+            "id": full_id, "name": name, "phone": phone, "date": date, "time": time,
+            "service": service, "budget": budget, "property_type": property_type,
+            "status": "booked", "created_at": datetime.utcnow().isoformat()
+        }).execute()
     return full_id[:8].upper()
+
+# Alias book_appointment to insert_appointment
+book_appointment = insert_appointment
+
+async def insert_whatsapp_log(phone_number: str, message: str, status: str = "sent", call_id: Optional[str] = None):
+    try:
+        db = await _adb()
+        await db.table("whatsapp_logs").insert({
+            "id": str(uuid.uuid4()),
+            "phone_number": phone_number,
+            "message": message[:1000],
+            "status": status,
+            "call_id": call_id,
+            "created_at": datetime.utcnow().isoformat()
+        }).execute()
+    except Exception as e:
+        logger.warning(f"Failed to log whatsapp message: {e}")
 
 async def check_slot(date: str, time: str) -> bool:
     db = await _adb()

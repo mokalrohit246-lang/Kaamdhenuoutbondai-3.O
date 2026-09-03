@@ -7,14 +7,27 @@ from typing import Optional
 from livekit import agents, api
 from livekit.agents import llm
 from db import (
-    check_slot, get_next_available, insert_appointment, log_call,
-    push_unified_log, add_contact_memory, sync_google_sheets_row
+    check_slot, get_next_available, insert_appointment, book_appointment, log_call,
+    push_unified_log, add_contact_memory, sync_google_sheets_row, insert_whatsapp_log
 )
 
 logger = logging.getLogger("kaamdhenu-tools")
 
 class RealEstateTools(llm.ToolContext):
-    def __init__(self, ctx: agents.JobContext, phone_number: str = "", lead_name: str = "", direction: str = "inbound", call_id: str = "", campaign_id: Optional[str] = None, broker_phone: Optional[str] = None, sheets_webhook: Optional[str] = None):
+    def __init__(
+        self,
+        ctx: agents.JobContext,
+        phone_number: str = "",
+        lead_name: str = "",
+        direction: str = "inbound",
+        call_id: str = "",
+        campaign_id: Optional[str] = None,
+        broker_phone: Optional[str] = None,
+        broker_email: Optional[str] = None,
+        calcom_api_key: Optional[str] = None,
+        calcom_event_type_id: Optional[str] = None,
+        sheets_webhook: Optional[str] = None
+    ):
         self.ctx = ctx
         self.phone_number = phone_number
         self.lead_name = lead_name
@@ -22,6 +35,9 @@ class RealEstateTools(llm.ToolContext):
         self.call_id = call_id
         self.campaign_id = campaign_id
         self.broker_phone = broker_phone or os.getenv("DEFAULT_BROKER_WHATSAPP", "")
+        self.broker_email = broker_email or os.getenv("DEFAULT_BROKER_EMAIL", "")
+        self.calcom_api_key = calcom_api_key or os.getenv("CALCOM_API_KEY", "cal_live_b3cec47f49e2eeb34a38f0500002a22a")
+        self.calcom_event_type_id = calcom_event_type_id or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
         self.sheets_webhook = sheets_webhook
         self._call_start_time = time.time()
         self.recording_url: Optional[str] = None
@@ -128,13 +144,71 @@ class RealEstateTools(llm.ToolContext):
         self.lead_score = "Hot"
         self.commitment_risk = "High"
         self.outcome = "booked"
+
+        parts = visit_datetime.strip().split(" ")
+        date = parts[0] if len(parts) > 0 else visit_datetime
+        vtime = parts[1] if len(parts) > 1 else "11:00"
+        if len(vtime) == 4 and ":" not in vtime:
+            vtime = f"{vtime[:2]}:{vtime[2:]}"
+
+        # 1. Parse into ISO 8601
+        calcom_booking_uid = ""
         try:
-            parts = visit_datetime.split(" ")
-            date = parts[0] if len(parts) > 0 else visit_datetime
-            vtime = parts[1] if len(parts) > 1 else "11:00"
-            booking_id = await insert_appointment(client_name, self.phone_number, date, vtime, "Site Visit", self.budget, self.bhk_requirement)
+            from datetime import datetime as _dt, timedelta as _td
+            start_dt = _dt.strptime(f"{date} {vtime}", "%Y-%m-%d %H:%M")
+            end_dt = start_dt + _td(minutes=45)
+            iso_start_time = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            iso_end_time = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        except Exception:
+            iso_start_time = f"{date}T{vtime}:00.000Z"
+            iso_end_time = f"{date}T12:00:00.000Z"
+
+        # 2. Asynchronous, non-blocking Cal.com booking (timeout=4s)
+        if self.calcom_api_key and self.calcom_event_type_id:
+            try:
+                clean_phone = self.phone_number.replace("+", "").replace(" ", "").strip() or "client"
+                url = f"https://api.cal.com/v1/bookings?apiKey={self.calcom_api_key}"
+                event_id = int(self.calcom_event_type_id) if str(self.calcom_event_type_id).isdigit() else self.calcom_event_type_id
+                body = {
+                    "eventTypeId": event_id,
+                    "start": iso_start_time,
+                    "end": iso_end_time,
+                    "responses": {
+                        "name": client_name or self.lead_name or "Real Estate Lead",
+                        "email": f"{clean_phone}@leads.kaamdhenu.ai",
+                        "notes": f"Pickup: {'Yes - ' + pickup_address if pickup_required else 'No'}. Campaign: {self.campaign_id or 'Direct'}"
+                    },
+                    "metadata": {"broker_phone": self.broker_phone, "broker_email": self.broker_email},
+                    "timeZone": os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
+                }
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    resp = await client.post(url, json=body)
+                    if resp.status_code in (200, 201):
+                        data = resp.json()
+                        calcom_booking_uid = data.get("booking", {}).get("uid") or data.get("uid", "")
+                        await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
+                    else:
+                        logger.warning(f"Cal.com non-200 response: {resp.status_code} - {resp.text}")
+            except Exception as cal_err:
+                logger.warning(f"Cal.com async booking fallback: {cal_err}")
+                await push_unified_log("Cal.com", "warning", f"Cal.com sync fallback: {cal_err}", call_id=self.call_id)
+
+        # 3. Save to local DB
+        try:
+            booking_id = await insert_appointment(
+                name=client_name or self.lead_name,
+                phone=self.phone_number,
+                date=date,
+                time=vtime,
+                service="Site Visit",
+                budget=self.budget,
+                property_type=self.bhk_requirement,
+                pickup_required=pickup_required,
+                pickup_address=pickup_address,
+                calcom_booking_uid=calcom_booking_uid
+            )
             pickup_msg = f" with cab pickup from {pickup_address}" if pickup_required and pickup_address else ""
-            await push_unified_log("Tools", "info", f"Site visit booked: {client_name} on {visit_datetime}{pickup_msg}", call_id=self.call_id)
+            await push_unified_log("Tools", "info", f"Site visit booked: {client_name} on {visit_datetime}{pickup_msg} (Cal.com UID: {calcom_booking_uid or 'Local'})", call_id=self.call_id)
             return f"Site visit confirmed for {visit_datetime}! Ref: {booking_id}.{' Cab pickup arranged from ' + pickup_address + '.' if pickup_required and pickup_address else ''}"
         except Exception as e:
             logger.error(f"Site visit booking error: {e}")
@@ -173,23 +247,28 @@ class RealEstateTools(llm.ToolContext):
     async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
         """Send property brochure, floor plans, and site location to lead via WhatsApp. Call when client agrees to receive details."""
         phone = phone_number or self.phone_number
-        self.whatsapp_status = "Sent Auto"
+        self.whatsapp_status = "✅ Sent Auto"
         sid = os.getenv("TWILIO_ACCOUNT_SID", "")
         token = os.getenv("TWILIO_AUTH_TOKEN", "")
         from_wa = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
+        msg = f"Namaste {self.client_name or self.lead_name}! \U0001f3e1\nThank you for speaking with Kaamdhenu Real Estate.\nHere are the brochure & floor plans for our premium properties.\nLocation: Near City Center.\nSee you at the site visit!"
+
+        await insert_whatsapp_log(phone, msg, "dispatched", self.call_id)
+
         if not (sid and token):
             await push_unified_log("WhatsApp", "info", f"Brochure dispatched (demo): {phone}", call_id=self.call_id)
             return "Brochure sent to your WhatsApp."
         try:
             from twilio.rest import Client
             to_wa = f"whatsapp:{phone}" if not phone.startswith("whatsapp:") else phone
-            msg = f"Namaste {self.client_name or self.lead_name}! \U0001f3e1\nThank you for speaking with Kaamdhenu Real Estate.\nHere are the brochure & floor plans for our premium properties.\nLocation: Near City Center.\nSee you at the site visit!"
             loop = asyncio.get_event_loop()
             client = Client(sid, token)
             await loop.run_in_executor(None, lambda: client.messages.create(body=msg, from_=from_wa, to=to_wa))
+            await insert_whatsapp_log(phone, msg, "delivered", self.call_id)
             await push_unified_log("WhatsApp", "info", f"Brochure sent to lead: {phone}", call_id=self.call_id)
             return "Brochure sent to your WhatsApp."
         except Exception as exc:
+            await insert_whatsapp_log(phone, msg, f"failed: {exc}", self.call_id)
             await push_unified_log("WhatsApp", "error", f"Lead WhatsApp error: {exc}", call_id=self.call_id)
             return "Brochure queued for delivery."
 
