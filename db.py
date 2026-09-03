@@ -268,7 +268,20 @@ async def get_agent_profile(pid: str):
 async def list_campaigns():
     db = await _adb()
     res = await db.table("campaigns").select("*").order("created_at", desc=True).execute()
-    return res.data or []
+    camps = res.data or []
+    try:
+        call_res = await db.table("call_logs").select("campaign_id, direction, outcome, lead_score, site_visit_date").execute()
+        all_calls = call_res.data or []
+        for c in camps:
+            cid = c.get("id")
+            c_calls = [x for x in all_calls if x.get("campaign_id") == cid]
+            c["total_dispatched"] = len([x for x in c_calls if x.get("direction") == "outbound"])
+            c["answered_count"] = len([x for x in c_calls if x.get("outcome") != "no_answer"])
+            c["hot_leads"] = len([x for x in c_calls if x.get("lead_score") == "Hot"])
+            c["site_visits"] = len([x for x in c_calls if x.get("site_visit_date")])
+    except Exception as e:
+        logger.warning(f"Error enriching campaign stats: {e}")
+    return camps
 
 async def create_campaign(data: dict):
     db = await _adb()

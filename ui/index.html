@@ -165,7 +165,11 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       <form id="form_campaign" class="form-grid">
         <div class="form-group"><label>Campaign Name</label><input type="text" id="camp_name" placeholder="Horizon Phase-1 Launch" required /></div>
         <div class="form-group"><label>Select Agent</label><select id="camp_agent"><option value="">-- Select Agent Profile --</option></select></div>
-        <div class="form-group"><label>Minute Budget Allocation</label><input type="number" id="camp_minutes" value="500" min="1" /><small style="color:#94A3B8;">Auto-stops when exhausted</small></div>
+        <div class="form-group">
+          <label>Minute Allocation Budget</label>
+          <input type="number" id="camp_allocated_minutes" value="500" min="1" />
+          <small style="color:#94A3B8;">Auto-stops dialing when quota is exhausted</small>
+        </div>
         <div class="form-group">
           <label>Calling Window</label>
           <select id="camp_calling_mode">
@@ -188,10 +192,21 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
             </div>
           </div>
         </div>
+        <div class="form-group">
+          <label>Calendar Event Setup</label>
+          <select id="camp_calendar_mode">
+            <option value="auto" selected>⚡ 1-Click Auto-Create New Dedicated Event (Automated per Campaign)</option>
+            <option value="default">📌 Use Master Default Calendar (6934775)</option>
+            <option value="manual">✏️ Enter Existing Event ID Manually</option>
+          </select>
+        </div>
+        <div class="form-group" id="camp_manual_event_container" style="display: none;">
+          <label>Manual Cal.com Event Type ID</label>
+          <input type="text" id="camp_custom_event_id" placeholder="e.g. 6934775" />
+        </div>
+        <div class="form-group"><label>Broker Email for Calendar Sync</label><input type="email" id="camp_broker_email" placeholder="sales@project.com" /></div>
         <div class="form-group"><label>Daily Call Limit</label><input type="number" id="camp_daily_limit" value="100" /></div>
-        <div class="form-group"><label>Dedicated Inbound Number (Optional)</label><input type="text" id="camp_inbound_num" placeholder="+918065353767" /></div>
-        <div class="form-group"><label>Broker Email (For Calendar Invites)</label><input type="email" id="camp_broker_email" placeholder="sales@project.com" /></div>
-        <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="camp_event_type_id" placeholder="Leave blank to use default 6934775" /></div>
+        <div class="form-group"><label>Dedicated Inbound Number (Optional)</label><input type="text" id="camp_dedicated_inbound" placeholder="+918065353767" /></div>
         <div class="form-group" style="grid-column:1/-1;">
           <label>Upload Contacts (CSV/XLSX: Name, Phone, Budget/Notes)</label>
           <input type="file" id="camp_file" accept=".csv,.xlsx" style="padding:12px;" />
@@ -474,7 +489,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
       <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px;">
         <div class="form-group">
           <label>Cal.com Master API Key</label>
-          <input type="password" id="setting_calcom_api_key" placeholder="cal_live_..." />
+          <input type="password" id="setting_calcom_api_key" placeholder="cal_live_b3cec47f49e2eeb34a38f0500002a22a" />
         </div>
         <div class="form-group">
           <label>Default Event Type ID</label>
@@ -730,19 +745,56 @@ const loadCampaigns = async () => {
         if (res.ok) {
             const camps = await res.json();
             document.getElementById('campaigns_list').innerHTML = camps.length ? camps.map(c => {
-                const pct = c.allocated_minutes ? Math.min(100, Math.round((c.consumed_minutes||0) / c.allocated_minutes * 100)) : 0;
-                const barColor = pct >= 100 ? '#EF4444' : pct >= 80 ? '#F59E0B' : '#10B981';
+                const consumed = Number(c.consumed_minutes || 0);
+                const allocated = Number(c.allocated_minutes || 500);
+                const pct = allocated ? Math.min(100, Math.round((consumed / allocated) * 100)) : 0;
+                const barColor = pct >= 100 ? '#EF4444' : (pct >= 80 ? '#F59E0B' : '#10B981');
+                const statusBadge = c.status === 'active' ? 'badge-booked' : (c.status === 'paused' ? 'badge-warm' : 'badge-hot');
+                const isPaused = c.status === 'paused';
                 return `
-                <div class="card" style="margin-bottom:12px;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
-                        <div><b>${c.name}</b> <span class="badge badge-${c.status === 'active' ? 'booked' : (c.status === 'paused' ? 'warm' : 'hot')}">${c.status}</span></div>
+                <div class="card" style="margin-bottom:14px; border: 1px solid #334155; background: #0F172A;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+                        <div>
+                            <b style="font-size:15px; color:#F8FAFC;">${c.name}</b> 
+                            <span class="badge ${statusBadge}">${(c.status||'active').toUpperCase()}</span>
+                            <span style="font-size:11px;color:#94A3B8;margin-left:8px;">📅 Cal.com ID: <code style="color:#38BDF8;">${c.calcom_event_type_id || '6934775'}</code></span>
+                            ${c.dedicated_inbound_number ? `<span style="font-size:11px;color:#10B981;margin-left:8px;">📞 DID: ${c.dedicated_inbound_number}</span>` : ''}
+                        </div>
                         <div style="display:flex;gap:6px;">
+                            <button class="btn btn-sm ${isPaused ? 'btn-cyan' : 'btn-danger'}" onclick="toggleCampaignPause('${c.id}', '${c.status}')">${isPaused ? '▶️ Resume' : '⏸️ Pause'}</button>
                             <a href="/api/campaigns/${c.id}/export-csv?type=daily" class="btn btn-sm btn-cyan">📥 Daily CSV</a>
                             <a href="/api/campaigns/${c.id}/export-csv?type=full" class="btn btn-sm btn-cyan">📥 Full CSV</a>
                         </div>
                     </div>
-                    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${barColor};"></div></div>
-                    <p style="font-size:11px;color:#94A3B8;margin-top:4px;">Consumed: ${c.consumed_minutes||0} / ${c.allocated_minutes||0} Mins (${pct}%)</p>
+                    
+                    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 12px; text-align:center;">
+                        <div style="background:rgba(30,41,59,0.5); padding:8px; border-radius:6px; border:1px solid #1E293B;">
+                            <div style="font-size:10px; color:#94A3B8;">TOTAL DISPATCHED</div>
+                            <div style="font-size:15px; font-weight:700; color:#F8FAFC;">${c.total_dispatched || c.total_contacts || 0}</div>
+                        </div>
+                        <div style="background:rgba(30,41,59,0.5); padding:8px; border-radius:6px; border:1px solid #1E293B;">
+                            <div style="font-size:10px; color:#94A3B8;">ANSWERED</div>
+                            <div style="font-size:15px; font-weight:700; color:#38BDF8;">${c.answered_count || c.total_dispatched || 0}</div>
+                        </div>
+                        <div style="background:rgba(30,41,59,0.5); padding:8px; border-radius:6px; border:1px solid #1E293B;">
+                            <div style="font-size:10px; color:#94A3B8;">HOT LEADS 🔥</div>
+                            <div style="font-size:15px; font-weight:700; color:#F59E0B;">${c.hot_leads || 0}</div>
+                        </div>
+                        <div style="background:rgba(30,41,59,0.5); padding:8px; border-radius:6px; border:1px solid #1E293B;">
+                            <div style="font-size:10px; color:#94A3B8;">SITE VISITS 🚗</div>
+                            <div style="font-size:15px; font-weight:700; color:#10B981;">${c.site_visits || 0}</div>
+                        </div>
+                        <div style="background:rgba(30,41,59,0.5); padding:8px; border-radius:6px; border:1px solid #1E293B;">
+                            <div style="font-size:10px; color:#94A3B8;">MINUTES CONSUMED</div>
+                            <div style="font-size:15px; font-weight:700; color:${barColor};">${consumed}m</div>
+                        </div>
+                    </div>
+
+                    <div class="progress-bar" style="height:8px; background:#1E293B; border-radius:4px; overflow:hidden;"><div class="progress-fill" style="width:${pct}%;background:${barColor}; height:100%;"></div></div>
+                    <div style="display:flex; justify-content:space-between; font-size:11px; color:#94A3B8; margin-top:6px;">
+                        <span>Consumed: <b>${consumed} / ${allocated} Mins</b> (${pct}%)</span>
+                        <span style="color:${barColor}; font-weight:600;">${pct >= 100 ? '⛔ Quota Exhausted' : (pct >= 80 ? '⚠️ High Usage' : '✅ Quota Healthy')}</span>
+                    </div>
                 </div>`;
             }).join('') : '<p style="color:#64748B;text-align:center;padding:20px;">No campaigns created yet</p>';
 
@@ -757,7 +809,21 @@ const loadCampaigns = async () => {
     } catch(e) { console.error('Error loading campaigns:', e); }
 };
 
-function pauseCampaign() { /* placeholder */ }
+async function toggleCampaignPause(cid, currentStatus) {
+    const endpoint = currentStatus === 'paused' ? `/api/campaigns/${cid}/resume` : `/api/campaigns/${cid}/pause`;
+    await fetch(endpoint, { method: 'POST' });
+    loadCampaigns();
+}
+
+function pauseCampaign() {
+    const selEl = document.getElementById('sel_campaign_filter');
+    const cid = selEl ? selEl.value : null;
+    if (cid && cid !== 'all') {
+        toggleCampaignPause(cid, 'active');
+    } else {
+        alert("Please select a specific campaign below to pause");
+    }
+}
 
 document.addEventListener('DOMContentLoaded', () => {
     // Nav Navigation (Zero popups)
@@ -1065,28 +1131,69 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
+    // Calendar mode dynamic manual container listener
+    document.getElementById('camp_calendar_mode')?.addEventListener('change', function() {
+        const container = document.getElementById('camp_manual_event_container');
+        if (container) {
+            container.style.display = this.value === 'manual' ? 'block' : 'none';
+        }
+    });
+
     // Campaign form submit
     document.getElementById('form_campaign').addEventListener('submit', async (e) => {
         e.preventDefault();
+        const btn = e.target.querySelector('button[type="submit"]');
+        if (btn) { btn.disabled = true; btn.textContent = "⏳ Launching Campaign..."; }
+
         const mode = (document.getElementById('camp_calling_mode') || document.getElementById('camp_window'))?.value || 'regular';
+        const calMode = document.getElementById('camp_calendar_mode')?.value || 'auto';
         const formData = new FormData();
         formData.append('name', document.getElementById('camp_name').value.trim());
         formData.append('agent_profile_id', document.getElementById('camp_agent').value);
-        formData.append('allocated_minutes', document.getElementById('camp_minutes').value);
+        formData.append('allocated_minutes', (document.getElementById('camp_allocated_minutes') || document.getElementById('camp_minutes'))?.value || '500');
+        formData.append('calling_mode', mode);
         formData.append('calling_window', mode);
         if (mode === 'custom_peak') {
             formData.append('peak_start', document.getElementById('camp_peak_start')?.value || '18:00');
             formData.append('peak_end', document.getElementById('camp_peak_end')?.value || '21:00');
+            formData.append('peak_start_time', document.getElementById('camp_peak_start')?.value || '18:00');
+            formData.append('peak_end_time', document.getElementById('camp_peak_end')?.value || '21:00');
         }
-        formData.append('daily_limit', document.getElementById('camp_daily_limit').value);
-        formData.append('dedicated_inbound_number', document.getElementById('camp_inbound_num').value.trim());
+        formData.append('calendar_mode', calMode);
+        if (calMode === 'manual') {
+            const manualId = (document.getElementById('camp_custom_event_id') || document.getElementById('camp_event_type_id'))?.value.trim() || '';
+            formData.append('custom_event_id', manualId);
+            formData.append('calcom_event_type_id', manualId);
+        } else if (calMode === 'default') {
+            formData.append('calcom_event_type_id', '6934775');
+        }
+        formData.append('daily_limit', document.getElementById('camp_daily_limit')?.value || '100');
+        formData.append('daily_call_limit', document.getElementById('camp_daily_limit')?.value || '100');
+        formData.append('dedicated_inbound_number', (document.getElementById('camp_dedicated_inbound') || document.getElementById('camp_inbound_num'))?.value.trim() || '');
         formData.append('broker_email', document.getElementById('camp_broker_email')?.value.trim() || '');
-        formData.append('calcom_event_type_id', document.getElementById('camp_event_type_id')?.value.trim() || '');
-        const file = document.getElementById('camp_file').files[0];
+        
+        const file = document.getElementById('camp_file')?.files[0];
         if (file) formData.append('contacts_file', file);
-        await fetch('/api/campaigns', { method: 'POST', body: formData });
-        loadCampaigns();
-        loadSelectedCampaignLogs();
+        
+        try {
+            const res = await fetch('/api/campaigns', { method: 'POST', body: formData });
+            if (res.ok) {
+                alert("Campaign Created & Launched Successfully!");
+                document.getElementById('form_campaign').reset();
+                if (document.getElementById('camp_file_badge')) document.getElementById('camp_file_badge').textContent = '';
+                if (document.getElementById('custom_peak_container')) document.getElementById('custom_peak_container').style.display = 'none';
+                if (document.getElementById('camp_manual_event_container')) document.getElementById('camp_manual_event_container').style.display = 'none';
+            } else {
+                const err = await res.json();
+                alert("Failed to create campaign: " + (err.detail || "Server error"));
+            }
+        } catch(err) {
+            alert("Error: " + err);
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = "🚀 Launch Campaign"; }
+            loadCampaigns();
+            loadSelectedCampaignLogs();
+        }
     });
 
     // File upload badge
@@ -1188,11 +1295,13 @@ async function loadSettings() {
             if (d.INBOUND_TRUNK_ID) document.getElementById('cfg_vob_inbound_trunk').value = d.INBOUND_TRUNK_ID;
             if (d.INBOUND_DISPATCH_RULE_ID) document.getElementById('cfg_vob_dispatch_rule').value = d.INBOUND_DISPATCH_RULE_ID;
             if (d.VOBIZ_API_URL) document.getElementById('cfg_vob_api_url').value = d.VOBIZ_API_URL;
-            if (d.CALCOM_API_KEY) {
-                const el = document.getElementById('setting_calcom_api_key');
-                if (el) el.value = d.CALCOM_API_KEY;
+            if (d.CALCOM_HAS_KEY || d.CALCOM_API_KEY) {
                 const ind = document.getElementById('calcom_connected_indicator');
                 if (ind) ind.style.display = 'inline';
+            }
+            if (d.CALCOM_API_KEY) {
+                const el = document.getElementById('setting_calcom_api_key');
+                if (el && !el.value) el.value = d.CALCOM_API_KEY;
             }
             if (d.CALCOM_EVENT_TYPE_ID) {
                 const el = document.getElementById('setting_calcom_event_type_id');

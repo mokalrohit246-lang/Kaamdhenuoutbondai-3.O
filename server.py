@@ -160,7 +160,8 @@ async def api_get_settings():
         "INBOUND_TRUNK_ID": db_s.get("INBOUND_TRUNK_ID") or os.getenv("INBOUND_TRUNK_ID", ""),
         "INBOUND_DISPATCH_RULE_ID": db_s.get("INBOUND_DISPATCH_RULE_ID") or os.getenv("INBOUND_DISPATCH_RULE_ID", ""),
         "VOBIZ_API_URL": db_s.get("VOBIZ_API_URL") or os.getenv("VOBIZ_API_URL", "https://api.vobiz.ai/v1"),
-        "CALCOM_API_KEY": db_s.get("CALCOM_API_KEY") or os.getenv("CALCOM_API_KEY", ""),
+        "CALCOM_API_KEY": f"{(db_s.get('CALCOM_API_KEY') or os.getenv('CALCOM_API_KEY', ''))[:8]}...{(db_s.get('CALCOM_API_KEY') or os.getenv('CALCOM_API_KEY', ''))[-4:]}" if len(db_s.get('CALCOM_API_KEY') or os.getenv('CALCOM_API_KEY', '')) > 12 else ("..." if (db_s.get('CALCOM_API_KEY') or os.getenv('CALCOM_API_KEY', '')) else ""),
+        "CALCOM_HAS_KEY": bool(db_s.get("CALCOM_API_KEY") or os.getenv("CALCOM_API_KEY")),
         "CALCOM_EVENT_TYPE_ID": db_s.get("CALCOM_EVENT_TYPE_ID") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775"),
         "CALCOM_TIMEZONE": db_s.get("CALCOM_TIMEZONE") or os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
     }
@@ -168,8 +169,14 @@ async def api_get_settings():
 @app.post("/api/settings")
 async def api_save_settings(req: Request):
     d = await req.json()
-    await save_settings_dict(d)
-    for k, v in d.items(): os.environ[k] = str(v)
+    cleaned = {}
+    for k, v in d.items():
+        if k == "CALCOM_API_KEY" and ("..." in str(v) or not str(v).strip()):
+            continue
+        cleaned[k] = v
+        os.environ[k] = str(v)
+    if cleaned:
+        await save_settings_dict(cleaned)
     return {"status": "saved"}
 
 @app.post("/api/sip/create-outbound-trunk")
@@ -377,37 +384,101 @@ async def api_list_campaigns():
 
 @app.post("/api/campaigns")
 async def api_create_campaign(req: Request):
-    # Handle multipart form data
-    form = await req.form()
-    calling_window = form.get("calling_mode") or form.get("calling_window", "regular")
-    peak_start = form.get("peak_start_time") or form.get("peak_start", "18:00")
-    peak_end = form.get("peak_end_time") or form.get("peak_end", "21:00")
-    if calling_window == "custom_peak":
-        calling_window = f"custom_peak:{peak_start}-{peak_end}"
+    content_type = req.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await req.json()
+        name = payload.get("name", "Untitled")
+        agent_profile_id = payload.get("agent_profile_id", "")
+        allocated_minutes = int(payload.get("allocated_minutes") or payload.get("camp_allocated_minutes") or 500)
+        calling_mode = payload.get("calling_mode") or payload.get("calling_window", "regular")
+        peak_start = payload.get("peak_start_time") or payload.get("peak_start", "18:00")
+        peak_end = payload.get("peak_end_time") or payload.get("peak_end", "21:00")
+        daily_limit = int(payload.get("daily_call_limit") or payload.get("daily_limit", 100))
+        dedicated_inbound = payload.get("dedicated_inbound_number") or payload.get("dedicated_inbound", "")
+        broker_email = payload.get("broker_email", "")
+        calendar_mode = payload.get("calendar_mode", "auto")
+        custom_event_id = payload.get("custom_event_id") or payload.get("calcom_event_type_id", "")
+        contacts = payload.get("contacts", [])
+    else:
+        form = await req.form()
+        name = form.get("name", "Untitled")
+        agent_profile_id = form.get("agent_profile_id", "")
+        allocated_minutes = int(form.get("allocated_minutes") or form.get("camp_allocated_minutes") or 500)
+        calling_mode = form.get("calling_mode") or form.get("calling_window", "regular")
+        peak_start = form.get("peak_start_time") or form.get("peak_start", "18:00")
+        peak_end = form.get("peak_end_time") or form.get("peak_end", "21:00")
+        daily_limit = int(form.get("daily_call_limit") or form.get("daily_limit", 100))
+        dedicated_inbound = form.get("dedicated_inbound_number") or form.get("dedicated_inbound") or form.get("camp_inbound_num", "")
+        broker_email = form.get("broker_email", "")
+        calendar_mode = form.get("calendar_mode", "auto")
+        custom_event_id = form.get("custom_event_id") or form.get("calcom_event_type_id", "")
+        contacts_file = form.get("contacts_file")
+        contacts = []
+        if contacts_file and hasattr(contacts_file, 'read'):
+            content = await contacts_file.read()
+            text = content.decode('utf-8', errors='ignore')
+            reader = csv.reader(io.StringIO(text))
+            for row in reader:
+                if len(row) >= 2:
+                    contacts.append({"name": row[0].strip(), "phone": row[1].strip(), "notes": row[2].strip() if len(row) > 2 else ""})
+
+    # Cal.com 1-Click Auto Event Provisioning
+    calcom_api_key = os.getenv("CALCOM_API_KEY", "")
+    event_type_id = os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
+
+    if calendar_mode == "auto" and calcom_api_key:
+        try:
+            import string
+            clean_slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:20]
+            rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+            slug = f"{clean_slug}-{rand_suffix}" if clean_slug else f"site-visit-{rand_suffix}"
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                res = await client.post(
+                    f"https://api.cal.com/v1/event-types?apiKey={calcom_api_key}",
+                    json={
+                        "title": f"{name} - Site Visit",
+                        "slug": slug,
+                        "length": 30,
+                        "description": f"Site visits for {name}"
+                    }
+                )
+                if res.status_code in (200, 201):
+                    res_json = res.json()
+                    new_id = res_json.get("event_type", {}).get("id") or res_json.get("id")
+                    if new_id:
+                        event_type_id = str(new_id)
+                        await push_unified_log("Cal.com", "info", f"Auto-created Cal.com event type '{slug}' (ID: {event_type_id}) for campaign '{name}'")
+                else:
+                    logger.warning(f"Cal.com create event-type returned {res.status_code}: {res.text}")
+        except Exception as exc:
+            logger.warning(f"Cal.com auto event-type creation fallback: {exc}")
+            await push_unified_log("Cal.com", "warning", f"Cal.com auto event creation fallback: {exc}")
+    elif calendar_mode == "manual" and custom_event_id:
+        event_type_id = str(custom_event_id).strip()
+    elif calendar_mode == "default":
+        event_type_id = os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
+
+    calling_window = f"custom_peak:{peak_start}-{peak_end}" if calling_mode == "custom_peak" else "regular"
+
     data = {
-        "name": form.get("name", "Untitled"),
-        "agent_profile_id": form.get("agent_profile_id", ""),
-        "allocated_minutes": int(form.get("allocated_minutes", 500)),
+        "name": name,
+        "agent_profile_id": agent_profile_id,
+        "allocated_minutes": allocated_minutes,
         "calling_window": calling_window,
-        "daily_limit": int(form.get("daily_call_limit") or form.get("daily_limit", 100)),
-        "dedicated_inbound_number": form.get("dedicated_inbound_number", ""),
-        "broker_email": form.get("broker_email", ""),
-        "calcom_event_type_id": form.get("calcom_event_type_id", ""),
+        "calling_mode": calling_mode,
+        "peak_start_time": peak_start,
+        "peak_end_time": peak_end,
+        "daily_limit": daily_limit,
+        "daily_call_limit": daily_limit,
+        "dedicated_inbound_number": dedicated_inbound,
+        "broker_email": broker_email,
+        "calendar_mode": calendar_mode,
+        "calcom_event_type_id": str(event_type_id),
+        "contacts": json.dumps(contacts),
+        "total_contacts": len(contacts)
     }
-    # Parse contacts file if uploaded
-    contacts_file = form.get("contacts_file")
-    contacts = []
-    if contacts_file and hasattr(contacts_file, 'read'):
-        content = await contacts_file.read()
-        text = content.decode('utf-8', errors='ignore')
-        reader = csv.reader(io.StringIO(text))
-        for row in reader:
-            if len(row) >= 2:
-                contacts.append({"name": row[0].strip(), "phone": row[1].strip(), "notes": row[2].strip() if len(row) > 2 else ""})
-    data["contacts"] = json.dumps(contacts)
-    data["total_contacts"] = len(contacts)
     cid = await create_campaign(data)
-    return {"status": "created", "id": cid, "total_contacts": len(contacts)}
+    return {"status": "created", "id": cid, "total_contacts": len(contacts), "calcom_event_type_id": event_type_id}
 
 @app.post("/api/campaigns/{cid}/pause")
 async def api_pause_campaign(cid: str):
@@ -444,16 +515,39 @@ async def api_campaign_export(cid: str, type: str = "full"):
         calls = [c for c in calls if c.get("timestamp", "").startswith(today)]
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Time", "Client", "Phone", "Location", "Occupation", "BHK", "Budget", "Timeline", "Funding", "Lead Score", "Site Visit", "Pickup", "Callback", "Objection", "WhatsApp", "Summary", "Duration", "Cost"])
+    writer.writerow([
+        "Time & Duration", "Client & Phone", "Location & Job", "BHK & Budget",
+        "Timeline & Funding", "Lead Score", "Site Visit & Cab", "Next Callback",
+        "Main Objection", "WhatsApp Status", "AI Ground Summary", "Cost"
+    ])
     for c in calls:
+        dur = c.get("duration_seconds", 0)
+        time_dur = f"{c.get('timestamp', '')[:16]} ({dur}s)"
+        client_phone = f"{c.get('client_name', c.get('lead_name', ''))} ({c.get('phone_number', '')})"
+        loc = c.get("current_location", "")
+        occ = c.get("occupation", "")
+        loc_job = f"{loc} / {occ}".strip(" /") or "-"
+        bhk = c.get("bhk_requirement", "")
+        bud = c.get("budget", "")
+        bhk_bud = f"{bhk} | {bud}".strip(" |") or "-"
+        time_l = c.get("possession_timeline", "")
+        fund = c.get("funding_type", "")
+        timeline_fund = f"{time_l} | {fund}".strip(" |") or "-"
+        visit_date = c.get("site_visit_date", "")
+        pickup = "Yes - " + c.get("pickup_location", "") if c.get("pickup_required") else "No"
+        visit_cab = f"{visit_date} (Cab: {pickup})" if visit_date else "-"
+        cost_str = f"₹{c.get('cost_inr', 0.0)}"
+
         writer.writerow([
-            c.get("timestamp", ""), c.get("client_name", c.get("lead_name", "")), c.get("phone_number", ""),
-            c.get("current_location", ""), c.get("occupation", ""), c.get("bhk_requirement", ""),
-            c.get("budget", ""), c.get("possession_timeline", ""), c.get("funding_type", ""),
-            c.get("lead_score", "Cold"), c.get("site_visit_date", ""), c.get("pickup_location", ""),
-            c.get("next_callback", ""), c.get("objection", ""), c.get("whatsapp_status", ""),
-            c.get("summary", ""), c.get("duration_seconds", 0), c.get("cost_inr", 0.0)
+            time_dur, client_phone, loc_job, bhk_bud, timeline_fund,
+            c.get("lead_score", "Cold"), visit_cab, c.get("next_callback", "-"),
+            c.get("objection", "-"), c.get("whatsapp_status", "-"),
+            c.get("summary", "-"), cost_str
         ])
     output.seek(0)
     fname = f"campaign_{cid[:8] if cid != 'all' else 'all'}_{type}_report.csv"
-    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={fname}"})
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )

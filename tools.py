@@ -176,7 +176,7 @@ class RealEstateTools(llm.ToolContext):
                     "responses": {
                         "name": client_name or self.lead_name or "Real Estate Lead",
                         "email": f"{clean_phone}@leads.kaamdhenu.ai",
-                        "notes": f"Pickup: {'Yes - ' + pickup_address if pickup_required else 'No'}. Campaign: {self.campaign_id or 'Direct'}"
+                        "notes": f"Pickup: {'Yes - ' + pickup_address if pickup_required else 'No (Self-Drive)'}. Campaign: {self.campaign_id or 'Direct Call'}"
                     },
                     "metadata": {"broker_phone": self.broker_phone, "broker_email": self.broker_email},
                     "timeZone": os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
