@@ -332,8 +332,15 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <div class="form-group"><label>Broker WhatsApp Alert Number</label><input type="text" id="ag_broker" placeholder="+919892057717" /></div>
         <div class="form-group"><label>Broker Email (Calendar Invites)</label><input type="email" id="ag_broker_email" placeholder="sales@project.com" /></div>
         <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="ag_event_type_id" placeholder="6934775" /></div>
-        <div class="form-group"><label>Service Type</label><input type="text" id="ag_service" value="Luxury 2BHK/3BHK Apartments" /></div>
-        <div class="form-group" style="grid-column:1/-1;"><label>System Prompt</label><textarea id="ag_prompt" rows="6" style="font-family:monospace; font-size:12px; height:200px;" placeholder="You are {agent_name} from {business_name}..."></textarea></div>
+        <div class="form-group" style="grid-column:1/-1;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label style="margin-bottom: 0;">System Prompt</label>
+            <div style="font-size: 11px; color: #10B981; display: flex; align-items: center; gap: 4px; background: rgba(16, 185, 129, 0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.25);">
+              <span>⚡ Natural Human Layer (Tone Adaptation, Backchanneling, Short Turns, Tool Rules) is auto-applied to all agents by default.</span>
+            </div>
+          </div>
+          <textarea id="ag_prompt" rows="6" style="font-family:monospace; font-size:12px; height:200px;" placeholder="Add project specific details here (e.g. Project Name: Horizon, Rates: 70L, Amenities, Locations). Global conversational rules apply automatically."></textarea>
+        </div>
         <div class="form-group" style="grid-column:1/-1; display:flex; gap:10px;">
           <button type="submit" class="btn">💾 Save Agent Profile</button>
           <button type="button" class="btn btn-cyan" onclick="document.getElementById('form_agent').reset()">🔄 Reset</button>

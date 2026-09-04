@@ -43,7 +43,7 @@ from db import (
     add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile,
     insert_appointment
 )
-from prompts import build_prompt
+from prompts import build_prompt, get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 from tools import RealEstateTools
 
 load_dotenv(".env", override=True)
@@ -289,13 +289,13 @@ async def entrypoint(ctx: agents.JobContext):
                         )
                         await push_unified_log("CRM", "info", f"Callback detected from prior campaign lead: {lead_name}", call_id=call_id)
 
-        # Build prompt safely
-        system_prompt = build_prompt(
-            lead_name=lead_name,
-            business_name=business_name,
-            service_type=service_type,
+        # Build prompt safely with global natural human conversation layer
+        system_prompt = get_base_system_prompt(
             agent_name=agent_name,
-            custom_prompt=custom_prompt
+            business_name=business_name,
+            custom_prompt=custom_prompt,
+            lead_name=lead_name,
+            service_type=service_type
         )
 
         tool_ctx = RealEstateTools(

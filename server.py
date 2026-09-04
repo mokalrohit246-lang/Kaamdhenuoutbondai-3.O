@@ -32,6 +32,7 @@ from db import (
     list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number,
     get_pending_callbacks, mark_callback_dispatched
 )
+from prompts import get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 
 load_dotenv(".env", override=True)
 logging.basicConfig(level=logging.INFO)
@@ -185,11 +186,16 @@ async def dispatch_callback_call(phone: str, lead_name: str = "there", campaign_
                         calcom_event_type_id = ag_prof.get("calcom_event_type_id") or calcom_event_type_id
 
         room_name = f"callback-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
-        prompt = (
-            f"You are {agent_name}, Senior Property Consultant for {business_name}.\n"
-            f"Context: The client {lead_name} requested a callback at this time regarding {service_type}.\n"
-            f"Opening Greeting: 'Namaste {lead_name}! Main {agent_name}, {business_name} se bol rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?'\n"
-            f"Goal: Qualify requirements, answer questions, and book a site visit with cab pickup."
+        prompt = get_base_system_prompt(
+            agent_name=agent_name,
+            business_name=business_name,
+            custom_prompt=(
+                f"Context: The client {lead_name} requested a callback at this time regarding {service_type}.\n"
+                f"Opening Greeting: 'Namaste {lead_name}! Main {agent_name}, {business_name} se bol rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?'\n"
+                f"Goal: Qualify requirements, answer questions, and book a site visit with cab pickup."
+            ),
+            lead_name=lead_name,
+            service_type=service_type
         )
 
         meta = {
@@ -529,6 +535,14 @@ async def api_dispatch(req: SingleCallReq):
             broker_email = req.broker_email or profile.get("broker_email") or broker_email
             calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or calcom_event_type_id
 
+    final_prompt = get_base_system_prompt(
+        agent_name=agent_name,
+        business_name=business_name,
+        custom_prompt=system_prompt,
+        lead_name=req.lead_name,
+        service_type=service_type
+    )
+
     room_name = f"outbound-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
     meta = {
         "direction": "outbound",
@@ -542,7 +556,7 @@ async def api_dispatch(req: SingleCallReq):
         "broker_phone": broker_phone,
         "broker_email": broker_email,
         "calcom_event_type_id": calcom_event_type_id,
-        "system_prompt": system_prompt
+        "system_prompt": final_prompt
     }
 
     try:
