@@ -318,9 +318,9 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
   <div id="view_agents" class="tab-view">
     <div class="card">
       <div class="card-header"><span>🤖 AI Agent Builder & Persona Studio</span></div>
-      <form id="form_agent" class="form-grid">
-        <div class="form-group"><label>Agent Name</label><input type="text" id="ag_name" placeholder="Priya" required /></div>
-        <div class="form-group"><label>Business / Project Name</label><input type="text" id="ag_business" placeholder="Kaamdhenu Horizon" required /></div>
+      <form id="form_agent" class="form-grid" onsubmit="return false;">
+        <div class="form-group"><label>Agent Name *</label><input type="text" id="ag_name" placeholder="Priya" required /></div>
+        <div class="form-group"><label>Business / Project Name</label><input type="text" id="ag_business_name" placeholder="Kaamdhenu Horizon" required /></div>
         <div class="form-group"><label>Voice Selection</label><select id="ag_voice">
           <option value="Aoede">Aoede (Female - Warm & Conversational)</option>
           <option value="Kore">Kore (Female - Professional & Crisp)</option>
@@ -328,10 +328,10 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
           <option value="Charon">Charon (Male - Deep & Confident)</option>
           <option value="Fenrir">Fenrir (Male - Authoritative Business)</option>
         </select></div>
-        <div class="form-group"><label>Assigned DID</label><input type="text" id="ag_did" placeholder="+918065353767" /></div>
-        <div class="form-group"><label>Broker WhatsApp Alert Number</label><input type="text" id="ag_broker" placeholder="+919892057717" /></div>
+        <div class="form-group"><label>Assigned DID</label><input type="text" id="ag_assigned_did" placeholder="+918065353767" /></div>
+        <div class="form-group"><label>Broker WhatsApp Alert Number</label><input type="text" id="ag_broker_whatsapp" placeholder="+919892057717" /></div>
         <div class="form-group"><label>Broker Email (Calendar Invites)</label><input type="email" id="ag_broker_email" placeholder="sales@project.com" /></div>
-        <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="ag_event_type_id" placeholder="6934775" /></div>
+        <div class="form-group"><label>Cal.com Event Type ID</label><input type="text" id="ag_calcom_event_type_id" placeholder="6934775" /></div>
         <div class="form-group" style="grid-column:1/-1;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <label style="margin-bottom: 0;">System Prompt</label>
@@ -342,13 +342,13 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
           <textarea id="ag_prompt" rows="6" style="font-family:monospace; font-size:12px; height:200px;" placeholder="Add project specific details here (e.g. Project Name: Horizon, Rates: 70L, Amenities, Locations). Global conversational rules apply automatically."></textarea>
         </div>
         <div class="form-group" style="grid-column:1/-1; display:flex; gap:10px;">
-          <button type="submit" class="btn">💾 Save Agent Profile</button>
-          <button type="button" class="btn btn-cyan" onclick="document.getElementById('form_agent').reset()">🔄 Reset</button>
+          <button type="button" id="btn_save_agent" class="btn">💾 Save Agent Profile</button>
+          <button type="button" class="btn btn-cyan" onclick="document.getElementById('form_agent')?.reset()">🔄 Reset</button>
         </div>
       </form>
     </div>
     <div class="card">
-      <div class="card-header"><span>📋 Saved Agent Profiles</span><button class="btn btn-sm btn-cyan" onclick="loadAgents()">🔄 Refresh</button></div>
+      <div class="card-header"><span>📋 Saved Agent Profiles</span><button class="btn btn-sm btn-cyan" onclick="loadAgentProfiles()">🔄 Refresh</button></div>
       <div class="agents-grid" id="agents_grid"></div>
     </div>
   </div>
@@ -632,27 +632,30 @@ let chartTimelineInstance = null;
 // Agent Profiles
 let allAgentProfiles = [];
 
-const loadAgents = async () => {
+const loadAgentProfiles = async () => {
     try {
         const res = await fetch('/api/agent-profiles');
         if (res.ok) {
             const agents = await res.json();
             allAgentProfiles = agents;
-            document.getElementById('agents_grid').innerHTML = agents.length ? agents.map(a => `
-                <div class="agent-card">
-                    <h4>${a.agent_name || 'Agent'}</h4>
-                    <p style="color:#94A3B8;font-size:12px;margin-bottom:6px;">🏢 ${a.business_name || '-'}</p>
-                    <p style="font-size:12px;">🎙️ <span class="badge badge-booked">${a.voice || 'Aoede'}</span></p>
-                    <p style="font-size:12px;color:#94A3B8;">📞 ${a.assigned_did || '-'} | 📱 ${a.broker_phone || '-'}</p>
-                    <p style="font-size:11px;color:#64748B;margin-top:6px;max-height:40px;overflow:hidden;">${(a.system_prompt||'').substring(0,100)}...</p>
-                    <div style="margin-top:8px;display:flex;gap:6px;">
-                        <button class="btn btn-sm btn-cyan" onclick="editAgent('${a.id}')">Edit</button>
-                        <button class="btn btn-sm btn-danger" onclick="deleteAgent('${a.id}')">Delete</button>
+            const grid = document.getElementById('agents_grid');
+            if (grid) {
+                grid.innerHTML = agents.length ? agents.map(a => `
+                    <div class="agent-card">
+                        <h4>${a.name || a.agent_name || 'Agent'}</h4>
+                        <p style="color:#94A3B8;font-size:12px;margin-bottom:6px;">🏢 ${a.business_name || '-'}</p>
+                        <p style="font-size:12px;">🎙️ <span class="badge badge-booked">${a.voice || 'Aoede'}</span></p>
+                        <p style="font-size:12px;color:#94A3B8;">📞 ${a.assigned_did || '-'} | 📱 ${a.broker_whatsapp || a.broker_phone || '-'}</p>
+                        <p style="font-size:11px;color:#64748B;margin-top:6px;max-height:40px;overflow:hidden;">${(a.system_prompt||'').substring(0,100)}...</p>
+                        <div style="margin-top:8px;display:flex;gap:6px;">
+                            <button class="btn btn-sm btn-cyan" onclick="editAgent('${a.id}')">Edit</button>
+                            <button class="btn btn-sm btn-danger" onclick="deleteAgent('${a.id}')">Delete</button>
+                        </div>
                     </div>
-                </div>
-            `).join('') : '<p style="color:#64748B; text-align:center; padding:20px;">No agent profiles created yet</p>';
+                `).join('') : '<p style="color:#64748B; text-align:center; padding:20px;">No agent profiles created yet</p>';
+            }
 
-            const optHtml = '<option value="">-- Select Agent Profile --</option>' + agents.map(a => `<option value="${a.id}">${a.agent_name} (${a.business_name})</option>`).join('');
+            const optHtml = '<option value="">-- Select Agent Profile --</option>' + agents.map(a => `<option value="${a.id}">${a.name || a.agent_name} (${a.business_name || 'Agent'})</option>`).join('');
 
             // Populate campaign agent dropdown
             const campSel = document.getElementById('camp_agent_select') || document.getElementById('camp_agent');
@@ -662,34 +665,51 @@ const loadAgents = async () => {
             const singleSel = document.getElementById('single_agent_select');
             if (singleSel) {
                 const cur = singleSel.value;
-                singleSel.innerHTML = '<option value="">-- Choose Saved Agent --</option>' + agents.map(a => `<option value="${a.id}">${a.agent_name} (${a.business_name || 'Agent'})</option>`).join('');
+                singleSel.innerHTML = '<option value="">-- Choose Saved Agent --</option>' + agents.map(a => `<option value="${a.id}">${a.name || a.agent_name} (${a.business_name || 'Agent'})</option>`).join('');
                 if (cur) singleSel.value = cur;
             }
         }
     } catch(e) { console.error('Error loading agents:', e); }
 };
+const loadAgents = loadAgentProfiles;
+window.loadAgentProfiles = loadAgentProfiles;
+window.loadAgents = loadAgentProfiles;
 
 async function deleteAgent(id) {
     if (!confirm('Delete this agent profile?')) return;
-    await fetch('/api/agent-profiles/' + id, { method: 'DELETE' });
-    loadAgents();
+    try {
+        const res = await fetch('/api/agent-profiles/' + id, { method: 'DELETE' });
+        if (res.ok) {
+            loadAgentProfiles();
+        } else {
+            alert('Failed to delete agent');
+        }
+    } catch (e) {
+        console.error('Delete error:', e);
+    }
 }
 
 function editAgent(id) {
-    const a = allAgentProfiles.find(x => x.id === id);
+    const a = (allAgentProfiles || []).find(x => x.id === id);
     if (!a) return;
-    document.querySelector('[data-tab="view_agents"]').click();
-    document.getElementById('ag_name').value = a.agent_name || '';
-    document.getElementById('ag_business').value = a.business_name || '';
-    if (a.voice) document.getElementById('ag_voice').value = a.voice;
-    document.getElementById('ag_did').value = a.assigned_did || '';
-    document.getElementById('ag_broker').value = a.broker_phone || '';
+    document.querySelector('[data-tab="view_agents"]')?.click();
+    const nameEl = document.getElementById('ag_name');
+    if (nameEl) nameEl.value = a.name || a.agent_name || '';
+    const bizEl = document.getElementById('ag_business_name') || document.getElementById('ag_business');
+    if (bizEl) bizEl.value = a.business_name || '';
+    const voiceEl = document.getElementById('ag_voice');
+    if (voiceEl && a.voice) voiceEl.value = a.voice;
+    const didEl = document.getElementById('ag_assigned_did') || document.getElementById('ag_did');
+    if (didEl) didEl.value = a.assigned_did || '';
+    const brokerEl = document.getElementById('ag_broker_whatsapp') || document.getElementById('ag_broker');
+    if (brokerEl) brokerEl.value = a.broker_whatsapp || a.broker_phone || '';
     const emailEl = document.getElementById('ag_broker_email');
     if (emailEl) emailEl.value = a.broker_email || '';
-    const eventEl = document.getElementById('ag_event_type_id');
+    const eventEl = document.getElementById('ag_calcom_event_type_id') || document.getElementById('ag_event_type_id');
     if (eventEl) eventEl.value = a.calcom_event_type_id || '';
-    document.getElementById('ag_service').value = a.service_type || 'Luxury 2BHK/3BHK Apartments';
-    document.getElementById('ag_prompt').value = a.system_prompt || '';
+    const promptEl = document.getElementById('ag_prompt');
+    if (promptEl) promptEl.value = a.system_prompt || '';
+    window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // Campaigns
@@ -1111,23 +1131,56 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Agent form submit
-    document.getElementById('form_agent').addEventListener('submit', async (e) => {
-        e.preventDefault();
+    // Agent Profile Save Handler
+    document.getElementById('btn_save_agent')?.addEventListener('click', async function() {
+        const btn = this;
+        const name = document.getElementById('ag_name')?.value?.trim();
+        if (!name) {
+            alert('⚠️ Please enter an Agent Name.');
+            return;
+        }
+
         const payload = {
-            agent_name: document.getElementById('ag_name').value.trim(),
-            business_name: document.getElementById('ag_business').value.trim(),
-            voice: document.getElementById('ag_voice').value,
-            assigned_did: document.getElementById('ag_did').value.trim(),
-            broker_phone: document.getElementById('ag_broker').value.trim(),
-            broker_email: document.getElementById('ag_broker_email')?.value.trim() || '',
-            calcom_event_type_id: document.getElementById('ag_event_type_id')?.value.trim() || '',
-            service_type: document.getElementById('ag_service').value.trim(),
-            system_prompt: document.getElementById('ag_prompt').value.trim()
+            name: name,
+            business_name: document.getElementById('ag_business_name')?.value?.trim() || '',
+            voice: document.getElementById('ag_voice')?.value || 'Aoede',
+            assigned_did: document.getElementById('ag_assigned_did')?.value?.trim() || '',
+            broker_whatsapp: document.getElementById('ag_broker_whatsapp')?.value?.trim() || '',
+            broker_email: document.getElementById('ag_broker_email')?.value?.trim() || '',
+            calcom_event_type_id: document.getElementById('ag_calcom_event_type_id')?.value?.trim() || '6934775',
+            system_prompt: document.getElementById('ag_prompt')?.value?.trim() || ''
         };
-        await fetch('/api/agent-profiles', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-        document.getElementById('form_agent').reset();
-        loadAgents();
+
+        btn.disabled = true;
+        btn.innerHTML = '⏳ Saving Agent...';
+
+        try {
+            const res = await fetch('/api/agent-profiles', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const data = await res.json();
+            if (res.ok) {
+                alert(`✅ Agent "${name}" profile created successfully!`);
+                document.getElementById('form_agent')?.reset();
+                // Refresh agent profiles list
+                if (typeof loadAgentProfiles === 'function') {
+                    loadAgentProfiles();
+                } else if (typeof loadAgents === 'function') {
+                    loadAgents();
+                }
+            } else {
+                alert('❌ Failed to save agent: ' + (data.detail || data.message || JSON.stringify(data)));
+            }
+        } catch (err) {
+            console.error('Save agent error:', err);
+            alert('❌ Network or Server Error: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '💾 Save Agent Profile';
+        }
     });
 
     // Calling mode dynamic peak container listener

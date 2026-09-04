@@ -585,14 +585,23 @@ async def api_list_agents():
 
 @app.post("/api/agent-profiles")
 async def api_save_agent(req: Request):
-    data = await req.json()
-    pid = await save_agent_profile(data)
-    return {"status": "saved", "id": pid}
+    try:
+        content_type = req.headers.get("content-type", "")
+        if "application/json" in content_type:
+            data = await req.json()
+        else:
+            form = await req.form()
+            data = dict(form)
+    except Exception:
+        data = {}
+
+    saved_profile = await save_agent_profile(data)
+    return JSONResponse(content=saved_profile, status_code=200)
 
 @app.delete("/api/agent-profiles/{pid}")
 async def api_del_agent(pid: str):
     await delete_agent_profile(pid)
-    return {"status": "deleted"}
+    return {"status": "deleted", "id": pid}
 
 # Campaign APIs
 @app.get("/api/campaigns")

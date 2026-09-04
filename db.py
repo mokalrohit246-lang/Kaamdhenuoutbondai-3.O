@@ -2,6 +2,7 @@ import logging
 import os
 import uuid
 import httpx
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -276,28 +277,173 @@ async def save_settings_dict(data: dict):
         await db.table("settings").upsert(rows, on_conflict="key").execute()
 
 
-# Agent Profiles CRUD
-async def list_agent_profiles():
-    db = await _adb()
-    res = await db.table("agent_profiles").select("*").order("created_at", desc=True).execute()
-    return res.data or []
+# Agent Profiles CRUD (Supabase + Local SQLite Fallback)
+LOCAL_DB_FILE = os.path.join(os.path.dirname(__file__), "local_agent_profiles.db")
 
-async def save_agent_profile(data: dict):
-    db = await _adb()
+def _init_local_sqlite():
+    try:
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                voice TEXT DEFAULT 'Aoede',
+                model TEXT DEFAULT 'gemini-2.0-flash-exp',
+                system_prompt TEXT DEFAULT '',
+                enabled_tools TEXT DEFAULT '[]',
+                is_default INTEGER DEFAULT 0,
+                business_name TEXT DEFAULT '',
+                assigned_did TEXT DEFAULT '',
+                broker_whatsapp TEXT DEFAULT '',
+                broker_email TEXT DEFAULT '',
+                calcom_event_type_id TEXT DEFAULT '6934775',
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Local SQLite init error: {e}")
+
+async def list_agent_profiles():
+    profiles = []
+    # 1. Try Supabase
+    try:
+        db = await _adb()
+        res = await db.table("agent_profiles").select("*").order("created_at", desc=True).execute()
+        profiles = res.data or []
+    except Exception as exc:
+        logger.warning(f"Supabase list_agent_profiles error, falling back to SQLite: {exc}")
+
+    # 2. If empty or failed, check local SQLite
+    if not profiles:
+        try:
+            _init_local_sqlite()
+            conn = sqlite3.connect(LOCAL_DB_FILE)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM agent_profiles ORDER BY created_at DESC")
+            rows = c.fetchall()
+            profiles = [dict(r) for r in rows]
+            conn.close()
+        except Exception as sqle:
+            logger.warning(f"Local SQLite list error: {sqle}")
+
+    # Decorate with backward/forward compatible aliases
+    for p in profiles:
+        p["agent_name"] = p.get("name") or p.get("agent_name", "")
+        p["broker_phone"] = p.get("broker_whatsapp") or p.get("broker_phone", "")
+    return profiles
+
+async def save_agent_profile(data: dict) -> dict:
     pid = data.get("id") or str(uuid.uuid4())
-    data["id"] = pid
-    data["created_at"] = datetime.utcnow().isoformat()
-    await db.table("agent_profiles").upsert(data, on_conflict="id").execute()
-    return pid
+    name = data.get("name") or data.get("agent_name") or "Agent"
+    voice = data.get("voice") or "Aoede"
+    model = data.get("model") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    business_name = data.get("business_name") or ""
+    assigned_did = data.get("assigned_did") or ""
+    broker_whatsapp = data.get("broker_whatsapp") or data.get("broker_phone") or ""
+    broker_email = data.get("broker_email") or ""
+    calcom_event_type_id = str(data.get("calcom_event_type_id") or "6934775")
+    system_prompt = data.get("system_prompt") or ""
+    enabled_tools = data.get("enabled_tools") or "[]"
+    is_default = int(data.get("is_default") or 0)
+    created_at = data.get("created_at") or datetime.utcnow().isoformat()
+
+    clean_profile = {
+        "id": pid,
+        "name": name,
+        "voice": voice,
+        "model": model,
+        "business_name": business_name,
+        "assigned_did": assigned_did,
+        "broker_whatsapp": broker_whatsapp,
+        "broker_email": broker_email,
+        "calcom_event_type_id": calcom_event_type_id,
+        "system_prompt": system_prompt,
+        "enabled_tools": enabled_tools,
+        "is_default": is_default,
+        "created_at": created_at
+    }
+
+    # 1. Upsert to Supabase
+    try:
+        db = await _adb()
+        await db.table("agent_profiles").upsert(clean_profile, on_conflict="id").execute()
+    except Exception as exc:
+        logger.warning(f"Supabase save_agent_profile failed, using local SQLite fallback: {exc}")
+
+    # 2. Always persist to local SQLite as reliable backup
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO agent_profiles (id, name, voice, model, system_prompt, enabled_tools, is_default, business_name, assigned_did, broker_whatsapp, broker_email, calcom_event_type_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name, voice=excluded.voice, model=excluded.model,
+                system_prompt=excluded.system_prompt, enabled_tools=excluded.enabled_tools,
+                is_default=excluded.is_default, business_name=excluded.business_name,
+                assigned_did=excluded.assigned_did, broker_whatsapp=excluded.broker_whatsapp,
+                broker_email=excluded.broker_email, calcom_event_type_id=excluded.calcom_event_type_id
+        """, (pid, name, voice, model, system_prompt, enabled_tools, is_default, business_name, assigned_did, broker_whatsapp, broker_email, calcom_event_type_id, created_at))
+        conn.commit()
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"Local SQLite save error: {sqle}")
+
+    # Return profile with helper aliases for frontend and runtime compatibility
+    out = dict(clean_profile)
+    out["agent_name"] = name
+    out["broker_phone"] = broker_whatsapp
+    return out
 
 async def delete_agent_profile(pid: str):
-    db = await _adb()
-    await db.table("agent_profiles").delete().eq("id", pid).execute()
+    try:
+        db = await _adb()
+        await db.table("agent_profiles").delete().eq("id", pid).execute()
+    except Exception as exc:
+        logger.warning(f"Supabase delete_agent_profile error: {exc}")
+
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("DELETE FROM agent_profiles WHERE id = ?", (pid,))
+        conn.commit()
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"Local SQLite delete error: {sqle}")
 
 async def get_agent_profile(pid: str):
-    db = await _adb()
-    res = await db.table("agent_profiles").select("*").eq("id", pid).maybe_single().execute()
-    return res.data if res else None
+    profile = None
+    try:
+        db = await _adb()
+        res = await db.table("agent_profiles").select("*").eq("id", pid).maybe_single().execute()
+        profile = res.data if res else None
+    except Exception as exc:
+        logger.warning(f"Supabase get_agent_profile error: {exc}")
+
+    if not profile:
+        try:
+            _init_local_sqlite()
+            conn = sqlite3.connect(LOCAL_DB_FILE)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM agent_profiles WHERE id = ?", (pid,))
+            row = c.fetchone()
+            if row:
+                profile = dict(row)
+            conn.close()
+        except Exception as sqle:
+            logger.warning(f"Local SQLite get error: {sqle}")
+
+    if profile:
+        profile["agent_name"] = profile.get("name") or profile.get("agent_name", "")
+        profile["broker_phone"] = profile.get("broker_whatsapp") or profile.get("broker_phone", "")
+    return profile
 
 # Campaigns CRUD
 async def list_campaigns():
