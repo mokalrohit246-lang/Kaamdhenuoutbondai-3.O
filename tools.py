@@ -56,6 +56,7 @@ class RealEstateTools(llm.ToolContext):
         self.site_visit_date = ""
         self.pickup_required = False
         self.pickup_location = ""
+        self.appointment_booked = False
         self.next_callback = ""
         self.objection = ""
         self.whatsapp_status = "— Not Requested"
@@ -96,6 +97,8 @@ class RealEstateTools(llm.ToolContext):
             booking_id = await insert_appointment(name, phone, date, time, service, budget, property_type)
             self.lead_score = "Hot"
             self.outcome = "booked"
+            self.appointment_booked = True
+            self.site_visit_date = f"{date} {time}"
             await push_unified_log("Tools", "info", f"Site visit booked: {name} ({phone}) on {date} at {time}", call_id=self.call_id)
             return f"Site visit confirmed! Reference ID: {booking_id} for {date} at {time}."
         except Exception:
@@ -104,6 +107,8 @@ class RealEstateTools(llm.ToolContext):
     @llm.function_tool
     async def book_calcom(self, name: str, email: str, date: str, start_time: str, notes: str = "") -> str:
         """Book appointment directly in Cal.com calendar."""
+        self.appointment_booked = True
+        self.site_visit_date = f"{date} {start_time}"
         api_key = os.getenv("CALCOM_API_KEY", "")
         event_type_id = os.getenv("CALCOM_EVENT_TYPE_ID", "")
         timezone = os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
@@ -144,6 +149,7 @@ class RealEstateTools(llm.ToolContext):
         self.lead_score = "Hot"
         self.commitment_risk = "High"
         self.outcome = "booked"
+        self.appointment_booked = True
 
         parts = visit_datetime.strip().split(" ")
         date = parts[0] if len(parts) > 0 else visit_datetime

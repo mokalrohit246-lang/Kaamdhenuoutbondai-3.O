@@ -29,7 +29,8 @@ from db import (
     get_calls, get_stats_data, get_all_appointments, cancel_appointment,
     get_settings, save_settings_dict, get_contact_memory,
     list_agent_profiles, save_agent_profile, delete_agent_profile, get_agent_profile,
-    list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number
+    list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number,
+    get_pending_callbacks, mark_callback_dispatched
 )
 
 load_dotenv(".env", override=True)
@@ -61,6 +62,208 @@ class ClientNumReq(BaseModel):
     agent_name: str = "Priya"
     broker_whatsapp_number: Optional[str] = None
     system_prompt: Optional[str] = None
+
+# ============================================================
+# AUTOMATED CALLBACK SCHEDULER WORKER
+# ============================================================
+def parse_callback_datetime(cb_str: str, now: Optional[datetime] = None) -> Optional[datetime]:
+    if not cb_str or not str(cb_str).strip():
+        return None
+    s = str(cb_str).strip().lower()
+    from datetime import datetime as _dt, timedelta as _td
+    import re
+    if now is None:
+        now = _dt.now()
+
+    # 1. Standard ISO or date formats
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            return _dt.strptime(str(cb_str).strip(), fmt)
+        except ValueError:
+            pass
+
+    # 2. Relative offset "in X minutes/hours"
+    m_in = re.search(r'in\s+(\d+)\s*(hour|hr|minute|min)', s)
+    if m_in:
+        val = int(m_in.group(1))
+        unit = m_in.group(2)
+        if "h" in unit:
+            return now + _td(hours=val)
+        else:
+            return now + _td(minutes=val)
+
+    # 3. Base date determination
+    base_date = now.date()
+    if "parson" in s or "day after tomorrow" in s:
+        base_date = now.date() + _td(days=2)
+    elif "tomorrow" in s or "kal" in s:
+        base_date = now.date() + _td(days=1)
+    elif "today" in s or "aaj" in s:
+        base_date = now.date()
+    else:
+        weekdays = {
+            "monday": 0, "somwar": 0,
+            "tuesday": 1, "mangalwar": 1,
+            "wednesday": 2, "budhwar": 2,
+            "thursday": 3, "guruwar": 3,
+            "friday": 4, "shukrawar": 4,
+            "saturday": 5, "shanivar": 5, "shaniwar": 5,
+            "sunday": 6, "ravivar": 6, "itwar": 6
+        }
+        for wname, wday in weekdays.items():
+            if wname in s:
+                days_ahead = (wday - now.weekday()) % 7
+                if days_ahead <= 0:
+                    days_ahead = 7
+                base_date = now.date() + _td(days=days_ahead)
+                break
+
+    # 4. Extract time
+    hour = 18
+    minute = 0
+    m_t12 = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', s)
+    m_t24 = re.search(r'\b([01]?\d|2[0-3]):([0-5]\d)\b', s)
+    m_baje = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(?:baje)', s)
+
+    if m_t12:
+        hour = int(m_t12.group(1))
+        minute = int(m_t12.group(2) or 0)
+        ampm = m_t12.group(3)
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        elif ampm == "am" and hour == 12:
+            hour = 0
+    elif m_t24:
+        hour = int(m_t24.group(1))
+        minute = int(m_t24.group(2))
+    elif m_baje:
+        hour = int(m_baje.group(1))
+        minute = int(m_baje.group(2) or 0)
+        if ("shaam" in s or "dopahar" in s or "raat" in s) and hour < 12:
+            hour += 12
+        elif hour in (1, 2, 3, 4, 5, 6, 7, 8):
+            hour += 12
+
+    try:
+        return _dt.combine(base_date, _dt.min.time().replace(hour=hour, minute=minute))
+    except Exception:
+        return None
+
+async def dispatch_callback_call(phone: str, lead_name: str = "there", campaign_id: Optional[str] = None, orig_call_id: Optional[str] = None):
+    try:
+        url = os.getenv("LIVEKIT_URL")
+        key = os.getenv("LIVEKIT_API_KEY")
+        secret = os.getenv("LIVEKIT_API_SECRET")
+        if not (url and key and secret):
+            logger.warning(f"Cannot dispatch callback to {phone}: LiveKit credentials missing")
+            return
+
+        agent_name = "Priya"
+        agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
+        business_name = "Kaamdhenu Real Estate"
+        service_type = "Luxury 2BHK/3BHK Apartments"
+        broker_phone = os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
+        broker_email = os.getenv("DEFAULT_BROKER_EMAIL", "")
+        calcom_event_type_id = os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
+        agent_id = None
+
+        if campaign_id:
+            camps = await list_campaigns()
+            camp = next((c for c in camps if c.get("id") == campaign_id), None)
+            if camp:
+                ag_id = camp.get("agent_profile_id")
+                if ag_id:
+                    ag_prof = await get_agent_profile(ag_id)
+                    if ag_prof:
+                        agent_id = ag_id
+                        agent_name = ag_prof.get("agent_name") or agent_name
+                        agent_voice = ag_prof.get("voice") or agent_voice
+                        business_name = ag_prof.get("business_name") or business_name
+                        service_type = ag_prof.get("service_type") or service_type
+                        broker_phone = ag_prof.get("broker_phone") or broker_phone
+                        broker_email = ag_prof.get("broker_email") or broker_email
+                        calcom_event_type_id = ag_prof.get("calcom_event_type_id") or calcom_event_type_id
+
+        room_name = f"callback-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
+        prompt = (
+            f"You are {agent_name}, Senior Property Consultant for {business_name}.\n"
+            f"Context: The client {lead_name} requested a callback at this time regarding {service_type}.\n"
+            f"Opening Greeting: 'Namaste {lead_name}! Main {agent_name}, {business_name} se bol rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?'\n"
+            f"Goal: Qualify requirements, answer questions, and book a site visit with cab pickup."
+        )
+
+        meta = {
+            "direction": "outbound",
+            "log_category": "campaign_callback",
+            "campaign_id": campaign_id,
+            "phone_number": phone,
+            "lead_name": lead_name,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "agent_voice": agent_voice,
+            "business_name": business_name,
+            "service_type": service_type,
+            "broker_phone": broker_phone,
+            "broker_email": broker_email,
+            "calcom_event_type_id": calcom_event_type_id,
+            "system_prompt": prompt
+        }
+
+        from livekit import api as lk_api
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx)) as session:
+            lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
+            await lk.room.create_room(lk_api.CreateRoomRequest(name=room_name, empty_timeout=300))
+            await lk.agent_dispatch.create_dispatch(
+                lk_api.CreateAgentDispatchRequest(agent_name="kaamdhenu-voice-agent", room=room_name, metadata=json.dumps(meta))
+            )
+            await lk.aclose()
+
+        await push_unified_log("Callback", "info", f"📞 Outbound scheduled callback dialed for {phone} (Room: {room_name})", call_id=room_name)
+    except Exception as e:
+        logger.error(f"Failed to dispatch callback call to {phone}: {e}")
+        await push_unified_log("Callback", "error", f"Failed to dispatch callback to {phone}: {e}", call_id=orig_call_id)
+
+async def check_and_dispatch_due_callbacks():
+    now = datetime.now()
+    pending = await get_pending_callbacks()
+    for call in pending:
+        cb_str = call.get("next_callback")
+        if not cb_str:
+            continue
+        scheduled_dt = parse_callback_datetime(cb_str, now=now)
+        if not scheduled_dt:
+            continue
+
+        if now >= scheduled_dt:
+            cid = call.get("id")
+            phone = call.get("phone_number")
+            lead_name = call.get("lead_name") or call.get("client_name") or "there"
+            campaign_id = call.get("campaign_id")
+
+            # Mark callback_dispatched = TRUE to avoid duplicate dialing
+            await mark_callback_dispatched(cid)
+
+            time_str = scheduled_dt.strftime("%Y-%m-%d %H:%M")
+            await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} at {time_str}", call_id=cid)
+
+            # Dispatch outbound call via LiveKit SIP
+            asyncio.create_task(dispatch_callback_call(phone=phone, lead_name=lead_name, campaign_id=campaign_id, orig_call_id=cid))
+
+async def callback_scheduler_worker():
+    while True:
+        try:
+            await check_and_dispatch_due_callbacks()
+        except Exception as e:
+            logger.error(f"Callback scheduler error: {e}")
+        await asyncio.sleep(60)
+
+@app.on_event("startup")
+async def on_startup():
+    asyncio.create_task(callback_scheduler_worker())
+    logger.info("Automated callback scheduler worker started (interval: 60s)")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():

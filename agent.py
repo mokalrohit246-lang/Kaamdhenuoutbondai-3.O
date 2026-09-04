@@ -38,7 +38,11 @@ try:
 except ImportError:
     pass
 
-from db import push_unified_log, log_call, find_recent_outbound_context, add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile
+from db import (
+    push_unified_log, log_call, find_recent_outbound_context,
+    add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile,
+    insert_appointment
+)
 from prompts import build_prompt
 from tools import RealEstateTools
 
@@ -92,6 +96,112 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
 class KaamdhenuAssistant(Agent):
     def __init__(self, instructions: str):
         super().__init__(instructions=instructions)
+
+def extract_site_visit_details_from_transcript(transcript: str, client_location: str = "") -> tuple:
+    """
+    Extracts (site_visit_date, pickup_required, pickup_location) from conversation transcript.
+    """
+    if not transcript:
+        return "", False, ""
+
+    text = transcript.lower()
+    from datetime import datetime as _dt, timedelta as _td
+    now = _dt.now()
+
+    # 1. Extract Date
+    visit_date = None
+    m_iso = re.search(r'\b(202\d-[01]\d-[0-3]\d)\b', transcript)
+    if m_iso:
+        visit_date = m_iso.group(1)
+
+    if not visit_date:
+        m_slash = re.search(r'\b([0-3]?\d)[/-]([01]?\d)(?:[/-](202\d))?\b', transcript)
+        if m_slash:
+            d = int(m_slash.group(1))
+            m = int(m_slash.group(2))
+            y = int(m_slash.group(3)) if m_slash.group(3) else now.year
+            try:
+                visit_date = f"{y:04d}-{m:02d}-{d:02d}"
+            except Exception:
+                pass
+
+    if not visit_date:
+        if "parson" in text or "day after tomorrow" in text:
+            visit_date = (now + _td(days=2)).strftime("%Y-%m-%d")
+        elif "kal" in text or "tomorrow" in text:
+            visit_date = (now + _td(days=1)).strftime("%Y-%m-%d")
+        elif "aaj" in text or "today" in text:
+            visit_date = now.strftime("%Y-%m-%d")
+        elif "weekend" in text:
+            days = (5 - now.weekday()) % 7
+            if days == 0: days = 7
+            visit_date = (now + _td(days=days)).strftime("%Y-%m-%d")
+        else:
+            weekdays = {
+                "monday": 0, "somwar": 0,
+                "tuesday": 1, "mangalwar": 1,
+                "wednesday": 2, "budhwar": 2,
+                "thursday": 3, "guruwar": 3,
+                "friday": 4, "shukrawar": 4,
+                "saturday": 5, "shanivar": 5, "shaniwar": 5,
+                "sunday": 6, "ravivar": 6, "itwar": 6
+            }
+            for wname, wday in weekdays.items():
+                if wname in text:
+                    days_ahead = (wday - now.weekday()) % 7
+                    if days_ahead == 0:
+                        days_ahead = 7
+                    visit_date = (now + _td(days=days_ahead)).strftime("%Y-%m-%d")
+                    break
+
+    if not visit_date:
+        visit_date = (now + _td(days=1)).strftime("%Y-%m-%d")
+
+    # 2. Extract Time
+    visit_time = "11:00"
+    m_t12 = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', text)
+    m_baje = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(?:baje)', text)
+    m_t24 = re.search(r'\b([01]?\d|2[0-3]):([0-5]\d)\b', text)
+
+    if m_t12:
+        h = int(m_t12.group(1))
+        mn = int(m_t12.group(2) or 0)
+        ampm = m_t12.group(3)
+        if ampm == "pm" and h < 12: h += 12
+        elif ampm == "am" and h == 12: h = 0
+        visit_time = f"{h:02d}:{mn:02d}"
+    elif m_t24:
+        h = int(m_t24.group(1))
+        mn = int(m_t24.group(2))
+        visit_time = f"{h:02d}:{mn:02d}"
+    elif m_baje:
+        h = int(m_baje.group(1))
+        mn = int(m_baje.group(2) or 0)
+        if ("shaam" in text or "dopahar" in text or "raat" in text) and h < 12:
+            h += 12
+        elif h in (1, 2, 3, 4, 5, 6, 7):
+            h += 12
+        visit_time = f"{h:02d}:{mn:02d}"
+
+    full_visit_dt = f"{visit_date} {visit_time}"
+
+    # 3. Extract Pickup
+    pickup_required = False
+    has_cab_mention = any(k in text for k in ["cab", "pickup", "pick up", "gaadi", "car", "uber", "ola", "drop"])
+    if has_cab_mention:
+        negative = any(neg in text for neg in ["apni gaadi", "own car", "khud aa", "self drive", "cab nahi", "pickup nahi", "no cab", "no pickup", "nahi chahiye"])
+        if not negative:
+            pickup_required = True
+
+    # 4. Extract Pickup Location
+    pickup_loc = client_location or ""
+    m_loc = re.search(r'(?:pickup\s+(?:from|at|address)|from|at|se)\s+([a-zA-Z0-9\s,\-\.]{3,25})(?:se|pe|mein|par|\.|\,|$)', transcript, re.IGNORECASE)
+    if m_loc:
+        candidate = m_loc.group(1).strip()
+        if candidate.lower() not in ["home", "office", "ghar", "site", "project", "tomorrow", "kal", "there", "kaamdhenu", "station"]:
+            pickup_loc = candidate
+
+    return full_visit_dt, pickup_required, pickup_loc
 
 async def entrypoint(ctx: agents.JobContext):
     call_id = ctx.room.name
@@ -213,6 +323,28 @@ async def entrypoint(ctx: agents.JobContext):
             room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
         ))
 
+        transcript_entries = []
+        def _record_speech(speaker: str, text: str):
+            if text and str(text).strip():
+                transcript_entries.append(f"{speaker}: {str(text).strip()}")
+
+        try:
+            @session.on("user_speech_committed")
+            def _on_user_speech(msg):
+                content = getattr(msg, "content", "") or getattr(msg, "text", "")
+                if isinstance(content, list):
+                    content = " ".join(str(getattr(x, "text", x)) for x in content)
+                _record_speech("Client", str(content))
+
+            @session.on("agent_speech_committed")
+            def _on_agent_speech(msg):
+                content = getattr(msg, "content", "") or getattr(msg, "text", "")
+                if isinstance(content, list):
+                    content = " ".join(str(getattr(x, "text", x)) for x in content)
+                _record_speech("Agent", str(content))
+        except Exception:
+            pass
+
         # Outbound dial
         if direction == "outbound" and phone_number:
             trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
@@ -298,7 +430,76 @@ async def entrypoint(ctx: agents.JobContext):
         t_whatsapp = getattr(tool_ctx, "whatsapp_status", "— Not Requested")
         t_outcome = getattr(tool_ctx, "outcome", "completed")
 
-        summary = f"{t_client_name} ({clean_phone}): {t_bhk or 'TBD'} | Budget: {t_budget or 'TBD'} | {t_purpose} | Score: {t_lead_score} | Duration: {dur}s"
+        # Collect full conversation transcript
+        if not transcript_entries and session:
+            try:
+                chat_ctx = getattr(session, "history", None) or getattr(session, "_chat_ctx", None)
+                if chat_ctx and hasattr(chat_ctx, "messages"):
+                    for m in chat_ctx.messages:
+                        r = getattr(m, "role", "")
+                        if r in ("user", "assistant"):
+                            spk = "Client" if r == "user" else "Agent"
+                            c = getattr(m, "content", "") or getattr(m, "text", "")
+                            if isinstance(c, list):
+                                c = " ".join(str(getattr(x, "text", x)) for x in c)
+                            if c:
+                                transcript_entries.append(f"{spk}: {c}")
+            except Exception:
+                pass
+
+        full_transcript = "\n".join(transcript_entries)
+
+        # Fallback / Secondary extraction if visit was agreed but site_visit_date is empty
+        if not t_site_visit or not t_site_visit.strip():
+            summary_lower = (t_outcome or "").lower() + " " + (t_bhk or "").lower()
+            transcript_lower = full_transcript.lower()
+            visit_agreed = (
+                "booked" in t_outcome.lower() or
+                "site visit" in transcript_lower or
+                "cab pickup" in transcript_lower or
+                "pickup cab" in transcript_lower or
+                any(phrase in transcript_lower for phrase in ["visit arrange", "visit confirm", "visit karenge", "visit ke liye", "dekhne aunga", "dekhne aungi", "visit plan", "gaadi bhej", "cab bhej"])
+            ) and (
+                any(pos in transcript_lower for pos in ["haan", "yes", "sure", "bilkul", "theek hai", "thik hai", "done", "confirm", "chalega", "aunga", "aungi", "bhej do", "bhej dena", "thik"])
+                or "booked" in t_outcome.lower()
+            )
+            if visit_agreed:
+                rec_dt, rec_cab, rec_loc = extract_site_visit_details_from_transcript(full_transcript, client_location=t_location)
+                if rec_dt:
+                    t_site_visit = rec_dt
+                    t_pickup = rec_cab
+                    t_pickup_loc = rec_loc or t_location
+                    t_outcome = "booked"
+                    t_lead_score = "Hot"
+                    await push_unified_log("Appointments", "info", f"Transcript fallback extracted Site Visit: {t_site_visit} (Cab: {t_pickup}, Loc: {t_pickup_loc})", call_id=call_id)
+
+        # Automatically insert into appointments table if not already created during call
+        if t_site_visit and not getattr(tool_ctx, "appointment_booked", False):
+            try:
+                parts = t_site_visit.strip().split(" ")
+                v_date = parts[0] if len(parts) > 0 else t_site_visit
+                v_time = parts[1] if len(parts) > 1 else "11:00"
+                if len(v_time) == 4 and ":" not in v_time:
+                    v_time = f"{v_time[:2]}:{v_time[2:]}"
+                await insert_appointment(
+                    name=t_client_name or lead_name,
+                    phone=clean_phone,
+                    date=v_date,
+                    time=v_time,
+                    service="Site Visit",
+                    budget=t_budget,
+                    property_type=t_bhk,
+                    pickup_required=t_pickup,
+                    pickup_address=t_pickup_loc,
+                    calcom_booking_uid=""
+                )
+                await push_unified_log("Appointments", "info", f"✅ Site visit appointment auto-inserted into DB for {clean_phone} on {t_site_visit}", call_id=call_id)
+            except Exception as appt_err:
+                logger.error(f"Error auto-inserting appointment in wrap-up: {appt_err}")
+
+        visit_str = f" | Visit: {t_site_visit}" if t_site_visit else ""
+        cab_str = f" (Cab: {t_pickup_loc or 'Yes'})" if t_pickup else ""
+        summary = f"{t_client_name} ({clean_phone}): {t_bhk or 'TBD'} | Budget: {t_budget or 'TBD'} | {t_purpose}{visit_str}{cab_str} | Score: {t_lead_score} | Duration: {dur}s"
 
         try:
             await log_call(
@@ -329,7 +530,8 @@ async def entrypoint(ctx: agents.JobContext):
                 next_callback=t_callback,
                 objection=t_objection,
                 whatsapp_status=t_whatsapp,
-                log_category=log_category
+                log_category=log_category,
+                callback_dispatched=False
             )
             await push_unified_log("CRM", "info", f"Call log saved ({direction}): {clean_phone} - {dur}s, ₹{cost_inr}", call_id=call_id)
         except Exception as log_err:

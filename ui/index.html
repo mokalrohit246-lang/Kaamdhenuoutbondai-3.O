@@ -903,7 +903,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const pu = c.pickup_required;
         const loc = c.pickup_location || '';
         let out = sv || '—';
-        if (pu && loc) out += `<br><span style="color:#06B6D4;">🚗 Pickup: ${loc}</span>`;
+        if (pu) out += `<br><span style="color:#06B6D4;">🚗 Pickup: ${loc || 'Yes'}</span>`;
         else if (sv) out += '<br><span style="color:#64748B;">❌ Self-Drive</span>';
         return out;
     };
@@ -975,7 +975,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('tbl_visits').innerHTML = list.map(v => `
                     <tr>
                         <td>${v.date} ${v.time}</td>
-                        <td>${v.name}</td>
+                        <td><b>${v.name}</b>${v.pickup_required ? `<br><span style="font-size:11px;color:#06B6D4;">🚗 Cab: ${v.pickup_address || 'Yes'}</span>` : ''}</td>
                         <td>${v.phone}</td>
                         <td>${v.property_type || v.service || '-'}</td>
                         <td>${v.budget || '-'}</td>

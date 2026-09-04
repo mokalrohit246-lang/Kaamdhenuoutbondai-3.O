@@ -142,6 +142,7 @@ async def log_call(
     commitment_risk: str = "Low", site_visit_date: str = "",
     pickup_required: bool = False, pickup_location: str = "",
     next_callback: str = "", objection: str = "", whatsapp_status: str = "— Not Requested",
+    callback_dispatched: bool = False,
     **kwargs
 ):
     try:
@@ -172,7 +173,8 @@ async def log_call(
             "pickup_location": pickup_location,
             "next_callback": next_callback,
             "objection": objection,
-            "whatsapp_status": whatsapp_status
+            "whatsapp_status": whatsapp_status,
+            "callback_dispatched": callback_dispatched
         }
         for k, v in kwargs.items():
             row[k] = v
@@ -180,9 +182,42 @@ async def log_call(
             row["campaign_id"] = campaign_id
         if recording_url:
             row["recording_url"] = recording_url
-        await db.table("call_logs").upsert(row, on_conflict="id").execute()
+        try:
+            await db.table("call_logs").upsert(row, on_conflict="id").execute()
+        except Exception as up_err:
+            if "callback_dispatched" in str(up_err).lower():
+                row.pop("callback_dispatched", None)
+                await db.table("call_logs").upsert(row, on_conflict="id").execute()
+            else:
+                raise up_err
     except Exception as e:
         logger.error(f"Error executing log_call upsert: {e}")
+
+async def get_pending_callbacks() -> list:
+    """Fetch call logs where next_callback is set and not yet dispatched."""
+    try:
+        db = await _adb()
+        res = await db.table("call_logs").select("*").neq("next_callback", "").order("timestamp", desc=True).limit(200).execute()
+        rows = res.data or []
+        pending = []
+        for r in rows:
+            cb = (r.get("next_callback") or "").strip()
+            if cb and not r.get("callback_dispatched"):
+                pending.append(r)
+        return pending
+    except Exception as e:
+        logger.error(f"Error getting pending callbacks: {e}")
+        return []
+
+async def mark_callback_dispatched(call_id: str) -> bool:
+    """Mark a call log's callback as dispatched to avoid duplicate dialing."""
+    try:
+        db = await _adb()
+        await db.table("call_logs").update({"callback_dispatched": True}).eq("id", call_id).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Error marking callback dispatched for {call_id}: {e}")
+        return False
 
 async def get_calls(direction: Optional[str] = None, campaign_id: Optional[str] = None, limit: int = 100):
     db = await _adb()

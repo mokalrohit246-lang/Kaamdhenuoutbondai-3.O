@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS call_logs (
     cost_inr NUMERIC(10, 2) DEFAULT 0.00,
     recording_url TEXT,
     notes TEXT,
+    callback_dispatched BOOLEAN DEFAULT FALSE,
     timestamp TEXT NOT NULL
 );
 
