@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+import re
 import httpx
 from typing import Optional
 from livekit import agents, api
@@ -201,16 +202,22 @@ class RealEstateTools(llm.ToolContext):
 
         # 3. Save to local DB
         try:
-            booking_id = await insert_appointment(
-                name=client_name or self.lead_name,
+            clean_phone_digits = re.sub(r'\D', '', str(self.phone_number or ""))
+            custom_apt_id = f"apt_{clean_phone_digits}_{int(time.time())}"
+            bhk = self.bhk_requirement or getattr(self, "property_type", "")
+            service_title = f"Site Visit ({bhk or 'Property'})"
+            booking_id = await book_appointment(
+                id=custom_apt_id,
+                name=client_name or self.lead_name or "Lead",
                 phone=self.phone_number,
                 date=date,
                 time=vtime,
-                service="Site Visit",
+                service=service_title,
                 budget=self.budget,
-                property_type=self.bhk_requirement,
+                property_type=bhk,
                 pickup_required=pickup_required,
                 pickup_address=pickup_address,
+                status="booked",
                 calcom_booking_uid=calcom_booking_uid
             )
             pickup_msg = f" with cab pickup from {pickup_address}" if pickup_required and pickup_address else ""

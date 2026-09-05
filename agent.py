@@ -41,7 +41,7 @@ except ImportError:
 from db import (
     push_unified_log, log_call, find_recent_outbound_context,
     add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile,
-    insert_appointment
+    insert_appointment, book_appointment
 )
 from prompts import build_prompt, get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 from tools import RealEstateTools
@@ -476,22 +476,25 @@ async def entrypoint(ctx: agents.JobContext):
         # Automatically insert into appointments table if not already created during call
         if t_site_visit and not getattr(tool_ctx, "appointment_booked", False):
             try:
-                parts = t_site_visit.strip().split(" ")
+                parts = t_site_visit.strip().replace("T", " ").split(" ")
                 v_date = parts[0] if len(parts) > 0 else t_site_visit
                 v_time = parts[1] if len(parts) > 1 else "11:00"
                 if len(v_time) == 4 and ":" not in v_time:
                     v_time = f"{v_time[:2]}:{v_time[2:]}"
-                await insert_appointment(
-                    name=t_client_name or lead_name,
+                clean_phone_digits = re.sub(r'\D', '', clean_phone)
+                custom_apt_id = f"apt_{clean_phone_digits}_{int(time.time())}"
+                await book_appointment(
+                    id=custom_apt_id,
+                    name=t_client_name or lead_name or "Lead",
                     phone=clean_phone,
                     date=v_date,
                     time=v_time,
-                    service="Site Visit",
+                    service=f"Site Visit ({t_bhk or 'Property'})",
                     budget=t_budget,
                     property_type=t_bhk,
-                    pickup_required=t_pickup,
-                    pickup_address=t_pickup_loc,
-                    calcom_booking_uid=""
+                    pickup_required=bool(t_pickup),
+                    pickup_address=t_pickup_loc or "",
+                    status="booked"
                 )
                 await push_unified_log("Appointments", "info", f"✅ Site visit appointment auto-inserted into DB for {clean_phone} on {t_site_visit}", call_id=call_id)
             except Exception as appt_err:

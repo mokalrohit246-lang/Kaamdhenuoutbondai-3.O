@@ -52,6 +52,10 @@ th { color: var(--text-muted); font-weight: 600; background: var(--card-bg); }
 .btn { background: var(--primary-emerald); color: #000; border: none; padding: 8px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; }
 .btn-cyan { background: var(--accent-cyan); color: #000; }
 .btn-danger { background: var(--danger-coral); color: #FFF; }
+.btn-outline { background: transparent; border: 1px solid #334155; color: #E2E8F0; cursor: pointer; }
+.btn-outline:hover { background: #1E293B; border-color: #64748B; color: #FFF; }
+.bg-purple { background: rgba(168, 85, 247, 0.2); color: #C084FC; border: 1px solid rgba(168, 85, 247, 0.35); }
+.text-muted { color: var(--text-muted); font-size: 11.5px; }
 .btn-sm { padding: 4px 8px; font-size: 11.5px; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
 .form-group { display: flex; flex-direction: column; gap: 5px; }
@@ -84,7 +88,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
   <div class="nav-tab" data-tab="view_single_call">📞 Single Call</div>
   <div class="nav-tab" data-tab="view_campaigns">🚀 Campaigns</div>
   <div class="nav-tab" data-tab="view_agents">🤖 Agents Studio</div>
-  <div class="nav-tab" data-tab="view_visits">📅 Appointments</div>
+  <div class="nav-tab" data-tab="view_appointments">📅 Appointments</div>
   <div class="nav-tab" data-tab="view_outbound">📲 Outbound Logs</div>
   <div class="nav-tab" data-tab="view_inbound">📥 Inbound Logs</div>
   <div class="nav-tab" data-tab="view_crm">👥 CRM</div>
@@ -353,13 +357,28 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
     </div>
   </div>
 
-  <div id="view_visits" class="tab-view">
+  <div id="view_appointments" class="tab-view">
     <div class="card">
-      <div class="card-header"><span>Scheduled Site Visits (Cal.com / Supabase)</span></div>
-      <table>
-        <thead><tr><th>Date & Time</th><th>Lead Name</th><th>Phone</th><th>Requirement</th><th>Budget</th><th>Status</th><th>Action</th></tr></thead>
-        <tbody id="tbl_visits"></tbody>
-      </table>
+      <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <span>📅 Scheduled Site Visits & Cal.com Bookings</span>
+        <button id="btn_refresh_appointments" class="btn btn-outline btn-sm" onclick="loadAppointments()">🔄 Refresh</button>
+      </div>
+      <div style="overflow-x: auto; -webkit-overflow-scrolling: touch;">
+        <table>
+          <thead>
+            <tr>
+              <th>Date & Time</th>
+              <th>Lead Name</th>
+              <th>Phone</th>
+              <th>Requirement & Budget</th>
+              <th>Cab Pickup</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="tbl_appointments"></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -866,6 +885,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const tabName = tab.dataset.tab;
             if (tabName === 'view_settings') loadSettings();
             if (tabName === 'view_agents') loadAgents();
+            if (tabName === 'view_appointments' || tabName === 'view_visits') loadAppointments();
             if (tabName === 'view_campaigns') { loadCampaigns(); loadSelectedCampaignLogs(); }
             if (tabName === 'view_outbound' || tabName === 'view_inbound') loadCalls();
             if (tabName === 'view_crm') loadCRM();
@@ -994,25 +1014,69 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (e) {}
     };
 
-    const loadVisits = async () => {
+    function renderAppointments(data) {
+        const list = Array.isArray(data) ? data : [];
+        const tbody = document.getElementById('tbl_appointments') || document.getElementById('tbl_visits');
+        if (!tbody) return;
+        if (!list.length) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:24px; color:#64748B;">No site visit appointments scheduled yet</td></tr>';
+            return;
+        }
+        tbody.innerHTML = list.map(v => {
+            const reqStr = v.requirement || v.property_type || v.service || 'Site Visit';
+            const rawBudget = (v.budget && v.budget !== '-' && v.budget !== 'None' && v.budget !== 'TBD') ? v.budget : '';
+            const budgetBadge = rawBudget ? `<span class="badge" style="background:rgba(6,182,212,0.15); color:#38BDF8; margin-left:6px; font-weight:600;">${rawBudget.startsWith('₹') ? rawBudget : '₹' + rawBudget}</span>` : '';
+
+            let cabHtml = '<span class="text-muted">🚙 Self-Drive</span>';
+            if (v.pickup_required) {
+                const loc = v.pickup_address && v.pickup_address !== 'Please provide pick-up address' ? v.pickup_address : 'Requested';
+                cabHtml = `<span class="badge bg-purple">🚗 Cab: ${loc}</span>`;
+            }
+
+            const st = (v.status || 'booked').toLowerCase();
+            let stBadge = '<span class="badge badge-booked">Booked</span>';
+            if (st === 'completed') {
+                stBadge = '<span class="badge badge-cold">Completed</span>';
+            } else if (st === 'cancelled') {
+                stBadge = '<span class="badge badge-hot">Cancelled</span>';
+            }
+
+            const actionHtml = st !== 'cancelled'
+                ? `<button class="btn btn-danger btn-sm" onclick="cancelAppointment('${v.id}')">Cancel</button>`
+                : '<span class="text-muted">—</span>';
+
+            const dateStr = v.date || '-';
+            const timeStr = v.time ? `⏰ ${v.time}` : '⏰ 11:00';
+
+            return `
+                <tr>
+                    <td><b>${dateStr}</b><br><span style="color:#94A3B8; font-size:11px;">${timeStr}</span></td>
+                    <td><b>${v.name || 'Lead'}</b></td>
+                    <td><code>${v.phone || '-'}</code></td>
+                    <td><span>${reqStr}</span>${budgetBadge}</td>
+                    <td>${cabHtml}</td>
+                    <td>${stBadge}</td>
+                    <td>${actionHtml}</td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    const loadAppointments = async () => {
         try {
             const res = await fetch('/api/appointments');
             if (res.ok) {
                 const list = await res.json();
-                document.getElementById('tbl_visits').innerHTML = list.map(v => `
-                    <tr>
-                        <td>${v.date} ${v.time}</td>
-                        <td><b>${v.name}</b>${v.pickup_required ? `<br><span style="font-size:11px;color:#06B6D4;">🚗 Cab: ${v.pickup_address || 'Yes'}</span>` : ''}</td>
-                        <td>${v.phone}</td>
-                        <td>${v.property_type || v.service || '-'}</td>
-                        <td>${v.budget || '-'}</td>
-                        <td><span class="badge badge-booked">${v.status}</span></td>
-                        <td><button class="btn btn-danger btn-sm" onclick="cancelVisit('${v.id}')">Cancel</button></td>
-                    </tr>
-                `).join('');
+                renderAppointments(list);
             }
-        } catch (e) {}
+        } catch (e) {
+            console.error("Error loading appointments:", e);
+        }
     };
+    const loadVisits = loadAppointments;
+    window.loadAppointments = loadAppointments;
+    window.loadVisits = loadAppointments;
+    window.renderAppointments = renderAppointments;
 
     const loadClients = async () => {
         try {
@@ -1268,7 +1332,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadStats();
     loadCalls();
     loadUnifiedLogs();
-    loadVisits();
+    loadAppointments();
     loadClients();
     loadCRM();
     loadSettings();
@@ -1280,6 +1344,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(loadCalls, 4000);
     setInterval(loadCRM, 5000);
     setInterval(loadStats, 6000);
+    setInterval(loadAppointments, 5000);
     setInterval(loadUnifiedLogs, 3000);
     setInterval(loadSelectedCampaignLogs, 5000);
 });
@@ -1461,10 +1526,20 @@ async function clearLogs() {
     document.getElementById('tbl_logs').innerHTML = '';
 }
 
-async function cancelVisit(id) {
-    await fetch(`/api/appointments/${id}`, { method: 'DELETE' });
-    location.reload();
+async function cancelAppointment(id) {
+    if (!confirm("Are you sure you want to cancel this site visit appointment?")) return;
+    try {
+        const res = await fetch(`/api/appointments/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+            loadAppointments();
+        } else {
+            alert("Failed to cancel appointment");
+        }
+    } catch(e) {
+        console.error("Cancel appointment error:", e);
+    }
 }
+const cancelVisit = cancelAppointment;
 
 async function deleteClient(id) {
     await fetch(`/api/client-numbers/${id}`, { method: 'DELETE' });

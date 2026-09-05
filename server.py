@@ -329,9 +329,10 @@ async def api_appointments():
     return await get_all_appointments()
 
 @app.delete("/api/appointments/{aid}")
+@app.post("/api/appointments/cancel/{aid}")
 async def api_cancel_app(aid: str):
     await cancel_appointment(aid)
-    return {"status": "cancelled"}
+    return {"status": "cancelled", "id": aid}
 
 @app.get("/api/client-numbers")
 async def api_list_clients():

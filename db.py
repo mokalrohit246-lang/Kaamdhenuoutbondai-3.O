@@ -3,6 +3,8 @@ import os
 import uuid
 import httpx
 import sqlite3
+import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -60,36 +62,45 @@ async def delete_client_number(cid: str):
     db = await _adb()
     await db.table("client_numbers").delete().eq("id", cid).execute()
 
-async def insert_appointment(
+async def book_appointment(
     name: str, phone: str, date: str, time: str, service: str = "Site Visit",
     budget: str = "", property_type: str = "", pickup_required: bool = False,
-    pickup_address: str = "", calcom_booking_uid: str = "", **kwargs
-):
-    full_id = str(uuid.uuid4())
+    pickup_address: str = "", calcom_booking_uid: str = "", id: Optional[str] = None,
+    status: str = "booked", **kwargs
+) -> str:
+    clean_phone_digits = re.sub(r'\D', '', str(phone or ""))
+    full_id = id or f"apt_{clean_phone_digits[-10:]}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     db = await _adb()
-    row = {
-        "id": full_id, "name": name, "phone": phone, "date": date, "time": time,
-        "service": service, "budget": budget, "property_type": property_type,
-        "pickup_required": pickup_required, "pickup_address": pickup_address,
-        "calcom_booking_uid": calcom_booking_uid,
-        "status": "booked", "created_at": datetime.utcnow().isoformat()
-    }
-    for k, v in kwargs.items():
-        row[k] = v
-    try:
-        await db.table("appointments").insert(row).execute()
-    except Exception as e:
-        # Fallback without extra columns if schema not yet updated
-        logger.warning(f"insert_appointment fallback due to: {e}")
-        await db.table("appointments").insert({
-            "id": full_id, "name": name, "phone": phone, "date": date, "time": time,
-            "service": service, "budget": budget, "property_type": property_type,
-            "status": "booked", "created_at": datetime.utcnow().isoformat()
-        }).execute()
-    return full_id[:8].upper()
 
-# Alias book_appointment to insert_appointment
-book_appointment = insert_appointment
+    clean_p = str(phone or "").strip()
+    row = {
+        "id": full_id,
+        "name": name or "Lead",
+        "phone": clean_p,
+        "date": date,
+        "time": time,
+        "service": service,
+        "status": status or "booked",
+        "created_at": datetime.utcnow().isoformat(),
+        "pickup_required": bool(pickup_required),
+        "pickup_address": pickup_address or ""
+    }
+    if calcom_booking_uid:
+        row["calcom_booking_uid"] = calcom_booking_uid
+
+    try:
+        await db.table("appointments").upsert(row, on_conflict="id").execute()
+    except Exception as e:
+        logger.warning(f"book_appointment upsert error: {e}")
+        try:
+            await db.table("appointments").insert(row).execute()
+        except Exception as e2:
+            logger.warning(f"book_appointment insert fallback warning: {e2}")
+
+    return full_id
+
+# Backward compatible alias
+insert_appointment = book_appointment
 
 async def insert_whatsapp_log(phone_number: str, message: str, status: str = "sent", call_id: Optional[str] = None):
     try:
@@ -122,14 +133,179 @@ async def get_next_available(date: str, time: str) -> str:
                 return f"{dt.strftime('%Y-%m-%d')} at {dt.strftime('%H:%M')}"
     return "Tomorrow at 11:00 AM"
 
-async def get_all_appointments():
+async def get_all_appointments() -> list:
+    """
+    Unified appointments fetcher:
+    1. Fetches all rows from `appointments` table.
+    2. Queries `call_logs` table for any records where `site_visit_date` is not empty/null.
+    3. Auto-Backfill Sync: For each call log record with a `site_visit_date`:
+       - Extract date_time = record.get('site_visit_date')
+       - Split into date and time.
+       - Extract name = record.get('lead_name') or record.get('called_to') or 'Lead'
+       - Extract phone = record.get('phone_number')
+       - Extract pickup_required = record.get('pickup_required', False)
+       - Extract pickup_address = record.get('pickup_location', '')
+       - Extract budget = record.get('budget', '-')
+       - Extract requirement = record.get('bhk_requirement') or record.get('property_type') or 'Site Visit'
+       - Check if this appointment already exists in appointments table (match by phone and date).
+       - If NOT present, automatically insert it into appointments table so it is permanently saved.
+    4. Return the merged, deduplicated list of appointments sorted by date/time descending.
+    5. Include fields: id, name, phone, date, time, service, requirement, budget, pickup_required, pickup_address, status, created_at.
+    """
     db = await _adb()
-    res = await db.table("appointments").select("*").order("date", desc=True).order("time").execute()
-    return res.data or []
 
-async def cancel_appointment(aid: str):
+    # 1. Fetch appointments table
+    appointments = []
+    try:
+        res = await db.table("appointments").select("*").order("created_at", desc=True).execute()
+        appointments = res.data or []
+    except Exception as e:
+        logger.warning(f"Error fetching appointments: {e}")
+
+    # Track existing appointments by (phone_10_digits, date_str)
+    existing_keys = set()
+    for a in appointments:
+        p_clean = re.sub(r"\D", "", str(a.get("phone") or ""))
+        p_10 = p_clean[-10:] if len(p_clean) >= 10 else p_clean
+        d_str = str(a.get("date") or "").strip()
+        if p_10 and d_str:
+            existing_keys.add((p_10, d_str))
+
+    # 2. Query call_logs table for records where site_visit_date is not empty/null
+    call_logs = []
+    try:
+        cl_res = await db.table("call_logs").select("*").neq("site_visit_date", "").execute()
+        call_logs = cl_res.data or []
+    except Exception as e:
+        logger.warning(f"Error querying call_logs for site visits: {e}")
+
+    # Build lookup map for call logs by (phone_10, date) to enrich appointments with requirement and budget
+    call_log_map = {}
+    newly_inserted = []
+
+    for log in call_logs:
+        raw_dt = str(log.get("site_visit_date") or "").strip()
+        if not raw_dt or raw_dt.lower() in ("none", "null", "-", "false"):
+            continue
+
+        # Split into date and time
+        dt_clean = raw_dt.replace("T", " ")
+        parts = dt_clean.split()
+        date_part = parts[0].strip() if len(parts) > 0 else raw_dt
+        time_part = parts[1].strip()[:5] if len(parts) > 1 else "11:00"
+        if len(time_part) == 4 and ":" not in time_part:
+            time_part = f"{time_part[:2]}:{time_part[2:]}"
+
+        name = log.get("lead_name") or log.get("client_name") or log.get("called_to") or "Lead"
+        phone = str(log.get("phone_number") or "")
+        p_clean = re.sub(r"\D", "", phone)
+        p_10 = p_clean[-10:] if len(p_clean) >= 10 else p_clean
+        pickup_req = bool(log.get("pickup_required"))
+        pickup_addr = log.get("pickup_location") or ""
+        budget = log.get("budget") or "-"
+        requirement = log.get("bhk_requirement") or log.get("property_type") or "Site Visit"
+        outcome = str(log.get("outcome") or "").lower()
+        status = "cancelled" if "cancel" in outcome else "booked"
+        created_at = log.get("timestamp") or datetime.utcnow().isoformat()
+
+        if p_10 and date_part:
+            call_log_map[(p_10, date_part)] = log
+
+        key = (p_10, date_part)
+        if key not in existing_keys and p_10:
+            custom_id = f"apt_{p_10}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            service_label = f"Site Visit ({requirement})" if requirement and requirement != "Site Visit" else "Site Visit"
+            formatted_phone = phone if phone.startswith("+") else (f"+91{p_10}" if len(p_10) == 10 else phone)
+
+            new_apt = {
+                "id": custom_id,
+                "name": name,
+                "phone": formatted_phone,
+                "date": date_part,
+                "time": time_part,
+                "service": service_label,
+                "status": status,
+                "created_at": created_at,
+                "pickup_required": pickup_req,
+                "pickup_address": pickup_addr
+            }
+            try:
+                await db.table("appointments").insert(new_apt).execute()
+                logger.info(f"Auto-backfilled site visit appointment from call log {log.get('id')} for {phone} on {date_part}")
+            except Exception as ins_err:
+                logger.warning(f"Auto-backfill insert warning: {ins_err}")
+
+            new_apt["requirement"] = requirement
+            new_apt["budget"] = budget
+            existing_keys.add(key)
+            newly_inserted.append(new_apt)
+
+    # 4. Merge and deduplicate appointments
+    all_raw = appointments + newly_inserted
+    merged = []
+    seen_ids = set()
+
+    for a in all_raw:
+        aid = a.get("id")
+        if aid in seen_ids:
+            continue
+        seen_ids.add(aid)
+
+        p_clean = re.sub(r"\D", "", str(a.get("phone") or ""))
+        p_10 = p_clean[-10:] if len(p_clean) >= 10 else p_clean
+        d_val = str(a.get("date") or "")
+        matched_log = call_log_map.get((p_10, d_val), {})
+
+        req = a.get("requirement") or a.get("property_type") or matched_log.get("bhk_requirement") or matched_log.get("property_type") or ""
+        bud = a.get("budget") or matched_log.get("budget") or "-"
+        serv = a.get("service") or "Site Visit"
+
+        if not req and "(" in serv and ")" in serv:
+            m = re.search(r'\(([^)]+)\)', serv)
+            if m:
+                req = m.group(1).strip()
+        if not req:
+            req = "Site Visit"
+
+        merged.append({
+            "id": aid,
+            "name": a.get("name") or matched_log.get("lead_name") or "Lead",
+            "phone": a.get("phone") or matched_log.get("phone_number") or "",
+            "date": a.get("date") or "",
+            "time": a.get("time") or "11:00",
+            "service": serv,
+            "requirement": req,
+            "budget": bud if bud != "" else "-",
+            "pickup_required": bool(a.get("pickup_required") if a.get("pickup_required") is not None else matched_log.get("pickup_required")),
+            "pickup_address": a.get("pickup_address") or matched_log.get("pickup_location") or "",
+            "status": a.get("status") or "booked",
+            "created_at": a.get("created_at") or datetime.utcnow().isoformat()
+        })
+
+    # Sort descending by date and time
+    merged.sort(key=lambda x: f"{x.get('date', '')} {x.get('time', '')}", reverse=True)
+    return merged
+
+async def cancel_appointment(aid: str) -> bool:
     db = await _adb()
-    await db.table("appointments").update({"status": "cancelled"}).eq("id", aid).execute()
+    try:
+        # 1. Update appointments table
+        await db.table("appointments").update({"status": "cancelled"}).eq("id", aid).execute()
+
+        # 2. Also cancel corresponding call_logs if matched
+        apt_res = await db.table("appointments").select("phone, date").eq("id", aid).maybe_single().execute()
+        if apt_res and apt_res.data:
+            p_val = apt_res.data.get("phone") or ""
+            d_val = apt_res.data.get("date") or ""
+            p_digits = re.sub(r"\D", "", p_val)
+            p_10 = p_digits[-10:] if len(p_digits) >= 10 else p_digits
+            if p_10:
+                cl_res = await db.table("call_logs").select("id, site_visit_date").ilike("phone_number", f"%{p_10}%").execute()
+                for cl in (cl_res.data or []):
+                    if not d_val or d_val in str(cl.get("site_visit_date") or ""):
+                        await db.table("call_logs").update({"outcome": "cancelled"}).eq("id", cl.get("id")).execute()
+    except Exception as e:
+        logger.warning(f"Error cancelling appointment: {e}")
     return True
 
 async def log_call(
