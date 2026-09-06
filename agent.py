@@ -223,12 +223,19 @@ async def entrypoint(ctx: agents.JobContext):
     custom_prompt = None
     tool_ctx = None
     log_category = "general"
+    lead_notes = ""
+    lead_bhk = ""
+    lead_budget = ""
 
     try:
-        # Outbound Metadata parsing
-        if ctx.job.metadata:
+        # Outbound Metadata parsing (job metadata first, then room metadata as fallback)
+        raw_meta = ctx.job.metadata or ""
+        if not raw_meta and ctx.room and ctx.room.metadata:
+            raw_meta = ctx.room.metadata
+
+        if raw_meta:
             try:
-                m = json.loads(ctx.job.metadata)
+                m = json.loads(raw_meta)
                 direction = m.get("direction", "outbound")
                 phone_number = m.get("phone_number", "")
                 lead_name = m.get("lead_name", lead_name)
@@ -242,6 +249,9 @@ async def entrypoint(ctx: agents.JobContext):
                 calcom_api_key = m.get("calcom_api_key")
                 calcom_event_type_id = m.get("calcom_event_type_id")
                 custom_prompt = m.get("system_prompt")
+                lead_notes = m.get("notes") or m.get("context") or m.get("additional_info") or ""
+                lead_bhk = m.get("bhk") or m.get("bhk_requirement") or ""
+                lead_budget = m.get("budget") or ""
             except Exception as e:
                 logger.warning(f"Metadata parse warning: {e}")
 
@@ -298,6 +308,34 @@ async def entrypoint(ctx: agents.JobContext):
             service_type=service_type
         )
 
+        # === DYNAMIC LEAD CONTEXT INJECTION FOR OUTBOUND CALLS ===
+        # If this is an outbound call and we have a valid lead_name, inject a high-priority
+        # context block so the agent NEVER asks for the customer's name and greets them directly.
+        valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
+        if direction == "outbound" and valid_lead_name:
+            notes_str = lead_notes.strip() if lead_notes else "None"
+            bhk_str = lead_bhk.strip() if lead_bhk else ""
+            budget_str = lead_budget.strip() if lead_budget else ""
+            context_parts = [notes_str]
+            if bhk_str:
+                context_parts.append(f"BHK: {bhk_str}")
+            if budget_str:
+                context_parts.append(f"Budget: {budget_str}")
+            context_detail = " | ".join(p for p in context_parts if p and p != "None")
+
+            dynamic_lead_instruction = f"""
+[CRITICAL CALL CONTEXT - OUTBOUND LEAD DETAILS]
+- You are placing an outbound call to: {lead_name}
+- Phone: {phone_number}
+- Known Details / Notes: {context_detail or 'None'}
+- STRICT RULE: You ALREADY KNOW the user's name is {lead_name}.
+- ABSOLUTELY NEVER ask "Aapka naam kya hai?" or "May I know your name?" or any variation.
+- Greet the user directly by their name in your very first greeting sentence!
+- Example Opening: "Hello {lead_name} ji, namaste! Main {agent_name}, {business_name} se baat kar rahi hoon..."
+"""
+            system_prompt = system_prompt + "\n" + dynamic_lead_instruction
+            await push_unified_log("Agent", "info", f"Dynamic lead context injected for {lead_name} ({phone_number})", call_id=call_id)
+
         tool_ctx = RealEstateTools(
             ctx,
             phone_number=phone_number,
@@ -310,6 +348,13 @@ async def entrypoint(ctx: agents.JobContext):
             calcom_api_key=calcom_api_key,
             calcom_event_type_id=calcom_event_type_id
         )
+        # Pre-populate qualification data from metadata so agent has context from the start
+        if valid_lead_name:
+            tool_ctx.client_name = lead_name
+        if lead_bhk:
+            tool_ctx.bhk_requirement = lead_bhk
+        if lead_budget:
+            tool_ctx.budget = lead_budget
 
         # Connect immediately
         await ctx.connect()
@@ -369,15 +414,23 @@ async def entrypoint(ctx: agents.JobContext):
         await session_start_task
         await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
 
-        # Opening greeting
-        greeting_text = (
-            f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I help you today?"
-            if direction == "inbound" else
-            f"Hi {lead_name}! I am {agent_name} from {business_name} calling regarding your inquiry."
-        )
+        # Opening greeting - personalized for outbound calls with known lead name
+        if direction == "inbound":
+            greeting_text = f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I help you today?"
+        elif valid_lead_name:
+            greeting_text = (
+                f"Hello {lead_name} ji, namaste! Main {agent_name}, {business_name} se baat kar rahi hoon. "
+                f"Kya meri baat {lead_name} ji se ho rahi hai?"
+            )
+        else:
+            greeting_text = f"Hi! I am {agent_name} from {business_name} calling regarding your property inquiry."
+
         try:
-            await session.generate_reply(instructions=f"Speak opening line: {greeting_text}")
-            await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name}", call_id=call_id)
+            greeting_instruction = f"Speak this opening line naturally: {greeting_text}"
+            if valid_lead_name:
+                greeting_instruction += f" IMPORTANT: You already know the customer's name is {lead_name}. Do NOT ask for their name."
+            await session.generate_reply(instructions=greeting_instruction)
+            await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
         except Exception as ge:
             logger.warning(f"Greeting error: {ge}")
 

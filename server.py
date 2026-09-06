@@ -54,6 +54,9 @@ class SingleCallReq(BaseModel):
     calcom_event_type_id: Optional[str] = None
     system_prompt: Optional[str] = None
     custom_prompt: Optional[str] = None
+    notes: Optional[str] = None
+    bhk_requirement: Optional[str] = None
+    budget: Optional[str] = None
 
 class ClientNumReq(BaseModel):
     id: Optional[str] = None
@@ -557,7 +560,10 @@ async def api_dispatch(req: SingleCallReq):
         "broker_phone": broker_phone,
         "broker_email": broker_email,
         "calcom_event_type_id": calcom_event_type_id,
-        "system_prompt": final_prompt
+        "system_prompt": final_prompt,
+        "notes": req.notes or "",
+        "bhk": req.bhk_requirement or "",
+        "budget": req.budget or ""
     }
 
     try:
