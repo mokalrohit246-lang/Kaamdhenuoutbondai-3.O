@@ -10,6 +10,13 @@ from typing import Optional
 
 logger = logging.getLogger("kaamdhenu-db")
 
+def normalize_phone(phone: str) -> str:
+    """Normalize phone to last 10 digits for consistent matching."""
+    if not phone:
+        return ""
+    digits = re.sub(r'\D', '', str(phone))
+    return digits[-10:] if len(digits) >= 10 else digits
+
 def _adb():
     from supabase._async.client import create_client
     url = os.getenv("SUPABASE_URL", "")
@@ -677,15 +684,25 @@ async def find_recent_outbound_context(caller_phone: str):
         db = await _adb()
         from datetime import timedelta
         cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
-        clean = caller_phone.replace("+", "").replace("sip_", "").strip()
-        res = await db.table("call_logs").select("*").eq("direction", "outbound").ilike("phone_number", f"%{clean}%").gte("timestamp", cutoff).order("timestamp", desc=True).limit(1).execute()
+        # Normalize to last 10 digits for consistent matching
+        clean_10 = normalize_phone(caller_phone)
+        if not clean_10:
+            return {"found": False}
+        res = await db.table("call_logs").select("*").eq("direction", "outbound").ilike("phone_number", f"%{clean_10}%").gte("timestamp", cutoff).order("timestamp", desc=True).limit(1).execute()
         if res.data and len(res.data) > 0:
             row = res.data[0]
+            lead_name = row.get("lead_name", "there")
+            # CRITICAL: project_name must NEVER be the lead's own name.
+            # Extract business/project from campaign agent profile, NOT from lead_name.
+            raw_project = row.get("business_name") or row.get("service_type") or ""
+            # Sanity check: if raw_project somehow equals the lead's name, clear it
+            if raw_project and lead_name and raw_project.strip().lower() == lead_name.strip().lower():
+                raw_project = ""
             return {
                 "found": True,
                 "campaign_id": row.get("campaign_id", ""),
-                "lead_name": row.get("lead_name", "there"),
-                "project_name": row.get("client_name", "") or row.get("lead_name", ""),
+                "lead_name": lead_name,
+                "project_name": raw_project,
                 "broker_phone": "",
                 "prompt": ""
             }
@@ -698,7 +715,7 @@ async def find_campaign_by_inbound_number(number: str):
     """Find campaign by dedicated inbound number."""
     try:
         db = await _adb()
-        clean = number.replace("+", "").replace("sip_", "").strip()
+        clean = normalize_phone(number) or number.replace("+", "").replace("sip_", "").strip()
         res = await db.table("campaigns").select("*").ilike("dedicated_inbound_number", f"%{clean}%").eq("status", "active").maybe_single().execute()
         return res.data if res else None
     except Exception:

@@ -41,7 +41,7 @@ except ImportError:
 from db import (
     push_unified_log, log_call, find_recent_outbound_context,
     add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile,
-    insert_appointment, book_appointment
+    insert_appointment, book_appointment, normalize_phone
 )
 from prompts import build_prompt, get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 from tools import RealEstateTools
@@ -228,7 +228,9 @@ async def entrypoint(ctx: agents.JobContext):
     lead_budget = ""
 
     try:
-        # Outbound Metadata parsing (job metadata first, then room metadata as fallback)
+        # ===================================================================
+        # PHASE 1: PARSE METADATA (instant, no I/O)
+        # ===================================================================
         raw_meta = ctx.job.metadata or ""
         if not raw_meta and ctx.room and ctx.room.metadata:
             raw_meta = ctx.room.metadata
@@ -255,51 +257,67 @@ async def entrypoint(ctx: agents.JobContext):
             except Exception as e:
                 logger.warning(f"Metadata parse warning: {e}")
 
-        # Inbound detection
+        # Inbound detection (instant, no I/O)
         if "inbound" in call_id.lower() or not phone_number:
             direction = "inbound"
             lead_name = "Caller"
             match = re.search(r'(\d{10,12})', call_id)
             phone_number = f"+{match.group(1)}" if match else "+918065353767"
-            
-            # Smart context routing for inbound
             log_category = "direct_inbound"
-            if direction == "inbound":
-                # Check dedicated campaign number
-                camp = await find_campaign_by_inbound_number(phone_number)
-                if camp:
-                    campaign_id = camp.get("id")
-                    log_category = "dedicated_inbound"
-                    ag_id = camp.get("agent_profile_id")
-                    if ag_id:
-                        ag_prof = await get_agent_profile(ag_id)
-                        if ag_prof:
-                            agent_name = ag_prof.get("agent_name") or agent_name
-                            agent_voice = ag_prof.get("voice") or agent_voice
-                            business_name = ag_prof.get("business_name") or business_name
-                            service_type = ag_prof.get("service_type") or service_type
-                            broker_phone = ag_prof.get("broker_phone") or broker_phone
-                            broker_email = ag_prof.get("broker_email") or broker_email
-                            custom_prompt = ag_prof.get("system_prompt") or custom_prompt
-                            calcom_event_type_id = ag_prof.get("calcom_event_type_id") or camp.get("calcom_event_type_id") or calcom_event_type_id
-                    await push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id)
-                else:
-                    # Check recent outbound context (last 7 days)
-                    ctx_info = await find_recent_outbound_context(phone_number)
-                    if ctx_info.get("found"):
-                        campaign_id = ctx_info.get("campaign_id") or campaign_id
-                        lead_name = ctx_info.get("lead_name", lead_name)
-                        proj_name = ctx_info.get("project_name") or business_name
-                        log_category = "campaign_callback"
-                        custom_prompt = (
-                            f"You are {agent_name}, Senior Property Consultant for Kaamdhenu Real Estate.\n"
-                            f"Important context: The client {lead_name} was recently called regarding {proj_name}.\n"
-                            f"Greeting: Speak this opening line: 'Namaste {lead_name}! Main {agent_name} Kaamdhenu Real Estate se baat kar rahi hoon. Aapko humare {proj_name} ke regarding call gaya tha... Batayein main aapki kya madad kar sakti hoon?'\n"
-                            f"Speak naturally in polite Hindi/Hinglish."
-                        )
-                        await push_unified_log("CRM", "info", f"Callback detected from prior campaign lead: {lead_name}", call_id=call_id)
 
-        # Build prompt safely with global natural human conversation layer
+        # ===================================================================
+        # PHASE 2: CONNECT IMMEDIATELY (minimize latency — no DB before this)
+        # ===================================================================
+        await ctx.connect()
+        await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
+
+        # ===================================================================
+        # PHASE 3: ASYNC DB LOOKUPS (only for inbound, run concurrently)
+        # ===================================================================
+        if direction == "inbound":
+            # Run both lookups concurrently to minimize delay
+            camp_task = asyncio.create_task(find_campaign_by_inbound_number(phone_number))
+            ctx_task = asyncio.create_task(find_recent_outbound_context(phone_number))
+
+            camp = await camp_task
+            if camp:
+                campaign_id = camp.get("id")
+                log_category = "dedicated_inbound"
+                ag_id = camp.get("agent_profile_id")
+                if ag_id:
+                    ag_prof = await get_agent_profile(ag_id)
+                    if ag_prof:
+                        agent_name = ag_prof.get("agent_name") or agent_name
+                        agent_voice = ag_prof.get("voice") or agent_voice
+                        business_name = ag_prof.get("business_name") or business_name
+                        service_type = ag_prof.get("service_type") or service_type
+                        broker_phone = ag_prof.get("broker_phone") or broker_phone
+                        broker_email = ag_prof.get("broker_email") or broker_email
+                        custom_prompt = ag_prof.get("system_prompt") or custom_prompt
+                        calcom_event_type_id = ag_prof.get("calcom_event_type_id") or camp.get("calcom_event_type_id") or calcom_event_type_id
+                await push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id)
+            else:
+                ctx_info = await ctx_task
+                if ctx_info.get("found"):
+                    campaign_id = ctx_info.get("campaign_id") or campaign_id
+                    lead_name = ctx_info.get("lead_name", lead_name)
+                    # CRITICAL: project_name must NEVER equal the lead's own name
+                    proj_name = ctx_info.get("project_name") or ""
+                    if proj_name and lead_name and proj_name.strip().lower() == lead_name.strip().lower():
+                        proj_name = ""
+                    proj_name = proj_name or business_name
+                    log_category = "campaign_callback"
+                    custom_prompt = (
+                        f"You are {agent_name}, Senior Property Consultant for Kaamdhenu Real Estate.\n"
+                        f"Important context: The client {lead_name} was recently called regarding {proj_name}.\n"
+                        f"Greeting: Speak this opening line: 'Namaste {lead_name}! Main {agent_name} Kaamdhenu Real Estate se baat kar rahi hoon. Aapko humare {proj_name} ke regarding call gaya tha... Batayein main aapki kya madad kar sakti hoon?'\n"
+                        f"Speak naturally in polite Hindi/Hinglish."
+                    )
+                    await push_unified_log("CRM", "info", f"Callback detected from prior campaign lead: {lead_name}", call_id=call_id)
+
+        # ===================================================================
+        # PHASE 4: BUILD SYSTEM PROMPT
+        # ===================================================================
         system_prompt = get_base_system_prompt(
             agent_name=agent_name,
             business_name=business_name,
@@ -308,9 +326,17 @@ async def entrypoint(ctx: agents.JobContext):
             service_type=service_type
         )
 
+        # Append strict real estate rules to prevent lead-name-as-project confusion
+        strict_rules = f"""
+[STRICT REAL ESTATE RULES]
+- THE CALLER'S NAME IS NEVER A PROPERTY OR PROJECT NAME.
+- If the user's name is {lead_name}, NEVER say "{lead_name} project" or "{lead_name} property".
+- You represent {business_name} projects. If no specific project was previously chosen, ask open-endedly: "Aap kis location ya project ke baare mein jaankari lena chahte hain?"
+- NEVER confuse the person's identity with the property name.
+"""
+        system_prompt = system_prompt + "\n" + strict_rules
+
         # === DYNAMIC LEAD CONTEXT INJECTION FOR OUTBOUND CALLS ===
-        # If this is an outbound call and we have a valid lead_name, inject a high-priority
-        # context block so the agent NEVER asks for the customer's name and greets them directly.
         valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
         if direction == "outbound" and valid_lead_name:
             notes_str = lead_notes.strip() if lead_notes else "None"
@@ -355,10 +381,6 @@ async def entrypoint(ctx: agents.JobContext):
             tool_ctx.bhk_requirement = lead_bhk
         if lead_budget:
             tool_ctx.budget = lead_budget
-
-        # Connect immediately
-        await ctx.connect()
-        await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
 
         session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt, voice=agent_voice)
 
