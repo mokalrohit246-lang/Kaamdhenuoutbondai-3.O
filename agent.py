@@ -568,25 +568,43 @@ async def entrypoint(ctx: agents.JobContext):
         else:
             time_greeting = "good evening"
 
+        is_callback_call = (
+            log_category == "campaign_callback" or
+            "callback" in call_id.lower() or
+            "scheduled callback" in (lead_notes or "").lower()
+        )
+
         if direction == "inbound":
             greeting_text = f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I help you today?"
+        elif is_callback_call:
+            greeting_text = f"Namaste {lead_name} ji, {agent_name} baat kar rahi hoon {business_name} se. Aapne call karne ko kaha tha."
         elif valid_lead_name:
             greeting_text = f"Namaste {lead_name} ji, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
         else:
             greeting_text = f"Namaste sir, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
 
         try:
-            greeting_instruction = (
-                f"Speak this opening line naturally: '{greeting_text}'. "
-                f"ABSOLUTE BAN: STRICTLY FORBIDDEN to say 'Aapne inquiry ki thi' or claim the lead made a prior inquiry. "
-                f"If they say YES or are open to talk, say: 'Thank you! Hum Kalyan-Dombivli aur Thane region mein luxury 1, 2 aur 3 BHK homes offer kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi residential property dekh rahe hain?' "
-                f"If they say NO or BUSY: Respectfully handle callback scheduling without pitching. "
-                f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
-            )
+            if is_callback_call:
+                greeting_instruction = (
+                    f"Speak this opening line naturally: '{greeting_text}'. "
+                    f"Immediately pause and LET THE USER SPEAK. Do NOT pitch immediately. "
+                    f"If the user talks normally, answer their questions and continue property qualification smoothly. "
+                    f"NEVER suggest or ask: 'Main aapko baad mein call karoon kya?'. Keep your focus on the conversation. "
+                    f"Only if the user explicitly says they are still busy or asks to call later, politely acknowledge: 'Theek hai sir/ma'am, main aapko theek us samay par call karti hoon.' and call the schedule_callback tool with the requested time. "
+                    f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
+                )
+            else:
+                greeting_instruction = (
+                    f"Speak this opening line naturally: '{greeting_text}'. "
+                    f"ABSOLUTE BAN: STRICTLY FORBIDDEN to say 'Aapne inquiry ki thi' or claim the lead made a prior inquiry. "
+                    f"If they say YES or are open to talk, say: 'Thank you! Hum Kalyan-Dombivli aur Thane region mein luxury 1, 2 aur 3 BHK homes offer kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi residential property dekh rahe hain?' "
+                    f"If they say NO or BUSY: Respectfully handle callback scheduling without pitching. "
+                    f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
+                )
             if valid_lead_name:
                 greeting_instruction += f" IMPORTANT: You already know the customer's name is {lead_name}. Do NOT ask for their name."
             await session.generate_reply(instructions=greeting_instruction)
-            await push_unified_log("Gemini", "info", f"Autonomous cold-call greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
+            await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
         except Exception as ge:
             logger.warning(f"Greeting error: {ge}")
 

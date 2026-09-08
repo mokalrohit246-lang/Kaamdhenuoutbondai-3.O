@@ -200,8 +200,19 @@ async def dispatch_callback_call(
         if notes:
             custom_ctx += f"Additional Notes: {notes}\n"
         custom_ctx += (
-            f"Opening Greeting: 'Namaste {lead_name}! Main {agent_name}, {business_name} se bol rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?'\n"
-            f"Goal: Qualify requirements, answer questions, and book a site visit with cab pickup."
+            f"\n[SCHEDULED CALLBACK BEHAVIOR - STRICT LISTENING MODE]\n"
+            f"1. OPENING:\n"
+            f"   - Keep it short, crisp, and direct:\n"
+            f"     'Namaste {lead_name} ji, {agent_name} baat kar rahi hoon {business_name} se. Aapne call karne ko kaha tha.'\n"
+            f"   - Immediately pause and LET THE USER SPEAK. Do not pitch immediately.\n"
+            f"2. IF USER TALKS NORMALLY:\n"
+            f"   - Answer their questions and continue the property qualification smoothly.\n"
+            f"   - NEVER suggest or ask: 'Main aapko baad mein call karoon kya?' Keep your focus on the conversation.\n"
+            f"3. IF USER SAYS THEY ARE STILL BUSY / RESCHEDULES:\n"
+            f"   - Only if the USER explicitly asks (e.g., 'Abhi bhi busy hoon, shaam ko 6 baje karo' / 'Kal call karo'):\n"
+            f"     Acknowledge politely: 'Theek hai sir/ma'am, main aapko [time] par call karti hoon.'\n"
+            f"     Call the `schedule_callback` tool with the requested time and end the call respectfully.\n"
+            f"   - Do NOT interrogate or push.\n"
         )
 
         prompt = get_base_system_prompt(

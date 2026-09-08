@@ -480,97 +480,87 @@ async def emergency_cleanup_pending_callbacks():
 
 async def save_callback(phone: str, lead_name: str, scheduled_time: str, notes: str = "") -> bool:
     """
-    Save a scheduled callback for a busy lead to Supabase and local SQLite.
-    Includes DEDUPLICATION & 10-MINUTE COOLDOWN to prevent infinite callback spam.
+    Save or reschedule a callback for a lead in Supabase and local SQLite.
+    UPSERT/OVERWRITE logic: Guarantees there is NEVER more than ONE active pending
+    callback per phone number. If an active pending callback exists, it updates the
+    scheduled_time and context_notes rather than creating a duplicate record.
     """
-    clean_phone_10 = normalize_phone(phone)
-    if not clean_phone_10:
-        clean_phone_10 = re.sub(r'\D', '', str(phone or ""))[-10:]
-    if not clean_phone_10 or len(clean_phone_10) < 10:
+    norm_phone = normalize_phone(phone)
+    if not norm_phone:
+        norm_phone = re.sub(r'\D', '', str(phone or ""))[-10:]
+    if not norm_phone or len(norm_phone) < 10:
         logger.warning(f"save_callback rejected: invalid phone {phone}")
         return False
 
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     now_utc = datetime.now(timezone.utc)
-    cooldown_cutoff = (now_utc - timedelta(minutes=10)).isoformat()
-
-    # DEDUPLICATION 1: Check SQLite for pending callback or recent callback in last 10 mins
-    try:
-        _init_local_sqlite()
-        conn = sqlite3.connect(LOCAL_DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT id FROM scheduled_callbacks WHERE phone = ? AND status = 'pending'", (clean_phone_10,))
-        if c.fetchone():
-            logger.warning(f"Callback rejected for {clean_phone_10}: active pending callback already exists.")
-            conn.close()
-            return False
-
-        c.execute("SELECT id FROM scheduled_callbacks WHERE phone = ? AND created_at >= ?", (clean_phone_10, cooldown_cutoff))
-        if c.fetchone():
-            logger.warning(f"Callback rejected for {clean_phone_10}: 10-minute cooldown active.")
-            conn.close()
-            return False
-        conn.close()
-    except Exception as e:
-        logger.warning(f"SQLite dedup check error: {e}")
-
-    # DEDUPLICATION 2: Check Supabase for pending callback or recent callback in last 10 mins
-    try:
-        db = await _adb()
-        res = await db.table("scheduled_callbacks").select("id").eq("phone", clean_phone_10).eq("status", "pending").execute()
-        if res.data and len(res.data) > 0:
-            logger.warning(f"Callback rejected in Supabase for {clean_phone_10}: pending callback already exists.")
-            return False
-
-        res_cool = await db.table("scheduled_callbacks").select("id").eq("phone", clean_phone_10).gte("created_at", cooldown_cutoff).execute()
-        if res_cool.data and len(res_cool.data) > 0:
-            logger.warning(f"Callback rejected in Supabase for {clean_phone_10}: 10-minute cooldown active.")
-            return False
-    except Exception as se:
-        logger.warning(f"Supabase dedup check: {se}")
-
-    cb_id = f"cb_{clean_phone_10}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     now_iso = now_utc.isoformat()
     time_str = str(scheduled_time).strip()
+    notes_str = str(notes or "").strip()
+    name_str = str(lead_name or "Lead").strip()
 
-    row = {
-        "id": cb_id,
-        "phone": clean_phone_10,
-        "lead_name": lead_name or "Lead",
-        "scheduled_time": time_str,
-        "status": "pending",
-        "context_notes": notes or "",
-        "created_at": now_iso
-    }
+    cb_id = None
 
-    # 1. Try Supabase
-    try:
-        db = await _adb()
-        await db.table("scheduled_callbacks").upsert(row, on_conflict="id").execute()
-    except Exception as exc:
-        logger.warning(f"Supabase save_callback error (falling back to SQLite): {exc}")
-
-    # 2. Always persist to local SQLite
+    # 1. Local SQLite check and Upsert/Overwrite
     try:
         _init_local_sqlite()
         conn = sqlite3.connect(LOCAL_DB_FILE)
         c = conn.cursor()
-        c.execute("""
-            INSERT INTO scheduled_callbacks (id, phone, lead_name, scheduled_time, status, context_notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                phone=excluded.phone,
-                lead_name=excluded.lead_name,
-                scheduled_time=excluded.scheduled_time,
-                status=excluded.status,
-                context_notes=excluded.context_notes
-        """, (cb_id, clean_phone_10, lead_name or "Lead", time_str, "pending", notes or "", now_iso))
+        c.execute("SELECT id FROM scheduled_callbacks WHERE phone = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1", (norm_phone,))
+        existing_sqlite = c.fetchone()
+        if existing_sqlite:
+            cb_id = existing_sqlite[0]
+            c.execute("""
+                UPDATE scheduled_callbacks
+                SET scheduled_time = ?, context_notes = ?, lead_name = ?, created_at = ?
+                WHERE id = ?
+            """, (time_str, notes_str, name_str, now_iso, cb_id))
+            logger.info(f"Updated existing pending callback in SQLite for {norm_phone} (ID: {cb_id}) to {time_str}")
+        else:
+            cb_id = f"cb_{norm_phone}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+            c.execute("""
+                INSERT INTO scheduled_callbacks (id, phone, lead_name, scheduled_time, status, context_notes, created_at)
+                VALUES (?, ?, ?, ?, 'pending', ?, ?)
+            """, (cb_id, norm_phone, name_str, time_str, notes_str, now_iso))
+            logger.info(f"Inserted new pending callback in SQLite for {norm_phone} (ID: {cb_id}) at {time_str}")
         conn.commit()
         conn.close()
     except Exception as sqle:
         logger.warning(f"Local SQLite save_callback error: {sqle}")
 
-    await push_unified_log("Callback", "info", f"Callback scheduled in DB for {clean_phone_10} at {time_str}")
+    # Fallback cb_id if SQLite failed
+    if not cb_id:
+        cb_id = f"cb_{norm_phone}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+
+    # 2. Supabase check and Upsert/Overwrite
+    try:
+        db = await _adb()
+        res = await db.table("scheduled_callbacks").select("id").eq("phone", norm_phone).eq("status", "pending").order("created_at", desc=True).limit(1).execute()
+        if res.data and len(res.data) > 0:
+            sp_id = res.data[0]["id"]
+            await db.table("scheduled_callbacks").update({
+                "scheduled_time": time_str,
+                "context_notes": notes_str,
+                "lead_name": name_str,
+                "created_at": now_iso
+            }).eq("id", sp_id).execute()
+            logger.info(f"Updated existing pending callback in Supabase for {norm_phone} (ID: {sp_id}) to {time_str}")
+        else:
+            row = {
+                "id": cb_id,
+                "phone": norm_phone,
+                "lead_name": name_str,
+                "scheduled_time": time_str,
+                "status": "pending",
+                "context_notes": notes_str,
+                "created_at": now_iso
+            }
+            await db.table("scheduled_callbacks").upsert(row, on_conflict="id").execute()
+            logger.info(f"Inserted new pending callback in Supabase for {norm_phone} (ID: {cb_id}) at {time_str}")
+    except Exception as exc:
+        logger.warning(f"Supabase save_callback error (falling back to SQLite): {exc}")
+
+    await push_unified_log("Callback", "info", f"Callback scheduled/updated for {norm_phone} at {time_str}")
     return True
 
 async def get_and_claim_due_callbacks() -> list:
