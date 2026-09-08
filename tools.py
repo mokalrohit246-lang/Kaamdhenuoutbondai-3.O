@@ -254,88 +254,119 @@ class RealEstateTools(llm.ToolContext):
         estimated_minutes_from_now: int = 60,
         specific_datetime_iso: str = "",
         reason: str = "Lead busy, requested callback",
+        is_exact: bool = False,
         callback_time: str = "",
         notes: str = ""
     ) -> str:
         """
         Schedule a callback ONLY when the lead EXPLICITLY says they are busy, driving, in a meeting, or asks to be called back later.
         STRICT BAN: NEVER call this tool unprompted. If the lead did not explicitly ask to be called back, DO NOT CALL THIS TOOL.
-        time_description: Human phrase from the lead (e.g., 'after 2 hours', 'tomorrow at 11am', 'shaam ko 5 baje', 'thodi der baad').
-        estimated_minutes_from_now: Relative offset in minutes (minimum 5, default 60).
+        time_description: Human phrase from the lead (e.g., '10:00 baje', 'kal subah 11 baje', 'shaam ko 6 baje', 'thodi der baad', 'kal kabhi bhi').
+        estimated_minutes_from_now: Relative offset in minutes if user gives relative delay (default 60).
         specific_datetime_iso: Target ISO datetime if known.
         reason: Reason given by lead (e.g. 'driving', 'meeting', 'busy').
+        is_exact: True if user provided a specific hard appointment time.
         """
+        import re
         from datetime import datetime, timedelta, timezone
-        now_utc = datetime.now(timezone.utc)
+        from zoneinfo import ZoneInfo
 
-        # Enforce minimum 5 minutes delay to prevent immediate callback loops
-        mins = max(5, int(estimated_minutes_from_now or 60))
-        target_time = now_utc + timedelta(minutes=mins)
+        try:
+            IST = ZoneInfo("Asia/Kolkata")
+        except Exception:
+            IST = timezone(timedelta(hours=5, minutes=30))
 
-        desc = (time_description or callback_time or f"in {mins} minutes").strip()
-        context_notes = (notes or reason or "Lead busy, requested callback").strip()
+        now_ist = datetime.now(IST)
+        desc = (time_description or callback_time or "").strip()
+        context_notes = (notes or reason or "Lead requested callback").strip()
         s = desc.lower()
 
-        # Parse specific ISO if provided
+        target_time_ist = None
+
+        # 1. Check if specific ISO passed
         if specific_datetime_iso and specific_datetime_iso.strip():
             try:
                 dt_p = datetime.fromisoformat(specific_datetime_iso.strip().replace("Z", "+00:00"))
-                if dt_p > now_utc + timedelta(minutes=4):
-                    target_time = dt_p
+                target_time_ist = dt_p.astimezone(IST)
             except Exception:
                 pass
-        else:
-            # Parse human descriptions
-            m_min = re.search(r'(\d+)\s*(?:minute|min|m)', s)
-            m_hr = re.search(r'(\d+)\s*(?:hour|hr|ghante|ghanta|h)', s)
-            if "aadhe" in s or "aadha" in s or "half" in s:
-                target_time = now_utc + timedelta(minutes=30)
-            elif m_hr:
-                hrs = int(m_hr.group(1))
-                target_time = now_utc + timedelta(hours=hrs)
-            elif m_min:
-                m_val = max(5, int(m_min.group(1)))
-                target_time = now_utc + timedelta(minutes=m_val)
-            elif any(w in s for w in ["shaam", "evening", "kal", "tomorrow", "subah", "morning", "dopahar", "baje"]):
-                # Parse in IST (UTC+5:30) and convert to UTC
-                ist_tz = timezone(timedelta(hours=5, minutes=30))
-                now_ist = datetime.now(ist_tz)
-                days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (2 if ("parson" in s or "day after tomorrow" in s) else 0)
 
-                hour = 18
-                minute = 0
-                m_t12 = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', s)
-                m_t24 = re.search(r'\b([01]?\d|2[0-3]):([0-5]\d)\b', s)
-                m_baje = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(?:baje)', s)
-                if m_t12:
-                    hour = int(m_t12.group(1))
-                    minute = int(m_t12.group(2) or 0)
-                    ampm = m_t12.group(3)
-                    if ampm == "pm" and hour < 12: hour += 12
-                    elif ampm == "am" and hour == 12: hour = 0
-                elif m_t24:
-                    hour = int(m_t24.group(1))
-                    minute = int(m_t24.group(2))
-                elif m_baje:
-                    hour = int(m_baje.group(1))
-                    minute = int(m_baje.group(2) or 0)
-                    if ("shaam" in s or "dopahar" in s or "raat" in s) and hour < 12:
-                        hour += 12
-                    elif hour in (1, 2, 3, 4, 5, 6, 7, 8):
-                        hour += 12
+        if not target_time_ist:
+            # 2. VAGUE BRUSH-OFFS: "10-15 min", "thodi der", "baad mein" -> 45-min breathing room
+            is_vague_delay = any(p in s for p in [
+                "10-15", "10 to 15", "10 se 15", "thodi der", "baad mein", "baad me", "later", "busy right now"
+            ]) or (("minute" in s or "min" in s) and any(d in s for d in ["10", "15", "5"]))
 
-                base_ist = now_ist + timedelta(days=days_ahead)
-                candidate_ist = base_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if days_ahead == 0 and candidate_ist <= now_ist + timedelta(minutes=5):
-                    candidate_ist = candidate_ist + timedelta(days=1)
-                target_time = candidate_ist.astimezone(timezone.utc)
+            # "Kal kabhi bhi" / "kabhi bhi"
+            is_kabhi_bhi = "kabhi bhi" in s or "anytime" in s or "any time" in s
 
-        # Enforce minimum 5 minutes from now
-        if target_time <= now_utc + timedelta(minutes=4):
-            target_time = now_utc + timedelta(minutes=mins)
+            if is_kabhi_bhi:
+                # Schedule for non-rush golden business hours (tomorrow at 11:30 AM or 3:30 PM IST)
+                days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (0 if now_ist.hour < 15 else 1)
+                base_day = now_ist + timedelta(days=days_ahead)
+                if days_ahead == 0 and now_ist.hour < 11:
+                    target_time_ist = base_day.replace(hour=11, minute=30, second=0, microsecond=0)
+                elif days_ahead == 0 and now_ist.hour < 15:
+                    target_time_ist = base_day.replace(hour=15, minute=30, second=0, microsecond=0)
+                else:
+                    target_time_ist = (now_ist + timedelta(days=1)).replace(hour=11, minute=30, second=0, microsecond=0)
 
-        target_iso = target_time.isoformat()
-        human_time_str = desc if desc and desc != f"in {mins} minutes" else f"{mins} minute baad"
+            elif is_vague_delay:
+                # 45-minute sales buffer
+                target_time_ist = now_ist + timedelta(minutes=45)
+
+            elif "aadhe" in s or "aadha" in s or "half" in s:
+                target_time_ist = now_ist + timedelta(minutes=30)
+
+            else:
+                # Relative hours ("after 2 hours", "2 ghante baad")
+                m_hr = re.search(r'(\d+)\s*(?:hour|hr|ghante|ghanta|h)', s)
+                if m_hr:
+                    hrs = int(m_hr.group(1))
+                    target_time_ist = now_ist + timedelta(hours=hrs)
+
+                # Explicit clock times: "10:00 baje", "kal 11 am", "6 baje", "10 baje"
+                m_time = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?', s)
+                if not target_time_ist and m_time and any(marker in s for marker in ["baje", "am", "pm", ":", "subah", "shaam", "dopahar", "raat", "kal", "tomorrow"]):
+                    raw_hr = int(m_time.group(1))
+                    raw_min = int(m_time.group(2) or 0)
+                    ampm = (m_time.group(3) or "").lower()
+
+                    if "pm" in ampm and raw_hr < 12:
+                        raw_hr += 12
+                    elif "am" in ampm and raw_hr == 12:
+                        raw_hr = 0
+                    elif "shaam" in s or "raat" in s or "dopahar" in s:
+                        if raw_hr < 12:
+                            raw_hr += 12
+                    elif raw_hr in (1, 2, 3, 4, 5, 6, 7):
+                        raw_hr += 12
+
+                    days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (2 if ("parson" in s or "day after tomorrow" in s) else 0)
+                    candidate = (now_ist + timedelta(days=days_ahead)).replace(hour=raw_hr, minute=raw_min, second=0, microsecond=0)
+
+                    # If user said e.g. "10 baje" and it's already 10:15 PM today, schedule for tomorrow
+                    if days_ahead == 0 and candidate <= now_ist + timedelta(minutes=5):
+                        candidate = candidate + timedelta(days=1)
+
+                    target_time_ist = candidate
+
+        # Default fallback
+        if not target_time_ist:
+            mins = max(15, int(estimated_minutes_from_now or 60))
+            target_time_ist = now_ist + timedelta(minutes=mins)
+
+        # Enforce minimum 5 minutes in future
+        if target_time_ist <= now_ist + timedelta(minutes=4):
+            target_time_ist = now_ist + timedelta(minutes=45)
+
+        # Convert calculated IST target datetime to UTC ISO string
+        target_utc = target_time_ist.astimezone(timezone.utc)
+        target_iso = target_utc.isoformat()
+
+        human_time_str = desc if desc and desc not in ["in 1 hour", "thodi der baad"] else target_time_ist.strftime("%I:%M %p (%d %b)")
+
+        logger.info(f"Callback registered: Phone={self.phone_number} | Target IST={target_time_ist.strftime('%d-%m-%Y %I:%M %p')} | Target UTC={target_iso}")
 
         # Save to database with deduplication and cooldown
         try:
@@ -352,10 +383,10 @@ class RealEstateTools(llm.ToolContext):
         self.outcome = "callback_requested"
         self.lead_score = "Warm"
 
-        await add_contact_memory(self.phone_number, f"Callback scheduled for {target_iso}. {context_notes}")
-        await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({target_iso})", call_id=self.call_id)
+        await add_contact_memory(self.phone_number, f"Callback scheduled for {target_time_ist.strftime('%d-%m-%Y %I:%M %p')}. {context_notes}")
+        await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({target_time_ist.strftime('%d-%m-%Y %I:%M %p IST')})", call_id=self.call_id)
 
-        return f"Theek hai, main aapko {human_time_str} par dobara call karti hoon. Aapka din shubh rahe!"
+        return f"Done sir, main aapko theek {human_time_str} par call karti hoon. Thank you!"
 
     @llm.function_tool
     async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
