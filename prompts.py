@@ -80,17 +80,19 @@ def get_base_system_prompt(
     custom_prompt: str = "",
     lead_name: str = "there",
     service_type: str = "Luxury Properties",
-    custom_instructions: str = None
+    custom_instructions: str = None,
+    instructions: str = ""
 ) -> str:
     """
     Constructs the master prompt enforcing the Global Natural Human Conversation Layer
     across every agent in the system.
     """
-    # Always append language mirroring layer
+    resolved_instructions = instructions or custom_instructions or custom_prompt or ""
+    header = f"You are {agent_name}, Senior Property Consultant & Front-Desk AI for {business_name}."
     lang_layer = DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
 
-    if instructions and instructions.strip():
-        clean_instructions = instructions.strip()
+    if resolved_instructions and resolved_instructions.strip():
+        clean_instructions = resolved_instructions.strip()
         try:
             clean_instructions = clean_instructions.format(
                 lead_name=lead_name,
@@ -138,12 +140,14 @@ def build_prompt(
     business_name: str = "Kaamdhenu Real Estate",
     service_type: str = "Luxury Properties",
     agent_name: str = "Priya",
-    custom_prompt: str = None
+    custom_prompt: str = None,
+    instructions: str = ""
 ) -> str:
     return get_base_system_prompt(
         agent_name=agent_name,
         business_name=business_name,
         custom_prompt=custom_prompt,
         lead_name=lead_name,
-        service_type=service_type
+        service_type=service_type,
+        instructions=instructions
     )
