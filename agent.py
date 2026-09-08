@@ -43,7 +43,7 @@ from db import (
     add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile,
     insert_appointment, book_appointment, normalize_phone
 )
-from prompts import build_prompt, get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
+from prompts import build_prompt, get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER, DYNAMIC_LANGUAGE_MIRRORING_LAYER
 from tools import RealEstateTools
 
 load_dotenv(".env", override=True)
@@ -126,11 +126,11 @@ def extract_site_visit_details_from_transcript(transcript: str, client_location:
                 pass
 
     if not visit_date:
-        if "parson" in text or "day after tomorrow" in text:
+        if any(w in text for w in ["parson", "day after tomorrow", "parva", "परवा", "param divse"]):
             visit_date = (now + _td(days=2)).strftime("%Y-%m-%d")
-        elif "kal" in text or "tomorrow" in text:
+        elif any(w in text for w in ["kal", "tomorrow", "udya", "उद्या", "kaale", "काले", "naale", "repu"]):
             visit_date = (now + _td(days=1)).strftime("%Y-%m-%d")
-        elif "aaj" in text or "today" in text:
+        elif any(w in text for w in ["aaj", "today", "aaje", "आज", "innu", "eeroju"]):
             visit_date = now.strftime("%Y-%m-%d")
         elif "weekend" in text:
             days = (5 - now.weekday()) % 7
@@ -138,13 +138,13 @@ def extract_site_visit_details_from_transcript(transcript: str, client_location:
             visit_date = (now + _td(days=days)).strftime("%Y-%m-%d")
         else:
             weekdays = {
-                "monday": 0, "somwar": 0,
-                "tuesday": 1, "mangalwar": 1,
-                "wednesday": 2, "budhwar": 2,
-                "thursday": 3, "guruwar": 3,
-                "friday": 4, "shukrawar": 4,
+                "monday": 0, "somwar": 0, "somvar": 0,
+                "tuesday": 1, "mangalwar": 1, "mangalvar": 1,
+                "wednesday": 2, "budhwar": 2, "budhvar": 2,
+                "thursday": 3, "guruwar": 3, "guruvar": 3,
+                "friday": 4, "shukrawar": 4, "shukravar": 4,
                 "saturday": 5, "shanivar": 5, "shaniwar": 5,
-                "sunday": 6, "ravivar": 6, "itwar": 6
+                "sunday": 6, "ravivar": 6, "raviwar": 6, "itwar": 6
             }
             for wname, wday in weekdays.items():
                 if wname in text:
@@ -311,7 +311,7 @@ async def entrypoint(ctx: agents.JobContext):
                         f"You are {agent_name}, Senior Property Consultant for Kaamdhenu Real Estate.\n"
                         f"Important context: The client {lead_name} was recently called regarding {proj_name}.\n"
                         f"Greeting: Speak this opening line: 'Namaste {lead_name}! Main {agent_name} Kaamdhenu Real Estate se baat kar rahi hoon. Aapko humare {proj_name} ke regarding call gaya tha... Batayein main aapki kya madad kar sakti hoon?'\n"
-                        f"Speak naturally in polite Hindi/Hinglish."
+                        f"Speak naturally, instantly mirroring the caller's language (Hindi, Marathi, Gujarati, English, etc.) without announcing the switch."
                     )
                     await push_unified_log("CRM", "info", f"Callback detected from prior campaign lead: {lead_name}", call_id=call_id)
 
@@ -325,6 +325,10 @@ async def entrypoint(ctx: agents.JobContext):
             lead_name=lead_name,
             service_type=service_type
         )
+
+        # Ensure language mirroring layer is present
+        if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
+            system_prompt = system_prompt + "\n\n" + DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
 
         # Append strict real estate rules to prevent lead-name-as-project confusion
         strict_rules = f"""
@@ -451,6 +455,7 @@ async def entrypoint(ctx: agents.JobContext):
             greeting_instruction = f"Speak this opening line naturally: {greeting_text}"
             if valid_lead_name:
                 greeting_instruction += f" IMPORTANT: You already know the customer's name is {lead_name}. Do NOT ask for their name."
+            greeting_instruction += " Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
             await session.generate_reply(instructions=greeting_instruction)
             await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
         except Exception as ge:
@@ -533,9 +538,17 @@ async def entrypoint(ctx: agents.JobContext):
                 "site visit" in transcript_lower or
                 "cab pickup" in transcript_lower or
                 "pickup cab" in transcript_lower or
-                any(phrase in transcript_lower for phrase in ["visit arrange", "visit confirm", "visit karenge", "visit ke liye", "dekhne aunga", "dekhne aungi", "visit plan", "gaadi bhej", "cab bhej"])
+                any(phrase in transcript_lower for phrase in [
+                    "visit arrange", "visit confirm", "visit karenge", "visit ke liye", "dekhne aunga", "dekhne aungi",
+                    "visit plan", "gaadi bhej", "cab bhej", "bhet dyayla", "baghayla yeto", "baghayla yete",
+                    "yeto me", "yete me", "aavish", "joisu", "visit karu", "visit karuya", "bhet gheu"
+                ])
             ) and (
-                any(pos in transcript_lower for pos in ["haan", "yes", "sure", "bilkul", "theek hai", "thik hai", "done", "confirm", "chalega", "aunga", "aungi", "bhej do", "bhej dena", "thik"])
+                any(pos in transcript_lower for pos in [
+                    "haan", "yes", "sure", "bilkul", "theek hai", "thik hai", "done", "confirm", "chalega",
+                    "aunga", "aungi", "bhej do", "bhej dena", "thik", "ho", "nakki", "chalel", "barobar",
+                    "aaho", "yeto", "yete", "aavish", "ha", "sari"
+                ])
                 or "booked" in t_outcome.lower()
             )
             if visit_agreed:
