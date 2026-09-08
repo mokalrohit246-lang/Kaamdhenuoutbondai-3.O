@@ -9,7 +9,8 @@ from livekit import agents, api
 from livekit.agents import llm
 from db import (
     check_slot, get_next_available, insert_appointment, book_appointment, log_call,
-    push_unified_log, add_contact_memory, sync_google_sheets_row, insert_whatsapp_log
+    push_unified_log, add_contact_memory, sync_google_sheets_row, insert_whatsapp_log,
+    save_callback
 )
 
 logger = logging.getLogger("kaamdhenu-tools")
@@ -247,14 +248,111 @@ class RealEstateTools(llm.ToolContext):
         return "Client details recorded."
 
     @llm.function_tool
-    async def schedule_callback(self, callback_time: str, notes: str = "") -> str:
-        """Schedule a callback when client says 'call me later' or 'busy right now'. callback_time example: 'today 6pm', '2024-09-03 14:00'."""
-        self.next_callback = callback_time
+    async def schedule_callback(
+        self,
+        time_description: str = "",
+        estimated_minutes_from_now: int = 60,
+        specific_datetime_iso: str = "",
+        reason: str = "Lead busy, requested callback",
+        callback_time: str = "",
+        notes: str = ""
+    ) -> str:
+        """
+        Schedule a callback when the lead is busy, driving, in a meeting, or requests to be called back later or at a specific time.
+        time_description: Human phrase (e.g., 'after 2 hours', 'tomorrow at 11am', 'shaam ko 5 baje', 'thodi der baad').
+        estimated_minutes_from_now: Relative offset in minutes if specific time isn't strict (default 60).
+        specific_datetime_iso: Target ISO datetime if known (e.g., '2024-09-03T18:00:00').
+        reason: Reason for callback (e.g., 'Lead busy', 'In meeting', 'Call later').
+        """
+        from datetime import datetime as _dt, timedelta as _td
+        now = _dt.utcnow()
+        now_local = _dt.now()
+
+        desc = (time_description or callback_time or "in 1 hour").strip()
+        context_notes = (notes or reason or "Lead requested callback").strip()
+        s = desc.lower()
+
+        # 1. Determine target datetime
+        target_dt = None
+        if specific_datetime_iso and specific_datetime_iso.strip():
+            try:
+                target_dt = _dt.fromisoformat(specific_datetime_iso.strip().replace("Z", "+00:00"))
+            except Exception:
+                pass
+
+        if not target_dt:
+            m_min = re.search(r'(\d+)\s*(?:minute|min|m)', s)
+            m_hr = re.search(r'(\d+)\s*(?:hour|hr|ghante|ghanta|h)', s)
+            if "aadhe" in s or "aadha" in s or "half" in s:
+                target_dt = now + _td(minutes=30)
+            elif m_hr:
+                hrs = int(m_hr.group(1))
+                target_dt = now + _td(hours=hrs)
+            elif m_min:
+                mins = int(m_min.group(1))
+                target_dt = now + _td(minutes=mins)
+            elif "thodi der" in s or "baad mein" in s or "later" in s:
+                target_dt = now + _td(minutes=int(estimated_minutes_from_now or 60))
+            else:
+                days_ahead = 0
+                if "parson" in s or "day after tomorrow" in s:
+                    days_ahead = 2
+                elif "tomorrow" in s or "kal" in s:
+                    days_ahead = 1
+
+                hour = 18
+                minute = 0
+                m_t12 = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)', s)
+                m_t24 = re.search(r'\b([01]?\d|2[0-3]):([0-5]\d)\b', s)
+                m_baje = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(?:baje)', s)
+                if m_t12:
+                    hour = int(m_t12.group(1))
+                    minute = int(m_t12.group(2) or 0)
+                    ampm = m_t12.group(3)
+                    if ampm == "pm" and hour < 12: hour += 12
+                    elif ampm == "am" and hour == 12: hour = 0
+                elif m_t24:
+                    hour = int(m_t24.group(1))
+                    minute = int(m_t24.group(2))
+                elif m_baje:
+                    hour = int(m_baje.group(1))
+                    minute = int(m_baje.group(2) or 0)
+                    if ("shaam" in s or "dopahar" in s or "raat" in s) and hour < 12:
+                        hour += 12
+                    elif hour in (1, 2, 3, 4, 5, 6, 7, 8):
+                        hour += 12
+
+                base_dt = now_local + _td(days=days_ahead)
+                candidate = base_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if days_ahead == 0 and candidate <= now_local:
+                    candidate = candidate + _td(days=1)
+                target_dt = candidate
+
+        if not target_dt:
+            target_dt = now + _td(minutes=int(estimated_minutes_from_now or 60))
+
+        target_iso = target_dt.strftime("%Y-%m-%d %H:%M:%S")
+        human_time_str = desc if desc and desc != "in 1 hour" else target_dt.strftime("%d %b at %I:%M %p")
+
+        # Save to database
+        try:
+            await save_callback(
+                phone=self.phone_number,
+                lead_name=self.client_name or self.lead_name or "Lead",
+                scheduled_time=target_iso,
+                notes=f"{desc} - {context_notes}"
+            )
+        except Exception as e:
+            logger.warning(f"save_callback error: {e}")
+
+        self.next_callback = target_iso
         self.outcome = "callback_requested"
         self.lead_score = "Warm"
-        await add_contact_memory(self.phone_number, f"Callback requested for {callback_time}. {notes}")
-        await push_unified_log("CRM", "info", f"Callback scheduled: {self.phone_number} at {callback_time}", call_id=self.call_id)
-        return f"Callback scheduled for {callback_time}. We will call you back."
+
+        await add_contact_memory(self.phone_number, f"Callback scheduled for {target_iso}. {context_notes}")
+        await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({target_iso})", call_id=self.call_id)
+
+        return f"Callback scheduled successfully for {human_time_str}. Please confirm to the lead politely that we will call them back then, and gracefully end the call."
 
     @llm.function_tool
     async def send_whatsapp_brochure(self, phone_number: str = "") -> str:

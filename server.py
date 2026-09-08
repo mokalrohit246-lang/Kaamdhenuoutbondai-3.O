@@ -30,7 +30,7 @@ from db import (
     get_settings, save_settings_dict, get_contact_memory,
     list_agent_profiles, save_agent_profile, delete_agent_profile, get_agent_profile,
     list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number,
-    get_pending_callbacks, mark_callback_dispatched
+    get_pending_callbacks, mark_callback_dispatched, get_pending_callbacks_due, mark_callback_completed
 )
 from prompts import get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 
@@ -153,7 +153,13 @@ def parse_callback_datetime(cb_str: str, now: Optional[datetime] = None) -> Opti
     except Exception:
         return None
 
-async def dispatch_callback_call(phone: str, lead_name: str = "there", campaign_id: Optional[str] = None, orig_call_id: Optional[str] = None):
+async def dispatch_callback_call(
+    phone: str,
+    lead_name: str = "there",
+    campaign_id: Optional[str] = None,
+    orig_call_id: Optional[str] = None,
+    notes: str = ""
+):
     try:
         url = os.getenv("LIVEKIT_URL")
         key = os.getenv("LIVEKIT_API_KEY")
@@ -189,14 +195,18 @@ async def dispatch_callback_call(phone: str, lead_name: str = "there", campaign_
                         calcom_event_type_id = ag_prof.get("calcom_event_type_id") or calcom_event_type_id
 
         room_name = f"callback-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
+        custom_ctx = "Context: This is a scheduled callback requested by the lead earlier.\n"
+        if notes:
+            custom_ctx += f"Additional Notes: {notes}\n"
+        custom_ctx += (
+            f"Opening Greeting: 'Namaste {lead_name}! Main {agent_name}, {business_name} se bol rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?'\n"
+            f"Goal: Qualify requirements, answer questions, and book a site visit with cab pickup."
+        )
+
         prompt = get_base_system_prompt(
             agent_name=agent_name,
             business_name=business_name,
-            custom_prompt=(
-                f"Context: The client {lead_name} requested a callback at this time regarding {service_type}.\n"
-                f"Opening Greeting: 'Namaste {lead_name}! Main {agent_name}, {business_name} se bol rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?'\n"
-                f"Goal: Qualify requirements, answer questions, and book a site visit with cab pickup."
-            ),
+            custom_prompt=custom_ctx,
             lead_name=lead_name,
             service_type=service_type
         )
@@ -215,7 +225,8 @@ async def dispatch_callback_call(phone: str, lead_name: str = "there", campaign_
             "broker_phone": broker_phone,
             "broker_email": broker_email,
             "calcom_event_type_id": calcom_event_type_id,
-            "system_prompt": prompt
+            "system_prompt": prompt,
+            "notes": f"Scheduled callback requested earlier. {notes}".strip()
         }
 
         from livekit import api as lk_api
@@ -236,30 +247,65 @@ async def dispatch_callback_call(phone: str, lead_name: str = "there", campaign_
         await push_unified_log("Callback", "error", f"Failed to dispatch callback to {phone}: {e}", call_id=orig_call_id)
 
 async def check_and_dispatch_due_callbacks():
-    now = datetime.now()
-    pending = await get_pending_callbacks()
-    for call in pending:
-        cb_str = call.get("next_callback")
-        if not cb_str:
-            continue
-        scheduled_dt = parse_callback_datetime(cb_str, now=now)
-        if not scheduled_dt:
-            continue
+    # 1. Process due callbacks from scheduled_callbacks table
+    try:
+        due_cbs = await get_pending_callbacks_due()
+        for cb in due_cbs:
+            cid = cb.get("id")
+            phone = cb.get("phone")
+            lead_name = cb.get("lead_name") or "there"
+            notes = cb.get("context_notes") or ""
 
-        if now >= scheduled_dt:
-            cid = call.get("id")
-            phone = call.get("phone_number")
-            lead_name = call.get("lead_name") or call.get("client_name") or "there"
-            campaign_id = call.get("campaign_id")
+            # Mark status as completed / in_progress immediately to avoid duplicate dialing
+            await mark_callback_completed(cid, status="completed")
 
-            # Mark callback_dispatched = TRUE to avoid duplicate dialing
-            await mark_callback_dispatched(cid)
+            time_str = cb.get("scheduled_time", "")
+            await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} (Scheduled: {time_str})", call_id=str(cid))
 
-            time_str = scheduled_dt.strftime("%Y-%m-%d %H:%M")
-            await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} at {time_str}", call_id=cid)
+            # Dispatch outbound call
+            asyncio.create_task(dispatch_callback_call(
+                phone=phone,
+                lead_name=lead_name,
+                orig_call_id=str(cid),
+                notes=f"This is a scheduled callback requested by the lead earlier. Notes: {notes}".strip()
+            ))
+    except Exception as e:
+        logger.error(f"Error checking due scheduled_callbacks: {e}")
 
-            # Dispatch outbound call via LiveKit SIP
-            asyncio.create_task(dispatch_callback_call(phone=phone, lead_name=lead_name, campaign_id=campaign_id, orig_call_id=cid))
+    # 2. Backwards-compatible check on legacy call_logs.next_callback
+    try:
+        now = datetime.now()
+        pending = await get_pending_callbacks()
+        for call in pending:
+            cb_str = call.get("next_callback")
+            if not cb_str:
+                continue
+            scheduled_dt = parse_callback_datetime(cb_str, now=now)
+            if not scheduled_dt:
+                continue
+
+            if now >= scheduled_dt:
+                cid = call.get("id")
+                phone = call.get("phone_number")
+                lead_name = call.get("lead_name") or call.get("client_name") or "there"
+                campaign_id = call.get("campaign_id")
+
+                # Mark callback_dispatched = TRUE to avoid duplicate dialing
+                await mark_callback_dispatched(cid)
+
+                time_str = scheduled_dt.strftime("%Y-%m-%d %H:%M")
+                await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} at {time_str}", call_id=cid)
+
+                # Dispatch outbound call via LiveKit SIP
+                asyncio.create_task(dispatch_callback_call(
+                    phone=phone,
+                    lead_name=lead_name,
+                    campaign_id=campaign_id,
+                    orig_call_id=cid,
+                    notes="This is a scheduled callback requested by the lead earlier."
+                ))
+    except Exception as legacy_err:
+        logger.error(f"Error checking legacy call_logs callbacks: {legacy_err}")
 
 async def callback_scheduler_worker():
     while True:
@@ -267,12 +313,12 @@ async def callback_scheduler_worker():
             await check_and_dispatch_due_callbacks()
         except Exception as e:
             logger.error(f"Callback scheduler error: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
 
 @app.on_event("startup")
 async def on_startup():
     asyncio.create_task(callback_scheduler_worker())
-    logger.info("Automated callback scheduler worker started (interval: 60s)")
+    logger.info("Automated callback scheduler worker started (interval: 30s)")
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -336,6 +382,15 @@ async def api_appointments():
 async def api_cancel_app(aid: str):
     await cancel_appointment(aid)
     return {"status": "cancelled", "id": aid}
+
+@app.get("/api/callbacks")
+async def api_callbacks():
+    return await get_pending_callbacks_due()
+
+@app.post("/api/callbacks/{cid}/cancel")
+async def api_cancel_callback(cid: str):
+    await mark_callback_completed(cid, status="cancelled")
+    return {"status": "cancelled", "id": cid}
 
 @app.get("/api/client-numbers")
 async def api_list_clients():

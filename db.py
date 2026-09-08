@@ -403,6 +403,121 @@ async def mark_callback_dispatched(call_id: str) -> bool:
         logger.error(f"Error marking callback dispatched for {call_id}: {e}")
         return False
 
+# ============================================================
+# SCHEDULED CALLBACKS SUBSYSTEM (Supabase + Local SQLite)
+# ============================================================
+async def save_callback(phone: str, lead_name: str, scheduled_time: str, notes: str = "") -> bool:
+    """Save a scheduled callback for a busy lead to Supabase and local SQLite."""
+    clean_phone_10 = normalize_phone(phone)
+    if not clean_phone_10:
+        clean_phone_10 = re.sub(r'\D', '', str(phone or ""))[-10:]
+    
+    cb_id = f"cb_{clean_phone_10}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    now_iso = datetime.utcnow().isoformat()
+    time_str = str(scheduled_time).strip()
+
+    row = {
+        "id": cb_id,
+        "phone": clean_phone_10,
+        "lead_name": lead_name or "Lead",
+        "scheduled_time": time_str,
+        "status": "pending",
+        "context_notes": notes or "",
+        "created_at": now_iso
+    }
+
+    # 1. Try Supabase
+    try:
+        db = await _adb()
+        await db.table("scheduled_callbacks").upsert(row, on_conflict="id").execute()
+    except Exception as exc:
+        logger.warning(f"Supabase save_callback error (falling back to SQLite): {exc}")
+
+    # 2. Always persist to local SQLite
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO scheduled_callbacks (id, phone, lead_name, scheduled_time, status, context_notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                phone=excluded.phone,
+                lead_name=excluded.lead_name,
+                scheduled_time=excluded.scheduled_time,
+                status=excluded.status,
+                context_notes=excluded.context_notes
+        """, (cb_id, clean_phone_10, lead_name or "Lead", time_str, "pending", notes or "", now_iso))
+        conn.commit()
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"Local SQLite save_callback error: {sqle}")
+
+    await push_unified_log("Callback", "info", f"Callback scheduled in DB for {clean_phone_10} at {time_str}")
+    return True
+
+async def get_pending_callbacks_due() -> list:
+    """Returns all callbacks where status == 'pending' and scheduled_time <= current_utc_time."""
+    now_iso = datetime.utcnow().isoformat()
+    now_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    due_callbacks = []
+    seen_ids = set()
+
+    # 1. Try Supabase
+    try:
+        db = await _adb()
+        res = await db.table("scheduled_callbacks").select("*").eq("status", "pending").lte("scheduled_time", now_iso).execute()
+        for r in (res.data or []):
+            cid = r.get("id")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                due_callbacks.append(r)
+    except Exception as exc:
+        logger.warning(f"Supabase get_pending_callbacks_due warning: {exc}")
+
+    # 2. Query SQLite
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM scheduled_callbacks WHERE status = 'pending' AND (scheduled_time <= ? OR scheduled_time <= ?)", (now_iso, now_local))
+        rows = c.fetchall()
+        for row in rows:
+            r = dict(row)
+            cid = r.get("id")
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                due_callbacks.append(r)
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"Local SQLite get_pending_callbacks_due error: {sqle}")
+
+    return due_callbacks
+
+async def mark_callback_completed(callback_id: str, status: str = "completed") -> bool:
+    """Mark callback status as completed, in_progress, failed, or cancelled."""
+    cid = str(callback_id)
+    # 1. Update Supabase
+    try:
+        db = await _adb()
+        await db.table("scheduled_callbacks").update({"status": status}).eq("id", cid).execute()
+    except Exception as exc:
+        logger.warning(f"Supabase mark_callback_completed warning: {exc}")
+
+    # 2. Update SQLite
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("UPDATE scheduled_callbacks SET status = ? WHERE id = ?", (status, cid))
+        conn.commit()
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"Local SQLite mark_callback_completed error: {sqle}")
+
+    return True
+
 async def get_calls(direction: Optional[str] = None, campaign_id: Optional[str] = None, limit: int = 100):
     db = await _adb()
     q = db.table("call_logs").select("*").order("timestamp", desc=True).limit(limit)
@@ -481,6 +596,17 @@ def _init_local_sqlite():
                 broker_whatsapp TEXT DEFAULT '',
                 broker_email TEXT DEFAULT '',
                 calcom_event_type_id TEXT DEFAULT '6934775',
+                created_at TEXT NOT NULL
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_callbacks (
+                id TEXT PRIMARY KEY,
+                phone TEXT NOT NULL,
+                lead_name TEXT DEFAULT '',
+                scheduled_time TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                context_notes TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             )
         """)

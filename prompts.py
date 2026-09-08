@@ -27,6 +27,22 @@ GLOBAL_NATURAL_CONVERSATION_LAYER = """
 - `send_whatsapp_brochure`: Execute immediately when user asks for brochure, floor plans, pricing, or WhatsApp details.
 - `schedule_callback`: When client requests to call later, schedule the callback tool immediately with the requested time.
 - `record_client_qualification`: Silently record qualification details (BHK, budget, purpose, location, occupation) as they are mentioned.
+
+5. BUSY LEADS & RESCHEDULING:
+- If customer says they are busy, driving, in a meeting, or asks to call later: IMMEDIATELY invoke `schedule_callback` tool. NEVER argue or prolong the call.
+"""
+
+BUSY_LEADS_RESCHEDULING_RULES = """
+[BUSY LEADS & RESCHEDULING RULES]
+- If the lead says they are busy, driving, in a meeting, or asks to call later:
+  1. NEVER force the pitch or argue.
+  2. Politely acknowledge and ask when to call back:
+     "Bilkul sir/ma'am, abhi aap busy hain toh main aapko kab call karoon? 1 ghante baad ya shaam ko?"
+  3. If they specify a time (e.g., "shaam ko 5 baje", "kal subah", "aadhe ghante baad"), immediately call the `schedule_callback` tool with that time.
+  4. If they just say "thodi der baad" without a specific time, default to 60 minutes and call the tool.
+  5. Once the tool succeeds, confirm politely and hang up:
+     "Theek hai, main aapko [specified time] par dobara call karti hoon. Aapka din shubh rahe!"
+  6. Gracefully end the call.
 """
 
 DYNAMIC_LANGUAGE_MIRRORING_LAYER = """
@@ -90,6 +106,7 @@ def get_base_system_prompt(
     resolved_instructions = instructions or custom_instructions or custom_prompt or ""
     header = f"You are {agent_name}, Senior Property Consultant & Front-Desk AI for {business_name}."
     lang_layer = DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
+    reschedule_rules = BUSY_LEADS_RESCHEDULING_RULES.strip()
 
     if resolved_instructions and resolved_instructions.strip():
         clean_instructions = resolved_instructions.strip()
@@ -105,11 +122,12 @@ def get_base_system_prompt(
 
         # Avoid duplicating the global layer if already present
         if "=== NATURAL HUMAN CONVERSATION & PROFESSIONAL PERSUASION LAYER ===" in clean_instructions:
-            return f"{clean_instructions}\n\n{lang_layer}\n"
+            return f"{clean_instructions}\n\n{reschedule_rules}\n\n{lang_layer}\n"
             
         return (
             f"{header}\n\n"
             f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
+            f"{reschedule_rules}\n\n"
             f"{lang_layer}\n\n"
             f"=== SPECIFIC PROJECT / AGENT INSTRUCTIONS ===\n"
             f"{clean_instructions}\n"
@@ -128,6 +146,7 @@ def get_base_system_prompt(
         return (
             f"{header}\n\n"
             f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
+            f"{reschedule_rules}\n\n"
             f"{lang_layer}\n\n"
             f"{flow}\n"
         )
