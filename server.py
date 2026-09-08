@@ -332,13 +332,28 @@ async def serve_ui():
 async def health():
     return {"status": "online", "service": "Kaamdhenu AI 3.0", "livekit_url": os.getenv("LIVEKIT_URL", "")}
 
+def enrich_recording_url(item: dict) -> dict:
+    """Ensure recording_url is populated from row or S3/Supabase storage URL if available."""
+    if not item.get("recording_url"):
+        cid = item.get("id") or item.get("call_id") or ""
+        if cid:
+            s3_endpoint = os.getenv("S3_ENDPOINT_URL", "").rstrip("/")
+            s3_bucket = os.getenv("S3_BUCKET", "")
+            supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+            if s3_endpoint and s3_bucket:
+                item["recording_url"] = f"{s3_endpoint}/{s3_bucket}/recordings/{cid}.mp4"
+            elif supabase_url:
+                item["recording_url"] = f"{supabase_url}/storage/v1/object/public/recordings/{cid}.mp4"
+    return item
+
 @app.get("/api/stats")
 async def api_stats():
     return await get_stats_data()
 
 @app.get("/api/logs")
 async def api_logs(limit: int = 150, level: str = "all", source: str = "all"):
-    return await get_unified_logs(limit=limit, level=level, source=source)
+    logs = await get_unified_logs(limit=limit, level=level, source=source)
+    return [enrich_recording_url(l) for l in logs]
 
 @app.delete("/api/logs")
 async def api_clear_logs():
@@ -348,7 +363,8 @@ async def api_clear_logs():
 @app.get("/api/calls")
 async def api_calls(direction: Optional[str] = None, campaign_id: Optional[str] = None):
     try:
-        return await get_calls(direction=direction, campaign_id=campaign_id)
+        calls = await get_calls(direction=direction, campaign_id=campaign_id)
+        return [enrich_recording_url(c) for c in calls]
     except Exception as e:
         logger.error(f"Error fetching calls: {e}")
         return []
@@ -785,17 +801,18 @@ async def api_resume_campaign(cid: str):
 async def api_campaign_logs(cid: str, category: str = "outbound"):
     c_id = None if cid == "all" else cid
     if category == "outbound":
-        return await get_calls(direction="outbound", campaign_id=c_id, limit=200)
+        calls = await get_calls(direction="outbound", campaign_id=c_id, limit=200)
     elif category in ("callback", "callbacks"):
         calls = await get_calls(direction="inbound", campaign_id=c_id, limit=200)
         cb_calls = [c for c in calls if c.get("log_category") == "campaign_callback" or c.get("campaign_id")]
-        return cb_calls if cb_calls else calls
+        calls = cb_calls if cb_calls else calls
     elif category in ("dedicated", "dedicated_inbound"):
         calls = await get_calls(direction="inbound", campaign_id=c_id, limit=200)
         ded_calls = [c for c in calls if c.get("log_category") == "dedicated_inbound"]
-        return ded_calls if ded_calls else calls
+        calls = ded_calls if ded_calls else calls
     else:
-        return await get_calls(campaign_id=c_id, limit=200)
+        calls = await get_calls(campaign_id=c_id, limit=200)
+    return [enrich_recording_url(c) for c in calls]
 
 @app.get("/api/campaigns/{cid}/export-csv")
 async def api_campaign_export(cid: str, type: str = "full"):

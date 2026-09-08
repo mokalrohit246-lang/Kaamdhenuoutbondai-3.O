@@ -327,10 +327,25 @@ async def log_call(
     pickup_required: bool = False, pickup_location: str = "",
     next_callback: str = "", objection: str = "", whatsapp_status: str = "— Not Requested",
     callback_dispatched: bool = False,
+    location_preference: str = "", job_profile: str = "", bhk_preference: str = "",
+    budget_range: str = "", timeline: str = "", site_visit_interest: str = "",
+    cab_required: str = "", main_objection: str = "",
     **kwargs
 ):
     try:
         db = await _adb()
+        loc = location_preference or current_location or ""
+        job = job_profile or occupation or ""
+        bhk_val = bhk_preference or bhk_requirement or ""
+        bud = budget_range or budget or ""
+        tl = timeline or possession_timeline or "Ready-to-Move"
+        fund = funding_type or "Bank Loan"
+        score = lead_score or "Warm"
+        cab = cab_required if cab_required else ("Yes" if pickup_required else "No")
+        cab_bool = True if str(cab).lower() in ("true", "yes", "1") or pickup_required else False
+        obj = main_objection or objection or ""
+        sv_interest = site_visit_interest or (f"Yes ({site_visit_date})" if site_visit_date else "No")
+
         row = {
             "id": call_id or str(uuid.uuid4()),
             "phone_number": phone_number,
@@ -338,27 +353,37 @@ async def log_call(
             "lead_name": lead_name,
             "direction": direction,
             "outcome": outcome,
-            "lead_score": lead_score,
+            "lead_score": score,
             "summary": summary,
             "duration_seconds": int(duration_seconds),
             "cost_inr": float(cost_inr),
             "timestamp": datetime.utcnow().isoformat(),
             "client_name": client_name or lead_name,
-            "current_location": current_location,
-            "occupation": occupation,
-            "bhk_requirement": bhk_requirement,
-            "budget": budget,
+            # Legacy column mappings
+            "current_location": loc,
+            "occupation": job,
+            "bhk_requirement": bhk_val,
+            "budget": bud,
             "purpose": purpose,
-            "possession_timeline": possession_timeline,
-            "funding_type": funding_type,
+            "possession_timeline": tl,
+            "funding_type": fund,
             "commitment_risk": commitment_risk,
             "site_visit_date": site_visit_date,
-            "pickup_required": pickup_required,
+            "pickup_required": cab_bool,
             "pickup_location": pickup_location,
             "next_callback": next_callback,
-            "objection": objection,
+            "objection": obj,
             "whatsapp_status": whatsapp_status,
-            "callback_dispatched": callback_dispatched
+            "callback_dispatched": callback_dispatched,
+            # Structured CRM column mappings
+            "location_preference": loc,
+            "job_profile": job,
+            "bhk_preference": bhk_val,
+            "budget_range": bud,
+            "timeline": tl,
+            "site_visit_interest": sv_interest,
+            "cab_required": cab,
+            "main_objection": obj
         }
         for k, v in kwargs.items():
             row[k] = v
@@ -366,16 +391,29 @@ async def log_call(
             row["campaign_id"] = campaign_id
         if recording_url:
             row["recording_url"] = recording_url
-        try:
-            await db.table("call_logs").upsert(row, on_conflict="id").execute()
-        except Exception as up_err:
-            if "callback_dispatched" in str(up_err).lower():
-                row.pop("callback_dispatched", None)
+
+        # Resilient upsert: gracefully strip any column not defined in schema cache
+        while True:
+            try:
                 await db.table("call_logs").upsert(row, on_conflict="id").execute()
-            else:
+                break
+            except Exception as up_err:
+                err_msg = str(up_err).lower()
+                m_col = re.search(r"could not find the '([^']+)' column", err_msg)
+                if m_col:
+                    missing_col = m_col.group(1)
+                    if missing_col in row:
+                        row.pop(missing_col, None)
+                        continue
+                if "callback_dispatched" in err_msg and "callback_dispatched" in row:
+                    row.pop("callback_dispatched", None)
+                    continue
                 raise up_err
     except Exception as e:
         logger.error(f"Error executing log_call upsert: {e}")
+
+# Forward and backward compatible alias
+save_call_log = log_call
 
 async def get_pending_callbacks() -> list:
     """Fetch call logs where next_callback is set and not yet dispatched."""

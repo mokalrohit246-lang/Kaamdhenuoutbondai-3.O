@@ -5,6 +5,7 @@ import os
 import re
 import ssl
 import time
+from datetime import datetime, timezone, timedelta
 import certifi
 from dotenv import load_dotenv
 
@@ -39,7 +40,7 @@ except ImportError:
     pass
 
 from db import (
-    push_unified_log, log_call, find_recent_outbound_context,
+    push_unified_log, log_call, save_call_log, find_recent_outbound_context,
     add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile,
     insert_appointment, book_appointment, normalize_phone, save_callback
 )
@@ -203,6 +204,122 @@ def extract_site_visit_details_from_transcript(transcript: str, client_location:
 
     return full_visit_dt, pickup_required, pickup_loc
 
+async def extract_crm_qualification_from_transcript(transcript: str, fallback_data: dict) -> dict:
+    """
+    Extracts structured CRM qualification JSON from conversation transcript via Gemini API
+    with robust heuristic fallback.
+    """
+    default_result = {
+        "location": fallback_data.get("location", "") or "",
+        "job_profession": fallback_data.get("occupation", "") or "",
+        "bhk": fallback_data.get("bhk", "") or "",
+        "budget": fallback_data.get("budget", "") or "",
+        "timeline": fallback_data.get("possession", "Ready-to-Move") or "Ready-to-Move",
+        "funding_type": fallback_data.get("funding", "Bank Loan") or "Bank Loan",
+        "lead_score": fallback_data.get("lead_score", "Cold") or "Cold",
+        "site_visit_interest": f"Yes ({fallback_data.get('site_visit')})" if fallback_data.get("site_visit") else "No",
+        "cab_required": "Yes" if fallback_data.get("pickup") else "No",
+        "main_objection": fallback_data.get("objection") or "None",
+        "whatsapp_consent": False
+    }
+
+    if not transcript or len(transcript.strip()) < 10:
+        return default_result
+
+    # 1. Attempt structured Gemini LLM extraction via REST API
+    google_api_key = os.getenv("GOOGLE_API_KEY", "")
+    if google_api_key:
+        try:
+            import httpx
+            prompt_text = f"""You are an expert Real Estate CRM Extraction Analyst.
+Analyze the following conversation transcript between a real estate sales agent and a lead.
+Extract the customer qualification details into this EXACT JSON structure with these exact keys:
+{{
+    "location": "extracted location or empty",
+    "job_profession": "Job / Business / Self-Employed or empty",
+    "bhk": "1BHK / 2BHK / 3BHK or empty",
+    "budget": "extracted budget string or empty",
+    "timeline": "Ready-to-Move / Under-Construction / 3-6 Months",
+    "funding_type": "Bank Loan / Self-Funding",
+    "lead_score": "Hot / Warm / Cold",
+    "site_visit_interest": "Yes (Date/Time) / No / Maybe",
+    "cab_required": "Yes / No",
+    "main_objection": "Extracted objection or None",
+    "whatsapp_consent": true
+}}
+
+Rules:
+1. "location": Area where client lives or wants property (e.g. Dombivli, Kalyan, Thane).
+2. "job_profession": IT, Corporate, Business, Self-Employed, etc.
+3. "bhk": Preferred BHK (e.g. 1BHK, 2BHK, 3BHK).
+4. "budget": Budget mentioned (e.g. 50L, 75 Lakhs, 1 Cr, etc.).
+5. "timeline": Ready-to-Move, Under-Construction, 3-6 Months, etc.
+6. "funding_type": Bank Loan or Self-Funding.
+7. "lead_score": "Hot" if site visit agreed, "Warm" if engaged/callback requested, "Cold" if disinterested/no answer.
+8. "site_visit_interest": "Yes (Date/Time)", "No", or "Maybe".
+9. "cab_required": "Yes" if user wants/agreed to complimentary pickup cab, else "No".
+10. "main_objection": Reason for hesitation (e.g. "Price too high", "Looking in different area", "Call later", or "None").
+11. "whatsapp_consent": true if client agreed to receive brochure/details on WhatsApp, false otherwise.
+
+Conversation Transcript:
+{transcript}
+"""
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt_text}]}],
+                "generationConfig": {"response_mime_type": "application/json"}
+            }
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                        parsed = json.loads(raw_json_str)
+                        if isinstance(parsed, dict):
+                            for k, v in parsed.items():
+                                if v is not None and v != "":
+                                    default_result[k] = v
+                            return default_result
+        except Exception as llm_err:
+            logger.warning(f"LLM structured extraction warning: {llm_err}")
+
+    # 2. Heuristic extraction fallback
+    text_lower = transcript.lower()
+    if "3bhk" in text_lower or "3 bhk" in text_lower:
+        default_result["bhk"] = "3BHK"
+    elif "2bhk" in text_lower or "2 bhk" in text_lower:
+        default_result["bhk"] = "2BHK"
+    elif "1bhk" in text_lower or "1 bhk" in text_lower:
+        default_result["bhk"] = "1BHK"
+
+    m_loc = re.search(r'(?:rehte|rehta|rehti|live\s+in|location|staying\s+at)\s+([a-zA-Z\s]{3,20})', transcript, re.IGNORECASE)
+    if m_loc and not default_result["location"]:
+        cand = m_loc.group(1).strip()
+        if cand.lower() not in ("hai", "hoon", "nahi", "yes", "sir", "madam"):
+            default_result["location"] = cand
+
+    if any(k in text_lower for k in ["it", "software", "tech", "developer", "engineer", "corporate", "job", "service", "salary"]):
+        default_result["job_profession"] = "Corporate / Job"
+    elif any(k in text_lower for k in ["business", "vyapar", "dukaan", "shop", "own work", "self"]):
+        default_result["job_profession"] = "Business / Self-Employed"
+
+    if any(k in text_lower for k in ["loan", "bank", "emi", "finance"]):
+        default_result["funding_type"] = "Bank Loan"
+    elif any(k in text_lower for k in ["own funds", "self fund", "cash", "direct"]):
+        default_result["funding_type"] = "Self-Funding"
+
+    if any(k in text_lower for k in ["ready", "turant", "immediately"]):
+        default_result["timeline"] = "Ready-to-Move"
+    elif any(k in text_lower for k in ["under-construction", "construction", "next year"]):
+        default_result["timeline"] = "Under-Construction"
+
+    if any(k in text_lower for k in ["whatsapp pe bhejo", "whatsapp bhej do", "whatsapp kar do", "send on whatsapp", "haan whatsapp", "bhej dijiye"]):
+        default_result["whatsapp_consent"] = True
+
+    return default_result
+
 async def entrypoint(ctx: agents.JobContext):
     call_id = ctx.room.name
     call_start_time = time.time()
@@ -360,8 +477,9 @@ async def entrypoint(ctx: agents.JobContext):
 - Known Details / Notes: {context_detail or 'None'}
 - STRICT RULE: You ALREADY KNOW the user's name is {lead_name}.
 - ABSOLUTELY NEVER ask "Aapka naam kya hai?" or "May I know your name?" or any variation.
-- Greet the user directly by their name in your very first greeting sentence!
-- Example Opening: "Hello {lead_name} ji, namaste! Main {agent_name}, {business_name} se baat kar rahi hoon..."
+- ZERO FALSE CLAIMS: ABSOLUTELY NEVER say "Aapne inquiry ki thi", "Aapne property mein interest dikhaya tha", or claim prior inquiry.
+- Introduce yourself as a professional luxury real estate consultant presenting Kaamdhenu's premium residential properties.
+- Dynamic Greeting: Greet with IST time of day (good morning / afternoon / evening) and ask permission: "Kya abhi aapse do minute baat ho sakti hai?"
 """
             system_prompt = system_prompt + "\n" + dynamic_lead_instruction
             await push_unified_log("Agent", "info", f"Dynamic lead context injected for {lead_name} ({phone_number})", call_id=call_id)
@@ -440,24 +558,35 @@ async def entrypoint(ctx: agents.JobContext):
         await session_start_task
         await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
 
-        # Opening greeting - personalized for outbound calls with known lead name
+        # Opening greeting - dynamic time-based greeting & permission check for outbound calls
+        ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        ist_hour = ist_now.hour
+        if 5 <= ist_hour < 12:
+            time_greeting = "good morning"
+        elif 12 <= ist_hour < 17:
+            time_greeting = "good afternoon"
+        else:
+            time_greeting = "good evening"
+
         if direction == "inbound":
             greeting_text = f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I help you today?"
         elif valid_lead_name:
-            greeting_text = (
-                f"Hello {lead_name} ji, namaste! Main {agent_name}, {business_name} se baat kar rahi hoon. "
-                f"Kya meri baat {lead_name} ji se ho rahi hai?"
-            )
+            greeting_text = f"Namaste {lead_name} ji, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
         else:
-            greeting_text = f"Hi! I am {agent_name} from {business_name} calling regarding your property inquiry."
+            greeting_text = f"Namaste sir, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
 
         try:
-            greeting_instruction = f"Speak this opening line naturally: {greeting_text}"
+            greeting_instruction = (
+                f"Speak this opening line naturally: '{greeting_text}'. "
+                f"ABSOLUTE BAN: STRICTLY FORBIDDEN to say 'Aapne inquiry ki thi' or claim the lead made a prior inquiry. "
+                f"If they say YES or are open to talk, say: 'Thank you! Hum Kalyan-Dombivli aur Thane region mein luxury 1, 2 aur 3 BHK homes offer kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi residential property dekh rahe hain?' "
+                f"If they say NO or BUSY: Respectfully handle callback scheduling without pitching. "
+                f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
+            )
             if valid_lead_name:
                 greeting_instruction += f" IMPORTANT: You already know the customer's name is {lead_name}. Do NOT ask for their name."
-            greeting_instruction += " Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
             await session.generate_reply(instructions=greeting_instruction)
-            await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
+            await push_unified_log("Gemini", "info", f"Autonomous cold-call greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
         except Exception as ge:
             logger.warning(f"Greeting error: {ge}")
 
@@ -588,9 +717,49 @@ async def entrypoint(ctx: agents.JobContext):
             except Exception as appt_err:
                 logger.error(f"Error auto-inserting appointment in wrap-up: {appt_err}")
 
+        # Structured CRM qualification extraction from full transcript
+        fallback_data = {
+            "location": t_location,
+            "occupation": t_occupation,
+            "bhk": t_bhk,
+            "budget": t_budget,
+            "possession": t_possession,
+            "funding": t_funding,
+            "lead_score": t_lead_score,
+            "site_visit": t_site_visit,
+            "pickup": t_pickup,
+            "objection": t_objection,
+            "whatsapp": t_whatsapp
+        }
+        crm_data = await extract_crm_qualification_from_transcript(full_transcript, fallback_data)
+
+        loc_pref = crm_data.get("location") or t_location
+        job_prof = crm_data.get("job_profession") or t_occupation
+        bhk_pref = crm_data.get("bhk") or t_bhk
+        bud_range = crm_data.get("budget") or t_budget
+        time_frame = crm_data.get("timeline") or t_possession
+        fund_type = crm_data.get("funding_type") or t_funding
+        final_score = crm_data.get("lead_score") or t_lead_score
+        sv_interest = crm_data.get("site_visit_interest") or (f"Yes ({t_site_visit})" if t_site_visit else "No")
+        cab_req = crm_data.get("cab_required") or ("Yes" if t_pickup else "No")
+        main_obj = crm_data.get("main_objection") or t_objection or "None"
+        wa_consent = crm_data.get("whatsapp_consent", False)
+        wa_status = "✅ Consent Given" if wa_consent else (t_whatsapp if t_whatsapp != "— Not Requested" else "— Not Requested")
+
+        # Resolve recording_url
+        rec_url = getattr(tool_ctx, "recording_url", None)
+        if not rec_url and call_id:
+            s3_endpoint = os.getenv("S3_ENDPOINT_URL", "").rstrip("/")
+            s3_bucket = os.getenv("S3_BUCKET", "")
+            supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+            if s3_endpoint and s3_bucket:
+                rec_url = f"{s3_endpoint}/{s3_bucket}/recordings/{call_id}.mp4"
+            elif supabase_url:
+                rec_url = f"{supabase_url}/storage/v1/object/public/recordings/{call_id}.mp4"
+
         visit_str = f" | Visit: {t_site_visit}" if t_site_visit else ""
         cab_str = f" (Cab: {t_pickup_loc or 'Yes'})" if t_pickup else ""
-        summary = f"{t_client_name} ({clean_phone}): {t_bhk or 'TBD'} | Budget: {t_budget or 'TBD'} | {t_purpose}{visit_str}{cab_str} | Score: {t_lead_score} | Duration: {dur}s"
+        summary = f"{t_client_name} ({clean_phone}): {bhk_pref or t_bhk or 'TBD'} | Budget: {bud_range or t_budget or 'TBD'} | {t_purpose}{visit_str}{cab_str} | Score: {final_score} | Duration: {dur}s"
 
         try:
             await log_call(
@@ -601,26 +770,37 @@ async def entrypoint(ctx: agents.JobContext):
                 direction=direction,
                 campaign_id=campaign_id,
                 outcome=t_outcome,
-                lead_score=t_lead_score,
+                lead_score=final_score,
                 summary=summary,
                 reason="",
                 duration_seconds=dur,
                 cost_inr=cost_inr,
+                recording_url=rec_url,
+                # Structured CRM columns
+                location_preference=loc_pref,
+                job_profile=job_prof,
+                bhk_preference=bhk_pref,
+                budget_range=bud_range,
+                timeline=time_frame,
+                funding_type=fund_type,
+                site_visit_interest=sv_interest,
+                cab_required=cab_req,
+                main_objection=main_obj,
+                whatsapp_status=wa_status,
+                # Legacy column mappings for backward compatibility
                 client_name=t_client_name,
-                current_location=t_location,
-                occupation=t_occupation,
-                bhk_requirement=t_bhk,
-                budget=t_budget,
+                current_location=loc_pref,
+                occupation=job_prof,
+                bhk_requirement=bhk_pref,
+                budget=bud_range,
                 purpose=t_purpose,
-                possession_timeline=t_possession,
-                funding_type=t_funding,
+                possession_timeline=time_frame,
                 commitment_risk=t_commitment,
                 site_visit_date=t_site_visit,
-                pickup_required=t_pickup,
+                pickup_required=(cab_req == "Yes" or t_pickup),
                 pickup_location=t_pickup_loc,
                 next_callback=t_callback,
-                objection=t_objection,
-                whatsapp_status=t_whatsapp,
+                objection=main_obj,
                 log_category=log_category,
                 callback_dispatched=False
             )

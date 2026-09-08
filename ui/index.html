@@ -276,6 +276,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
               <th>Main Objection</th>
               <th>WhatsApp Status</th>
               <th>AI Ground Summary</th>
+              <th>Recording</th>
               <th>Cost</th>
             </tr>
           </thead>
@@ -299,6 +300,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
               <th>Main Objection</th>
               <th>WhatsApp Status</th>
               <th>AI Ground Summary</th>
+              <th>Recording</th>
               <th>Cost</th>
             </tr>
           </thead>
@@ -322,6 +324,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
               <th>Main Objection</th>
               <th>WhatsApp Status</th>
               <th>AI Ground Summary</th>
+              <th>Recording</th>
               <th>Cost</th>
             </tr>
           </thead>
@@ -415,6 +418,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
               <th>Main Objection</th>
               <th>WhatsApp</th>
               <th>AI Ground Summary</th>
+              <th>Recording</th>
               <th>Cost</th>
             </tr>
           </thead>
@@ -445,6 +449,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
               <th>Main Objection</th>
               <th>WhatsApp</th>
               <th>AI Ground Summary</th>
+              <th>Recording</th>
               <th>Cost</th>
             </tr>
           </thead>
@@ -783,7 +788,7 @@ async function loadSelectedCampaignLogs() {
             const tbl = document.getElementById(tblId);
             if (tbl) {
                 const emptyMsg = currentCampSubTab === 'outbound' ? 'No campaign outbound calls dialed yet' : (currentCampSubTab === 'callbacks' ? 'No inbound callbacks recorded for this campaign' : 'No dedicated inbound calls received on this DID');
-                tbl.innerHTML = calls.length ? calls.map(_renderRow).join('') : `<tr><td colspan="12" style="text-align:center;color:#64748B;padding:20px;">${emptyMsg}</td></tr>`;
+                tbl.innerHTML = calls.length ? calls.map(_renderRow).join('') : `<tr><td colspan="13" style="text-align:center;color:#64748B;padding:20px;">${emptyMsg}</td></tr>`;
             }
         }
     } catch(e) {
@@ -954,35 +959,54 @@ document.addEventListener('DOMContentLoaded', () => {
         return '<span style="background:#3B82F6;color:#fff;padding:2px 8px;border-radius:6px;font-size:11px;">❄️ Cold</span>';
     };
     const _waBadge = (s) => {
-        if (s && s.includes('Sent')) return '<span style="color:#10B981;font-weight:600;">✅ Sent Auto</span>';
-        return '<span style="color:#64748B;">— Not Requested</span>';
+        if (!s) return '<span style="color:#64748B;">— Not Requested</span>';
+        if (s.includes('Sent') || s.includes('Consent') || s === true || s === 'true') return '<span style="color:#10B981;font-weight:600;">✅ Consent Given</span>';
+        return `<span style="color:#64748B;">${s}</span>`;
     };
     const _pickupInfo = (c) => {
-        const sv = c.site_visit_date || '';
-        const pu = c.pickup_required;
+        const sv = c.site_visit_interest || c.site_visit_date || '';
+        const pu = c.cab_required === 'Yes' || c.pickup_required;
         const loc = c.pickup_location || '';
         let out = sv || '—';
-        if (pu) out += `<br><span style="color:#06B6D4;">🚗 Pickup: ${loc || 'Yes'}</span>`;
-        else if (sv) out += '<br><span style="color:#64748B;">❌ Self-Drive</span>';
+        if (pu) out += `<br><span style="color:#06B6D4;">🚗 Cab: ${loc || 'Yes'}</span>`;
+        else if (sv && sv !== '—' && sv !== 'No') out += '<br><span style="color:#64748B;">🚙 Self-Drive</span>';
         return out;
     };
 
-    const _renderRow = (c) => `
+    const _renderRow = (c) => {
+        const clientName = c.client_name || c.lead_name || 'Lead';
+        const phone = c.phone_number || '-';
+        const loc = c.location_preference || c.current_location || '-';
+        const job = c.job_profile || c.occupation || '-';
+        const bhk = c.bhk_preference || c.bhk_requirement || '-';
+        const budget = c.budget_range || c.budget || '-';
+        const timeline = c.timeline || c.possession_timeline || '-';
+        const funding = c.funding_type || '-';
+        const score = c.lead_score || 'Cold';
+        const objection = c.main_objection || c.objection || '—';
+        const wa = c.whatsapp_status || '— Not Requested';
+        const recordingHtml = c.recording_url
+            ? `<audio controls preload="none" style="height: 28px; width: 140px;" src="${c.recording_url}"></audio>`
+            : `<span style="color: #64748b; font-size: 11px;">No Audio</span>`;
+
+        return `
         <tr>
             <td>${c.timestamp ? c.timestamp.substring(11,16) : '-'} <span style="color:#94A3B8;">(${c.duration_seconds||0}s)</span></td>
-            <td><b>${c.client_name || c.lead_name || 'Lead'}</b><br><span style="color:#94A3B8;">${c.phone_number || '-'}</span></td>
-            <td>${c.current_location || '-'}<br><span style="color:#94A3B8;">${c.occupation || '-'}</span></td>
-            <td>${c.bhk_requirement || '-'}<br><span style="color:#F59E0B;">${c.budget || '-'}</span></td>
-            <td>${c.possession_timeline || '-'}<br><span style="color:#94A3B8;">${c.funding_type || '-'}</span></td>
-            <td>${_scoreBadge(c.lead_score)}</td>
+            <td><b>${clientName}</b><br><span style="color:#94A3B8;">${phone}</span></td>
+            <td>${loc}<br><span style="color:#94A3B8;">${job}</span></td>
+            <td>${bhk}<br><span style="color:#F59E0B;">${budget}</span></td>
+            <td>${timeline}<br><span style="color:#94A3B8;">${funding}</span></td>
+            <td>${_scoreBadge(score)}</td>
             <td>${_pickupInfo(c)}</td>
             <td>${c.next_callback || '—'}</td>
-            <td>${c.objection || '—'}</td>
-            <td>${_waBadge(c.whatsapp_status)}</td>
+            <td>${objection}</td>
+            <td>${_waBadge(wa)}</td>
             <td style="max-width:200px;white-space:normal;">${c.summary || 'Property inquiry call.'}</td>
+            <td>${recordingHtml}</td>
             <td style="color:#10B981;font-weight:700;">₹${c.cost_inr || '0.00'}</td>
         </tr>
     `;
+    };
 
     const loadCalls = async () => {
         try {
@@ -991,7 +1015,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const calls = await resIn.json();
                 const tblIn = document.getElementById('tbl_inbound');
                 if (tblIn) {
-                    tblIn.innerHTML = calls.length ? calls.map(_renderRow).join('') : '<tr><td colspan="12" style="text-align:center;color:#64748B;padding:20px;">No inbound calls recorded yet</td></tr>';
+                    tblIn.innerHTML = calls.length ? calls.map(_renderRow).join('') : '<tr><td colspan="13" style="text-align:center;color:#64748B;padding:20px;">No inbound calls recorded yet</td></tr>';
                 }
             }
 
@@ -1000,7 +1024,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const calls = await resOut.json();
                 const tblOut = document.getElementById('tbl_outbound');
                 if (tblOut) {
-                    tblOut.innerHTML = calls.length ? calls.map(_renderRow).join('') : '<tr><td colspan="12" style="text-align:center;color:#64748B;padding:20px;">No outbound calls recorded yet</td></tr>';
+                    tblOut.innerHTML = calls.length ? calls.map(_renderRow).join('') : '<tr><td colspan="13" style="text-align:center;color:#64748B;padding:20px;">No outbound calls recorded yet</td></tr>';
                 }
             }
         } catch (e) {
