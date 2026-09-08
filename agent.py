@@ -588,30 +588,6 @@ async def entrypoint(ctx: agents.JobContext):
             except Exception as appt_err:
                 logger.error(f"Error auto-inserting appointment in wrap-up: {appt_err}")
 
-        # Fallback / Secondary extraction if lead requested callback but next_callback is empty
-        if not t_callback and not t_site_visit:
-            transcript_lower = full_transcript.lower()
-            is_busy_callback = any(k in transcript_lower for k in [
-                "busy", "driving", "meeting", "call later", "call me later", "baad mein",
-                "baad me call", "thodi der", "shaam ko", "kal call", "abhi time nahi", "free nahi"
-            ])
-            if is_busy_callback:
-                from datetime import datetime as _dt, timedelta as _td
-                cb_target = (_dt.utcnow() + _td(minutes=60)).strftime("%Y-%m-%d %H:%M:%S")
-                t_callback = cb_target
-                t_outcome = "callback_requested"
-                t_lead_score = "Warm"
-                try:
-                    await save_callback(
-                        phone=clean_phone,
-                        lead_name=t_client_name or lead_name or "Lead",
-                        scheduled_time=cb_target,
-                        notes="Auto-detected busy/callback request from transcript"
-                    )
-                    await push_unified_log("Callback", "info", f"✅ Fallback callback auto-scheduled for {clean_phone} at {cb_target}", call_id=call_id)
-                except Exception as cb_err:
-                    logger.warning(f"Error saving fallback callback: {cb_err}")
-
         visit_str = f" | Visit: {t_site_visit}" if t_site_visit else ""
         cab_str = f" (Cab: {t_pickup_loc or 'Yes'})" if t_pickup else ""
         summary = f"{t_client_name} ({clean_phone}): {t_bhk or 'TBD'} | Budget: {t_budget or 'TBD'} | {t_purpose}{visit_str}{cab_str} | Score: {t_lead_score} | Duration: {dur}s"

@@ -30,7 +30,8 @@ from db import (
     get_settings, save_settings_dict, get_contact_memory,
     list_agent_profiles, save_agent_profile, delete_agent_profile, get_agent_profile,
     list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number,
-    get_pending_callbacks, mark_callback_dispatched, get_pending_callbacks_due, mark_callback_completed
+    get_pending_callbacks, mark_callback_dispatched, get_pending_callbacks_due, mark_callback_completed,
+    get_and_claim_due_callbacks, emergency_cleanup_pending_callbacks
 )
 from prompts import get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 
@@ -247,17 +248,15 @@ async def dispatch_callback_call(
         await push_unified_log("Callback", "error", f"Failed to dispatch callback to {phone}: {e}", call_id=orig_call_id)
 
 async def check_and_dispatch_due_callbacks():
-    # 1. Process due callbacks from scheduled_callbacks table
+    # 1. Process due callbacks atomically from scheduled_callbacks table
     try:
-        due_cbs = await get_pending_callbacks_due()
+        # Atomic claim: updates status to 'completed' in DB before returning to prevent race conditions
+        due_cbs = await get_and_claim_due_callbacks()
         for cb in due_cbs:
             cid = cb.get("id")
             phone = cb.get("phone")
             lead_name = cb.get("lead_name") or "there"
             notes = cb.get("context_notes") or ""
-
-            # Mark status as completed / in_progress immediately to avoid duplicate dialing
-            await mark_callback_completed(cid, status="completed")
 
             time_str = cb.get("scheduled_time", "")
             await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} (Scheduled: {time_str})", call_id=str(cid))
@@ -317,6 +316,10 @@ async def callback_scheduler_worker():
 
 @app.on_event("startup")
 async def on_startup():
+    try:
+        await emergency_cleanup_pending_callbacks()
+    except Exception as clean_err:
+        logger.warning(f"Startup callback cleanup warning: {clean_err}")
     asyncio.create_task(callback_scheduler_worker())
     logger.info("Automated callback scheduler worker started (interval: 30s)")
 

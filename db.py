@@ -406,14 +406,93 @@ async def mark_callback_dispatched(call_id: str) -> bool:
 # ============================================================
 # SCHEDULED CALLBACKS SUBSYSTEM (Supabase + Local SQLite)
 # ============================================================
+def _emergency_cancel_all_pending_sqlite():
+    """Immediately cancel all pending callbacks in local SQLite to kill active loops."""
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("UPDATE scheduled_callbacks SET status = 'cancelled' WHERE status = 'pending'")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# Run immediate local cancellation on import
+_emergency_cancel_all_pending_sqlite()
+
+async def emergency_cleanup_pending_callbacks():
+    """Clear / Cancel all stuck pending callbacks right now in Supabase and SQLite."""
+    try:
+        db = await _adb()
+        await db.table("scheduled_callbacks").update({"status": "cancelled"}).eq("status", "pending").execute()
+        logger.info("Cleared all pending callbacks in Supabase.")
+    except Exception as e:
+        logger.warning(f"Supabase emergency cleanup: {e}")
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("UPDATE scheduled_callbacks SET status = 'cancelled' WHERE status = 'pending'")
+        conn.commit()
+        conn.close()
+        logger.info("Cleared all pending callbacks in local SQLite.")
+    except Exception as sqle:
+        logger.warning(f"SQLite emergency cleanup: {sqle}")
+
 async def save_callback(phone: str, lead_name: str, scheduled_time: str, notes: str = "") -> bool:
-    """Save a scheduled callback for a busy lead to Supabase and local SQLite."""
+    """
+    Save a scheduled callback for a busy lead to Supabase and local SQLite.
+    Includes DEDUPLICATION & 10-MINUTE COOLDOWN to prevent infinite callback spam.
+    """
     clean_phone_10 = normalize_phone(phone)
     if not clean_phone_10:
         clean_phone_10 = re.sub(r'\D', '', str(phone or ""))[-10:]
-    
+    if not clean_phone_10 or len(clean_phone_10) < 10:
+        logger.warning(f"save_callback rejected: invalid phone {phone}")
+        return False
+
+    from datetime import datetime, timedelta, timezone
+    now_utc = datetime.now(timezone.utc)
+    cooldown_cutoff = (now_utc - timedelta(minutes=10)).isoformat()
+
+    # DEDUPLICATION 1: Check SQLite for pending callback or recent callback in last 10 mins
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("SELECT id FROM scheduled_callbacks WHERE phone = ? AND status = 'pending'", (clean_phone_10,))
+        if c.fetchone():
+            logger.warning(f"Callback rejected for {clean_phone_10}: active pending callback already exists.")
+            conn.close()
+            return False
+
+        c.execute("SELECT id FROM scheduled_callbacks WHERE phone = ? AND created_at >= ?", (clean_phone_10, cooldown_cutoff))
+        if c.fetchone():
+            logger.warning(f"Callback rejected for {clean_phone_10}: 10-minute cooldown active.")
+            conn.close()
+            return False
+        conn.close()
+    except Exception as e:
+        logger.warning(f"SQLite dedup check error: {e}")
+
+    # DEDUPLICATION 2: Check Supabase for pending callback or recent callback in last 10 mins
+    try:
+        db = await _adb()
+        res = await db.table("scheduled_callbacks").select("id").eq("phone", clean_phone_10).eq("status", "pending").execute()
+        if res.data and len(res.data) > 0:
+            logger.warning(f"Callback rejected in Supabase for {clean_phone_10}: pending callback already exists.")
+            return False
+
+        res_cool = await db.table("scheduled_callbacks").select("id").eq("phone", clean_phone_10).gte("created_at", cooldown_cutoff).execute()
+        if res_cool.data and len(res_cool.data) > 0:
+            logger.warning(f"Callback rejected in Supabase for {clean_phone_10}: 10-minute cooldown active.")
+            return False
+    except Exception as se:
+        logger.warning(f"Supabase dedup check: {se}")
+
     cb_id = f"cb_{clean_phone_10}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = now_utc.isoformat()
     time_str = str(scheduled_time).strip()
 
     row = {
@@ -456,44 +535,58 @@ async def save_callback(phone: str, lead_name: str, scheduled_time: str, notes: 
     await push_unified_log("Callback", "info", f"Callback scheduled in DB for {clean_phone_10} at {time_str}")
     return True
 
-async def get_pending_callbacks_due() -> list:
-    """Returns all callbacks where status == 'pending' and scheduled_time <= current_utc_time."""
-    now_iso = datetime.utcnow().isoformat()
-    now_local = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    due_callbacks = []
+async def get_and_claim_due_callbacks() -> list:
+    """
+    ATOMIC STATUS UPDATE:
+    Fetch due callbacks where status == 'pending' and scheduled_time <= utc_now.
+    IMMEDIATELY update their status to 'completed' in the same transaction to prevent duplicate dispatches.
+    """
+    from datetime import datetime, timezone
+    now_utc_iso = datetime.now(timezone.utc).isoformat()
+    claimed_callbacks = []
     seen_ids = set()
 
-    # 1. Try Supabase
-    try:
-        db = await _adb()
-        res = await db.table("scheduled_callbacks").select("*").eq("status", "pending").lte("scheduled_time", now_iso).execute()
-        for r in (res.data or []):
-            cid = r.get("id")
-            if cid and cid not in seen_ids:
-                seen_ids.add(cid)
-                due_callbacks.append(r)
-    except Exception as exc:
-        logger.warning(f"Supabase get_pending_callbacks_due warning: {exc}")
-
-    # 2. Query SQLite
+    # 1. SQLite atomic fetch and update
     try:
         _init_local_sqlite()
         conn = sqlite3.connect(LOCAL_DB_FILE)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        c.execute("SELECT * FROM scheduled_callbacks WHERE status = 'pending' AND (scheduled_time <= ? OR scheduled_time <= ?)", (now_iso, now_local))
-        rows = c.fetchall()
-        for row in rows:
-            r = dict(row)
-            cid = r.get("id")
-            if cid and cid not in seen_ids:
-                seen_ids.add(cid)
-                due_callbacks.append(r)
+        c.execute("SELECT * FROM scheduled_callbacks WHERE status = 'pending' AND scheduled_time <= ?", (now_utc_iso,))
+        rows = [dict(r) for r in c.fetchall()]
+        if rows:
+            ids = [r["id"] for r in rows]
+            placeholders = ",".join("?" for _ in ids)
+            c.execute(f"UPDATE scheduled_callbacks SET status = 'completed' WHERE id IN ({placeholders})", ids)
+            conn.commit()
+            for r in rows:
+                if r["id"] not in seen_ids:
+                    seen_ids.add(r["id"])
+                    claimed_callbacks.append(r)
         conn.close()
     except Exception as sqle:
-        logger.warning(f"Local SQLite get_pending_callbacks_due error: {sqle}")
+        logger.warning(f"Local SQLite get_and_claim_due_callbacks error: {sqle}")
 
-    return due_callbacks
+    # 2. Supabase atomic fetch and update
+    try:
+        db = await _adb()
+        res = await db.table("scheduled_callbacks").select("*").eq("status", "pending").lte("scheduled_time", now_utc_iso).execute()
+        sb_rows = res.data or []
+        for r in sb_rows:
+            cid = r.get("id")
+            if cid:
+                await db.table("scheduled_callbacks").update({"status": "completed"}).eq("id", cid).execute()
+                if cid not in seen_ids:
+                    seen_ids.add(cid)
+                    claimed_callbacks.append(r)
+    except Exception as exc:
+        logger.warning(f"Supabase get_and_claim_due_callbacks warning: {exc}")
+
+    return claimed_callbacks
+
+async def get_pending_callbacks_due() -> list:
+    """Returns all callbacks where status == 'pending' and scheduled_time <= current_utc_time."""
+    return await get_and_claim_due_callbacks()
 
 async def mark_callback_completed(callback_id: str, status: str = "completed") -> bool:
     """Mark callback status as completed, in_progress, failed, or cancelled."""

@@ -258,47 +258,49 @@ class RealEstateTools(llm.ToolContext):
         notes: str = ""
     ) -> str:
         """
-        Schedule a callback when the lead is busy, driving, in a meeting, or requests to be called back later or at a specific time.
-        time_description: Human phrase (e.g., 'after 2 hours', 'tomorrow at 11am', 'shaam ko 5 baje', 'thodi der baad').
-        estimated_minutes_from_now: Relative offset in minutes if specific time isn't strict (default 60).
-        specific_datetime_iso: Target ISO datetime if known (e.g., '2024-09-03T18:00:00').
-        reason: Reason for callback (e.g., 'Lead busy', 'In meeting', 'Call later').
+        Schedule a callback ONLY when the lead EXPLICITLY says they are busy, driving, in a meeting, or asks to be called back later.
+        STRICT BAN: NEVER call this tool unprompted. If the lead did not explicitly ask to be called back, DO NOT CALL THIS TOOL.
+        time_description: Human phrase from the lead (e.g., 'after 2 hours', 'tomorrow at 11am', 'shaam ko 5 baje', 'thodi der baad').
+        estimated_minutes_from_now: Relative offset in minutes (minimum 5, default 60).
+        specific_datetime_iso: Target ISO datetime if known.
+        reason: Reason given by lead (e.g. 'driving', 'meeting', 'busy').
         """
-        from datetime import datetime as _dt, timedelta as _td
-        now = _dt.utcnow()
-        now_local = _dt.now()
+        from datetime import datetime, timedelta, timezone
+        now_utc = datetime.now(timezone.utc)
 
-        desc = (time_description or callback_time or "in 1 hour").strip()
-        context_notes = (notes or reason or "Lead requested callback").strip()
+        # Enforce minimum 5 minutes delay to prevent immediate callback loops
+        mins = max(5, int(estimated_minutes_from_now or 60))
+        target_time = now_utc + timedelta(minutes=mins)
+
+        desc = (time_description or callback_time or f"in {mins} minutes").strip()
+        context_notes = (notes or reason or "Lead busy, requested callback").strip()
         s = desc.lower()
 
-        # 1. Determine target datetime
-        target_dt = None
+        # Parse specific ISO if provided
         if specific_datetime_iso and specific_datetime_iso.strip():
             try:
-                target_dt = _dt.fromisoformat(specific_datetime_iso.strip().replace("Z", "+00:00"))
+                dt_p = datetime.fromisoformat(specific_datetime_iso.strip().replace("Z", "+00:00"))
+                if dt_p > now_utc + timedelta(minutes=4):
+                    target_time = dt_p
             except Exception:
                 pass
-
-        if not target_dt:
+        else:
+            # Parse human descriptions
             m_min = re.search(r'(\d+)\s*(?:minute|min|m)', s)
             m_hr = re.search(r'(\d+)\s*(?:hour|hr|ghante|ghanta|h)', s)
             if "aadhe" in s or "aadha" in s or "half" in s:
-                target_dt = now + _td(minutes=30)
+                target_time = now_utc + timedelta(minutes=30)
             elif m_hr:
                 hrs = int(m_hr.group(1))
-                target_dt = now + _td(hours=hrs)
+                target_time = now_utc + timedelta(hours=hrs)
             elif m_min:
-                mins = int(m_min.group(1))
-                target_dt = now + _td(minutes=mins)
-            elif "thodi der" in s or "baad mein" in s or "later" in s:
-                target_dt = now + _td(minutes=int(estimated_minutes_from_now or 60))
-            else:
-                days_ahead = 0
-                if "parson" in s or "day after tomorrow" in s:
-                    days_ahead = 2
-                elif "tomorrow" in s or "kal" in s:
-                    days_ahead = 1
+                m_val = max(5, int(m_min.group(1)))
+                target_time = now_utc + timedelta(minutes=m_val)
+            elif any(w in s for w in ["shaam", "evening", "kal", "tomorrow", "subah", "morning", "dopahar", "baje"]):
+                # Parse in IST (UTC+5:30) and convert to UTC
+                ist_tz = timezone(timedelta(hours=5, minutes=30))
+                now_ist = datetime.now(ist_tz)
+                days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (2 if ("parson" in s or "day after tomorrow" in s) else 0)
 
                 hour = 18
                 minute = 0
@@ -322,19 +324,20 @@ class RealEstateTools(llm.ToolContext):
                     elif hour in (1, 2, 3, 4, 5, 6, 7, 8):
                         hour += 12
 
-                base_dt = now_local + _td(days=days_ahead)
-                candidate = base_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if days_ahead == 0 and candidate <= now_local:
-                    candidate = candidate + _td(days=1)
-                target_dt = candidate
+                base_ist = now_ist + timedelta(days=days_ahead)
+                candidate_ist = base_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if days_ahead == 0 and candidate_ist <= now_ist + timedelta(minutes=5):
+                    candidate_ist = candidate_ist + timedelta(days=1)
+                target_time = candidate_ist.astimezone(timezone.utc)
 
-        if not target_dt:
-            target_dt = now + _td(minutes=int(estimated_minutes_from_now or 60))
+        # Enforce minimum 5 minutes from now
+        if target_time <= now_utc + timedelta(minutes=4):
+            target_time = now_utc + timedelta(minutes=mins)
 
-        target_iso = target_dt.strftime("%Y-%m-%d %H:%M:%S")
-        human_time_str = desc if desc and desc != "in 1 hour" else target_dt.strftime("%d %b at %I:%M %p")
+        target_iso = target_time.isoformat()
+        human_time_str = desc if desc and desc != f"in {mins} minutes" else f"{mins} minute baad"
 
-        # Save to database
+        # Save to database with deduplication and cooldown
         try:
             await save_callback(
                 phone=self.phone_number,
@@ -352,7 +355,7 @@ class RealEstateTools(llm.ToolContext):
         await add_contact_memory(self.phone_number, f"Callback scheduled for {target_iso}. {context_notes}")
         await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({target_iso})", call_id=self.call_id)
 
-        return f"Callback scheduled successfully for {human_time_str}. Please confirm to the lead politely that we will call them back then, and gracefully end the call."
+        return f"Theek hai, main aapko {human_time_str} par dobara call karti hoon. Aapka din shubh rahe!"
 
     @llm.function_tool
     async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
