@@ -9,7 +9,7 @@ import ssl
 import certifi
 import aiohttp
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
