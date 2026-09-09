@@ -6,7 +6,7 @@ import sqlite3
 import re
 import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Union, List, Dict
 
 logger = logging.getLogger("kaamdhenu-db")
 
@@ -478,12 +478,18 @@ async def emergency_cleanup_pending_callbacks():
     except Exception as sqle:
         logger.warning(f"SQLite emergency cleanup: {sqle}")
 
-async def save_callback(phone: str, lead_name: str, scheduled_time: str, notes: str = "") -> bool:
+async def save_callback(
+    phone: str,
+    lead_name: str = "Lead",
+    scheduled_epoch: Optional[Union[int, float, str]] = None,
+    notes: str = "",
+    scheduled_time: str = ""
+) -> bool:
     """
     Save or reschedule a callback for a lead in Supabase and local SQLite.
-    UPSERT/OVERWRITE logic: Guarantees there is NEVER more than ONE active pending
-    callback per phone number. If an active pending callback exists, it updates the
-    scheduled_time and context_notes rather than creating a duplicate record.
+    UPSERT/OVERWRITE logic: Guarantees there is NEVER more than ONE active pending/in_progress
+    callback per phone number.
+    Accepts integer Unix Epoch timestamp (scheduled_epoch) to eliminate timezone string bugs.
     """
     norm_phone = normalize_phone(phone)
     if not norm_phone:
@@ -493,9 +499,46 @@ async def save_callback(phone: str, lead_name: str, scheduled_time: str, notes: 
         return False
 
     from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    try:
+        IST = ZoneInfo("Asia/Kolkata")
+    except Exception:
+        from datetime import timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+
+    epoch_val: Optional[int] = None
+    time_str = str(scheduled_time or "").strip()
+
+    if scheduled_epoch is not None:
+        if isinstance(scheduled_epoch, (int, float)):
+            epoch_val = int(scheduled_epoch)
+        elif isinstance(scheduled_epoch, str) and scheduled_epoch.strip().isdigit():
+            epoch_val = int(scheduled_epoch.strip())
+        else:
+            # scheduled_epoch might be a string datetime (legacy call)
+            if not time_str:
+                time_str = str(scheduled_epoch).strip()
+
+    if epoch_val is None:
+        if time_str:
+            try:
+                clean_s = time_str.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(clean_s)
+                epoch_val = int(dt.timestamp())
+            except Exception:
+                epoch_val = int(time.time()) + 3600
+        else:
+            epoch_val = int(time.time()) + 3600
+
+    if not time_str or time_str.isdigit():
+        try:
+            ist_dt = datetime.fromtimestamp(epoch_val, tz=IST)
+            time_str = ist_dt.strftime("%d-%m-%Y %I:%M %p IST")
+        except Exception:
+            time_str = datetime.fromtimestamp(epoch_val, tz=timezone.utc).isoformat()
+
     now_utc = datetime.now(timezone.utc)
     now_iso = now_utc.isoformat()
-    time_str = str(scheduled_time).strip()
     notes_str = str(notes or "").strip()
     name_str = str(lead_name or "Lead").strip()
 
@@ -506,115 +549,182 @@ async def save_callback(phone: str, lead_name: str, scheduled_time: str, notes: 
         _init_local_sqlite()
         conn = sqlite3.connect(LOCAL_DB_FILE)
         c = conn.cursor()
-        c.execute("SELECT id FROM scheduled_callbacks WHERE phone = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1", (norm_phone,))
+        c.execute("""
+            SELECT id FROM scheduled_callbacks
+            WHERE phone = ? AND status IN ('pending', 'in_progress')
+            ORDER BY created_at DESC LIMIT 1
+        """, (norm_phone,))
         existing_sqlite = c.fetchone()
         if existing_sqlite:
             cb_id = existing_sqlite[0]
             c.execute("""
                 UPDATE scheduled_callbacks
-                SET scheduled_time = ?, context_notes = ?, lead_name = ?, created_at = ?
+                SET scheduled_epoch = ?, scheduled_time = ?, context_notes = ?, lead_name = ?, status = 'pending', attempts = 0, created_at = ?
                 WHERE id = ?
-            """, (time_str, notes_str, name_str, now_iso, cb_id))
-            logger.info(f"Updated existing pending callback in SQLite for {norm_phone} (ID: {cb_id}) to {time_str}")
+            """, (epoch_val, time_str, notes_str, name_str, now_iso, cb_id))
+            logger.info(f"Updated existing callback in SQLite for {norm_phone} (ID: {cb_id}) -> epoch {epoch_val} ({time_str})")
         else:
             cb_id = f"cb_{norm_phone}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
             c.execute("""
-                INSERT INTO scheduled_callbacks (id, phone, lead_name, scheduled_time, status, context_notes, created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?, ?)
-            """, (cb_id, norm_phone, name_str, time_str, notes_str, now_iso))
-            logger.info(f"Inserted new pending callback in SQLite for {norm_phone} (ID: {cb_id}) at {time_str}")
+                INSERT INTO scheduled_callbacks (id, phone, lead_name, scheduled_time, scheduled_epoch, status, context_notes, attempts, last_attempt_epoch, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, 0, 0, ?)
+            """, (cb_id, norm_phone, name_str, time_str, epoch_val, notes_str, now_iso))
+            logger.info(f"Inserted new callback in SQLite for {norm_phone} (ID: {cb_id}) -> epoch {epoch_val} ({time_str})")
         conn.commit()
         conn.close()
     except Exception as sqle:
         logger.warning(f"Local SQLite save_callback error: {sqle}")
 
-    # Fallback cb_id if SQLite failed
     if not cb_id:
         cb_id = f"cb_{norm_phone}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
 
     # 2. Supabase check and Upsert/Overwrite
     try:
         db = await _adb()
-        res = await db.table("scheduled_callbacks").select("id").eq("phone", norm_phone).eq("status", "pending").order("created_at", desc=True).limit(1).execute()
+        res = await db.table("scheduled_callbacks").select("id").eq("phone", norm_phone).in_("status", ["pending", "in_progress"]).order("created_at", desc=True).limit(1).execute()
         if res.data and len(res.data) > 0:
             sp_id = res.data[0]["id"]
             await db.table("scheduled_callbacks").update({
+                "scheduled_epoch": epoch_val,
                 "scheduled_time": time_str,
                 "context_notes": notes_str,
                 "lead_name": name_str,
+                "status": "pending",
+                "attempts": 0,
                 "created_at": now_iso
             }).eq("id", sp_id).execute()
-            logger.info(f"Updated existing pending callback in Supabase for {norm_phone} (ID: {sp_id}) to {time_str}")
+            logger.info(f"Updated existing callback in Supabase for {norm_phone} (ID: {sp_id}) -> epoch {epoch_val} ({time_str})")
         else:
             row = {
                 "id": cb_id,
                 "phone": norm_phone,
                 "lead_name": name_str,
                 "scheduled_time": time_str,
+                "scheduled_epoch": epoch_val,
                 "status": "pending",
                 "context_notes": notes_str,
+                "attempts": 0,
+                "last_attempt_epoch": 0,
                 "created_at": now_iso
             }
             await db.table("scheduled_callbacks").upsert(row, on_conflict="id").execute()
-            logger.info(f"Inserted new pending callback in Supabase for {norm_phone} (ID: {cb_id}) at {time_str}")
+            logger.info(f"Inserted new callback in Supabase for {norm_phone} (ID: {cb_id}) -> epoch {epoch_val} ({time_str})")
     except Exception as exc:
         logger.warning(f"Supabase save_callback error (falling back to SQLite): {exc}")
 
-    await push_unified_log("Callback", "info", f"Callback scheduled/updated for {norm_phone} at {time_str}")
+    await push_unified_log("Callback", "info", f"Callback scheduled/updated for {norm_phone} at {time_str} (epoch {epoch_val})")
     return True
 
-async def get_and_claim_due_callbacks() -> list:
+async def claim_due_callback(callback_id: str) -> bool:
     """
-    ATOMIC STATUS UPDATE:
-    Fetch due callbacks where status == 'pending' and scheduled_time <= utc_now.
-    IMMEDIATELY update their status to 'completed' in the same transaction to prevent duplicate dispatches.
+    Atomic single-shot lock for callback dispatch:
+    Sets status = 'in_progress', attempts = attempts + 1, last_attempt_epoch = now_epoch
+    WHERE id = ? AND status = 'pending'.
+    Returns True if this worker successfully acquired the lock, False otherwise.
     """
-    from datetime import datetime, timezone
-    now_utc_iso = datetime.now(timezone.utc).isoformat()
+    now_epoch = int(time.time())
+    cid = str(callback_id)
+    sq_claimed = False
+
+    # 1. SQLite atomic lock
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("""
+            UPDATE scheduled_callbacks
+            SET status = 'in_progress', attempts = COALESCE(attempts, 0) + 1, last_attempt_epoch = ?
+            WHERE id = ? AND status = 'pending'
+        """, (now_epoch, cid))
+        sq_claimed = c.rowcount > 0
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"SQLite claim_due_callback error: {e}")
+
+    # 2. Supabase atomic lock
+    sb_claimed = False
+    try:
+        db = await _adb()
+        res = await db.table("scheduled_callbacks").select("attempts").eq("id", cid).eq("status", "pending").execute()
+        if res.data and len(res.data) > 0:
+            cur_attempts = int(res.data[0].get("attempts") or 0)
+            update_res = await db.table("scheduled_callbacks").update({
+                "status": "in_progress",
+                "attempts": cur_attempts + 1,
+                "last_attempt_epoch": now_epoch
+            }).eq("id", cid).eq("status", "pending").execute()
+            if update_res.data and len(update_res.data) > 0:
+                sb_claimed = True
+    except Exception as e:
+        logger.warning(f"Supabase claim_due_callback warning: {e}")
+
+    return sq_claimed or sb_claimed
+
+async def get_due_callbacks_epoch(now_epoch: Optional[int] = None) -> list:
+    """
+    Fetch callbacks that are due (scheduled_epoch <= now_epoch and status == 'pending').
+    Returns raw list of callbacks. Does NOT mutate status; claim_due_callback must be called.
+    """
+    if now_epoch is None:
+        now_epoch = int(time.time())
+
     claimed_callbacks = []
     seen_ids = set()
 
-    # 1. SQLite atomic fetch and update
+    # 1. SQLite query
     try:
         _init_local_sqlite()
         conn = sqlite3.connect(LOCAL_DB_FILE)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        c.execute("SELECT * FROM scheduled_callbacks WHERE status = 'pending' AND scheduled_time <= ?", (now_utc_iso,))
+        c.execute("""
+            SELECT * FROM scheduled_callbacks
+            WHERE status = 'pending' AND scheduled_epoch > 0 AND scheduled_epoch <= ?
+            ORDER BY scheduled_epoch ASC
+        """, (now_epoch,))
         rows = [dict(r) for r in c.fetchall()]
-        if rows:
-            ids = [r["id"] for r in rows]
-            placeholders = ",".join("?" for _ in ids)
-            c.execute(f"UPDATE scheduled_callbacks SET status = 'completed' WHERE id IN ({placeholders})", ids)
-            conn.commit()
-            for r in rows:
-                if r["id"] not in seen_ids:
-                    seen_ids.add(r["id"])
-                    claimed_callbacks.append(r)
         conn.close()
+        for r in rows:
+            cid = str(r.get("id"))
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                claimed_callbacks.append(r)
     except Exception as sqle:
-        logger.warning(f"Local SQLite get_and_claim_due_callbacks error: {sqle}")
+        logger.warning(f"Local SQLite get_due_callbacks_epoch error: {sqle}")
 
-    # 2. Supabase atomic fetch and update
+    # 2. Supabase query
     try:
         db = await _adb()
-        res = await db.table("scheduled_callbacks").select("*").eq("status", "pending").lte("scheduled_time", now_utc_iso).execute()
-        sb_rows = res.data or []
-        for r in sb_rows:
-            cid = r.get("id")
-            if cid:
-                await db.table("scheduled_callbacks").update({"status": "completed"}).eq("id", cid).execute()
-                if cid not in seen_ids:
-                    seen_ids.add(cid)
-                    claimed_callbacks.append(r)
+        res = await db.table("scheduled_callbacks").select("*").eq("status", "pending").gt("scheduled_epoch", 0).lte("scheduled_epoch", now_epoch).order("scheduled_epoch", desc=False).execute()
+        for r in (res.data or []):
+            cid = str(r.get("id"))
+            if cid and cid not in seen_ids:
+                seen_ids.add(cid)
+                claimed_callbacks.append(r)
     except Exception as exc:
-        logger.warning(f"Supabase get_and_claim_due_callbacks warning: {exc}")
+        logger.warning(f"Supabase get_due_callbacks_epoch error: {exc}")
 
     return claimed_callbacks
 
+async def get_and_claim_due_callbacks() -> list:
+    """
+    ATOMIC STATUS UPDATE:
+    Fetch due callbacks where status == 'pending' and scheduled_epoch <= now_epoch.
+    Atomically claims each one via claim_due_callback to prevent duplicate dispatches.
+    """
+    now_epoch = int(time.time())
+    due_cbs = await get_due_callbacks_epoch(now_epoch)
+    claimed = []
+    for cb in due_cbs:
+        cid = str(cb.get("id"))
+        if await claim_due_callback(cid):
+            claimed.append(cb)
+    return claimed
+
 async def get_pending_callbacks_due() -> list:
-    """Returns all callbacks where status == 'pending' and scheduled_time <= current_utc_time."""
-    return await get_and_claim_due_callbacks()
+    """Returns all callbacks where status == 'pending' and scheduled_epoch <= now_epoch."""
+    return await get_due_callbacks_epoch(int(time.time()))
 
 async def mark_callback_completed(callback_id: str, status: str = "completed") -> bool:
     """Mark callback status as completed, in_progress, failed, or cancelled."""
@@ -725,12 +835,25 @@ def _init_local_sqlite():
                 id TEXT PRIMARY KEY,
                 phone TEXT NOT NULL,
                 lead_name TEXT DEFAULT '',
-                scheduled_time TEXT NOT NULL,
+                scheduled_time TEXT DEFAULT '',
+                scheduled_epoch INTEGER NOT NULL DEFAULT 0,
                 status TEXT DEFAULT 'pending',
                 context_notes TEXT DEFAULT '',
+                attempts INTEGER DEFAULT 0,
+                last_attempt_epoch INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL
             )
         """)
+        # Safe migration for existing SQLite tables
+        for col_name, col_type in [
+            ("scheduled_epoch", "INTEGER DEFAULT 0"),
+            ("attempts", "INTEGER DEFAULT 0"),
+            ("last_attempt_epoch", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE scheduled_callbacks ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
         conn.commit()
         conn.close()
     except Exception as e:

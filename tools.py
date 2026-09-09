@@ -360,31 +360,31 @@ class RealEstateTools(llm.ToolContext):
         if target_time_ist <= now_ist + timedelta(minutes=4):
             target_time_ist = now_ist + timedelta(minutes=45)
 
-        # Convert calculated IST target datetime to UTC ISO string
-        target_utc = target_time_ist.astimezone(timezone.utc)
-        target_iso = target_utc.isoformat()
-
+        # Convert calculated IST target datetime to epoch timestamp
+        target_epoch = int(target_time_ist.timestamp())
         human_time_str = desc if desc and desc not in ["in 1 hour", "thodi der baad"] else target_time_ist.strftime("%I:%M %p (%d %b)")
+        ist_formatted = target_time_ist.strftime("%d-%m-%Y %I:%M %p IST")
 
-        logger.info(f"Callback registered: Phone={self.phone_number} | Target IST={target_time_ist.strftime('%d-%m-%Y %I:%M %p')} | Target UTC={target_iso}")
+        logger.info(f"Callback registered: Phone={self.phone_number} | Target IST={ist_formatted} | Target Epoch={target_epoch}")
 
-        # Save to database with deduplication and cooldown
+        # Save to database with epoch seconds, IST formatted string, and upsert
         try:
             await save_callback(
                 phone=self.phone_number,
                 lead_name=self.client_name or self.lead_name or "Lead",
-                scheduled_time=target_iso,
-                notes=f"{desc} - {context_notes}"
+                scheduled_epoch=target_epoch,
+                notes=f"{desc} - {context_notes}",
+                scheduled_time=ist_formatted
             )
         except Exception as e:
             logger.warning(f"save_callback error: {e}")
 
-        self.next_callback = target_iso
+        self.next_callback = ist_formatted
         self.outcome = "callback_requested"
         self.lead_score = "Warm"
 
-        await add_contact_memory(self.phone_number, f"Callback scheduled for {target_time_ist.strftime('%d-%m-%Y %I:%M %p')}. {context_notes}")
-        await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({target_time_ist.strftime('%d-%m-%Y %I:%M %p IST')})", call_id=self.call_id)
+        await add_contact_memory(self.phone_number, f"Callback scheduled for {ist_formatted}. {context_notes}")
+        await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({ist_formatted})", call_id=self.call_id)
 
         return f"Done sir, main aapko theek {human_time_str} par call karti hoon. Thank you!"
 

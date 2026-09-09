@@ -31,7 +31,8 @@ from db import (
     list_agent_profiles, save_agent_profile, delete_agent_profile, get_agent_profile,
     list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number,
     get_pending_callbacks, mark_callback_dispatched, get_pending_callbacks_due, mark_callback_completed,
-    get_and_claim_due_callbacks, emergency_cleanup_pending_callbacks
+    get_and_claim_due_callbacks, emergency_cleanup_pending_callbacks,
+    get_due_callbacks_epoch, claim_due_callback, normalize_phone
 )
 from prompts import get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 
@@ -71,19 +72,56 @@ class ClientNumReq(BaseModel):
 # ============================================================
 # AUTOMATED CALLBACK SCHEDULER WORKER
 # ============================================================
+def is_calling_hours_ist() -> bool:
+    """
+    TRAI Legal Calling Hours Guard:
+    Only 09:30 AM to 08:00 PM IST allowed (09:30 to 20:00).
+    Outside this window, NO automated outbound calls may be placed.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        IST = ZoneInfo("Asia/Kolkata")
+    except Exception:
+        from datetime import timezone, timedelta
+        IST = timezone(timedelta(hours=5, minutes=30))
+    now_ist = datetime.now(IST)
+    minute_of_day = now_ist.hour * 60 + now_ist.minute
+    # 09:30 AM = 570 minutes, 08:00 PM (20:00) = 1200 minutes
+    return (9 * 60 + 30) <= minute_of_day < (20 * 60)
+
+_recent_callback_dials: Dict[str, int] = {}
+CALLBACK_COOLDOWN_SECONDS = 12 * 3600  # 12-hour deduplication window
+
 def parse_callback_datetime(cb_str: str, now: Optional[datetime] = None) -> Optional[datetime]:
     if not cb_str or not str(cb_str).strip():
         return None
     s = str(cb_str).strip().lower()
     from datetime import datetime as _dt, timedelta as _td
+    from zoneinfo import ZoneInfo
     import re
+    try:
+        IST = ZoneInfo("Asia/Kolkata")
+    except Exception:
+        from datetime import timezone
+        IST = timezone(_td(hours=5, minutes=30))
+
     if now is None:
-        now = _dt.now()
+        now = _dt.now(IST)
 
     # 1. Standard ISO or date formats
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+    try:
+        clean_s = str(cb_str).strip().replace("Z", "+00:00")
+        parsed = _dt.fromisoformat(clean_s)
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(IST)
+        else:
+            return parsed.replace(tzinfo=IST)
+    except Exception:
+        pass
+
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            return _dt.strptime(str(cb_str).strip(), fmt)
+            return _dt.strptime(str(cb_str).strip(), fmt).replace(tzinfo=IST)
         except ValueError:
             pass
 
@@ -150,7 +188,8 @@ def parse_callback_datetime(cb_str: str, now: Optional[datetime] = None) -> Opti
             hour += 12
 
     try:
-        return _dt.combine(base_date, _dt.min.time().replace(hour=hour, minute=minute))
+        combined = _dt.combine(base_date, _dt.min.time().replace(hour=hour, minute=minute))
+        return combined.replace(tzinfo=IST)
     except Exception:
         return None
 
@@ -259,49 +298,96 @@ async def dispatch_callback_call(
         await push_unified_log("Callback", "error", f"Failed to dispatch callback to {phone}: {e}", call_id=orig_call_id)
 
 async def check_and_dispatch_due_callbacks():
+    # 0. TRAI Legal Calling Hours Guard (09:30 AM to 08:00 PM IST)
+    if not is_calling_hours_ist():
+        logger.debug("Outside TRAI calling hours (09:30 AM - 08:00 PM IST). Callback dispatch paused.")
+        return
+
+    now_epoch = int(time.time())
+
     # 1. Process due callbacks atomically from scheduled_callbacks table
     try:
-        # Atomic claim: updates status to 'completed' in DB before returning to prevent race conditions
-        due_cbs = await get_and_claim_due_callbacks()
+        due_cbs = await get_due_callbacks_epoch(now_epoch)
         for cb in due_cbs:
-            cid = cb.get("id")
-            phone = cb.get("phone")
+            cid = str(cb.get("id"))
+            phone = str(cb.get("phone") or "")
             lead_name = cb.get("lead_name") or "there"
             notes = cb.get("context_notes") or ""
-
             time_str = cb.get("scheduled_time", "")
-            await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} (Scheduled: {time_str})", call_id=str(cid))
+
+            norm_p = normalize_phone(phone)
+            if not norm_p:
+                await mark_callback_completed(cid, status="cancelled")
+                continue
+
+            # In-memory Cooldown / Deduplication check (12 hours)
+            last_dialed = _recent_callback_dials.get(norm_p, 0)
+            if (now_epoch - last_dialed) < CALLBACK_COOLDOWN_SECONDS:
+                logger.info(f"Skipping duplicate callback to {norm_p}; dialed {now_epoch - last_dialed}s ago (<12h cooldown)")
+                await mark_callback_completed(cid, status="skipped_cooldown")
+                continue
+
+            # Atomic single-shot claim lock: updates status to 'in_progress'
+            claimed = await claim_due_callback(cid)
+            if not claimed:
+                # Already claimed by another worker or not pending
+                continue
+
+            # Record dial timestamp in cooldown tracker
+            _recent_callback_dials[norm_p] = now_epoch
+
+            await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} (Scheduled: {time_str})", call_id=cid)
 
             # Dispatch outbound call
-            asyncio.create_task(dispatch_callback_call(
-                phone=phone,
-                lead_name=lead_name,
-                orig_call_id=str(cid),
-                notes=f"This is a scheduled callback requested by the lead earlier. Notes: {notes}".strip()
-            ))
+            try:
+                await dispatch_callback_call(
+                    phone=phone,
+                    lead_name=lead_name,
+                    orig_call_id=cid,
+                    notes=f"This is a scheduled callback requested by the lead earlier. Notes: {notes}".strip()
+                )
+                await mark_callback_completed(cid, status="completed")
+            except Exception as disp_err:
+                logger.error(f"Error dispatching callback to {phone}: {disp_err}")
+                await mark_callback_completed(cid, status="failed")
+
     except Exception as e:
         logger.error(f"Error checking due scheduled_callbacks: {e}")
 
     # 2. Backwards-compatible check on legacy call_logs.next_callback
     try:
-        now = datetime.now()
+        from zoneinfo import ZoneInfo
+        try:
+            IST = ZoneInfo("Asia/Kolkata")
+        except Exception:
+            from datetime import timezone, timedelta
+            IST = timezone(timedelta(hours=5, minutes=30))
+        now_ist_dt = datetime.now(IST)
+
         pending = await get_pending_callbacks()
         for call in pending:
             cb_str = call.get("next_callback")
             if not cb_str:
                 continue
-            scheduled_dt = parse_callback_datetime(cb_str, now=now)
+            scheduled_dt = parse_callback_datetime(cb_str, now=now_ist_dt)
             if not scheduled_dt:
                 continue
 
-            if now >= scheduled_dt:
+            if now_ist_dt >= scheduled_dt:
                 cid = call.get("id")
                 phone = call.get("phone_number")
                 lead_name = call.get("lead_name") or call.get("client_name") or "there"
                 campaign_id = call.get("campaign_id")
 
+                norm_p = normalize_phone(phone)
+                last_dialed = _recent_callback_dials.get(norm_p, 0)
+                if (now_epoch - last_dialed) < CALLBACK_COOLDOWN_SECONDS:
+                    await mark_callback_dispatched(cid)
+                    continue
+
                 # Mark callback_dispatched = TRUE to avoid duplicate dialing
                 await mark_callback_dispatched(cid)
+                _recent_callback_dials[norm_p] = now_epoch
 
                 time_str = scheduled_dt.strftime("%Y-%m-%d %H:%M")
                 await push_unified_log("Callback", "info", f"📞 Automated scheduled callback triggered for {phone} at {time_str}", call_id=cid)

@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.db
 
 # Node.js / Next.js
 node_modules/
