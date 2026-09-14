@@ -55,7 +55,7 @@ STRICT_CALLBACK_RESCHEDULE_RULES = """
 5. [SCHEDULED CALLBACK BEHAVIOR - STRICT LISTENING MODE]
    - OPENING:
      Keep it short, crisp, and direct:
-     "Namaste {lead_name} ji, Priya baat kar rahi hoon Kaamdhenu se. Aapne call karne ko kaha tha."
+     "Namaste {lead_name} ji, {agent_name} baat kar rahi hoon {business_name} se. Aapne call karne ko kaha tha."
      Immediately pause and LET THE USER SPEAK. Do not pitch immediately.
 
    - IF USER TALKS NORMALLY:
@@ -73,7 +73,7 @@ SCHEDULED_CALLBACK_LISTENING_MODE_RULES = """
 [SCHEDULED CALLBACK BEHAVIOR - STRICT LISTENING MODE]
 1. OPENING:
    - Keep it short, crisp, and direct:
-     "Namaste {lead_name} ji, Priya baat kar rahi hoon Kaamdhenu se. Aapne call karne ko kaha tha."
+     "Namaste {lead_name} ji, {agent_name} baat kar rahi hoon {business_name} se. Aapne call karne ko kaha tha."
    - Immediately pause and LET THE USER SPEAK. Do not pitch immediately.
 
 2. IF USER TALKS NORMALLY:
@@ -130,7 +130,7 @@ OUTBOUND_COLD_CALL_SALES_BLUEPRINT = """
 [OUTBOUND COLD CALL SALES BLUEPRINT - CRITICAL RULES]
 1. ZERO FALSE CLAIMS:
    - STRICTLY FORBIDDEN: NEVER say "Aapne inquiry ki thi", "Aapne property mein interest dikhaya tha", or "Aapka number aaya tha inquiry se".
-   - You are calling as a professional luxury real estate consultant introducing Kaamdhenu Real Estate's premium residential properties.
+   - You are calling as a professional luxury real estate consultant introducing {business_name}'s premium residential properties.
    - If lead asks "Mera number kahan se mila?":
      Say honestly and courteously: "Sir/Ma'am, hamare real estate network database ke through aapka number connect hua hai premium property opportunities ke liye."
 
@@ -140,9 +140,9 @@ OUTBOUND_COLD_CALL_SALES_BLUEPRINT = """
      * 12:00 - 16:59: "Good afternoon"
      * 17:00 onwards: "Good evening"
    - Opening line:
-     "Namaste {lead_name} ji, good [morning/afternoon/evening]! Main Priya baat kar rahi hoon Kaamdhenu Real Estate se. Kya abhi aapse do minute baat ho sakti hai?"
+     "Namaste {lead_name} ji, good [morning/afternoon/evening]! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
    - If they say YES:
-     "Thank you! Hum Kalyan-Dombivli aur Thane region mein luxury 1, 2 aur 3 BHK homes offer kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi residential property dekh rahe hain?"
+     "Thank you! Hum {business_name} ke regarding connect kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi residential property dekh rahe hain?"
    - If they say NO / BUSY: Respectfully handle callback scheduling.
 
 3. NATURAL 5-STEP REAL ESTATE QUALIFICATION FUNNEL (Populate CRM Fields naturally):
@@ -179,7 +179,7 @@ Goal: Qualify property prospects for {service_type} and convert interested leads
 """
 
 def get_base_system_prompt(
-    agent_name: str = "Priya",
+    agent_name: str = "Riya",
     business_name: str = "Kaamdhenu Real Estate",
     custom_prompt: str = "",
     lead_name: str = "there",
@@ -192,10 +192,22 @@ def get_base_system_prompt(
     and Outbound Cold Call Sales Blueprint across every agent in the system.
     """
     resolved_instructions = instructions or custom_instructions or custom_prompt or ""
-    header = f"You are {agent_name}, Senior Property Consultant & Front-Desk AI for {business_name}."
+    header = f"You are {agent_name}, Senior Property Consultant & Front-Desk AI representing {business_name}."
     lang_layer = DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
-    reschedule_rules = BUSY_LEADS_RESCHEDULING_RULES.strip()
-    outbound_blueprint = OUTBOUND_COLD_CALL_SALES_BLUEPRINT.strip()
+    
+    try:
+        reschedule_rules = BUSY_LEADS_RESCHEDULING_RULES.strip().format(
+            agent_name=agent_name, business_name=business_name, lead_name=lead_name, service_type=service_type
+        )
+    except Exception:
+        reschedule_rules = BUSY_LEADS_RESCHEDULING_RULES.strip()
+
+    try:
+        outbound_blueprint = OUTBOUND_COLD_CALL_SALES_BLUEPRINT.strip().format(
+            agent_name=agent_name, business_name=business_name, lead_name=lead_name, service_type=service_type
+        )
+    except Exception:
+        outbound_blueprint = OUTBOUND_COLD_CALL_SALES_BLUEPRINT.strip()
 
     if resolved_instructions and resolved_instructions.strip():
         clean_instructions = resolved_instructions.strip()
@@ -209,18 +221,18 @@ def get_base_system_prompt(
         except Exception:
             pass
 
-        # Avoid duplicating the global layer if already present
+        # If instructions already contain conversation layers, return clean composition
         if "=== NATURAL HUMAN CONVERSATION & PROFESSIONAL PERSUASION LAYER ===" in clean_instructions:
-            return f"{clean_instructions}\n\n{outbound_blueprint}\n\n{reschedule_rules}\n\n{lang_layer}\n"
+            return f"{clean_instructions}\n\n{lang_layer}\n\n{reschedule_rules}\n"
             
         return (
             f"{header}\n\n"
-            f"{outbound_blueprint}\n\n"
+            f"=== AGENT PERSONA & PROJECT INSTRUCTIONS ===\n"
+            f"{clean_instructions}\n\n"
             f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
+            f"{outbound_blueprint}\n\n"
             f"{reschedule_rules}\n\n"
-            f"{lang_layer}\n\n"
-            f"=== SPECIFIC PROJECT / AGENT INSTRUCTIONS ===\n"
-            f"{clean_instructions}\n"
+            f"{lang_layer}\n"
         )
     else:
         try:
@@ -235,8 +247,8 @@ def get_base_system_prompt(
             
         return (
             f"{header}\n\n"
-            f"{outbound_blueprint}\n\n"
             f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
+            f"{outbound_blueprint}\n\n"
             f"{reschedule_rules}\n\n"
             f"{lang_layer}\n\n"
             f"{flow}\n"
@@ -249,7 +261,7 @@ def build_prompt(
     lead_name: str = "there",
     business_name: str = "Kaamdhenu Real Estate",
     service_type: str = "Luxury Properties",
-    agent_name: str = "Priya",
+    agent_name: str = "Riya",
     custom_prompt: str = None,
     instructions: str = ""
 ) -> str:

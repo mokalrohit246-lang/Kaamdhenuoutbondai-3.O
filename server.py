@@ -37,7 +37,7 @@ from db import (
     list_client_numbers, save_client_number, delete_client_number,
     get_calls, get_stats_data, get_all_appointments, cancel_appointment,
     get_settings, save_settings_dict, get_contact_memory,
-    list_agent_profiles, save_agent_profile, delete_agent_profile, get_agent_profile,
+    list_agent_profiles, save_agent_profile, delete_agent_profile, get_agent_profile, find_agent_profile,
     list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number,
     get_pending_callbacks, mark_callback_dispatched, get_pending_callbacks_due, mark_callback_completed,
     get_and_claim_due_callbacks, emergency_cleanup_pending_callbacks,
@@ -70,10 +70,10 @@ class SingleCallReq(BaseModel):
     phone_number: Optional[str] = None
     lead_name: str = "there"
     agent_id: Optional[str] = None
-    agent_name: str = "Priya"
+    agent_name: Optional[str] = None
     agent_voice: Optional[str] = None
-    business_name: str = "Kaamdhenu Real Estate"
-    service_type: str = "Luxury 2BHK/3BHK Apartments"
+    business_name: Optional[str] = None
+    service_type: Optional[str] = None
     broker_phone: Optional[str] = None
     broker_email: Optional[str] = None
     calcom_event_type_id: Optional[str] = None
@@ -94,7 +94,7 @@ class ClientNumReq(BaseModel):
     inbound_number: str
     business_name: str
     service_type: str
-    agent_name: str = "Priya"
+    agent_name: str = "Riya"
     broker_whatsapp_number: Optional[str] = None
     system_prompt: Optional[str] = None
 
@@ -237,31 +237,15 @@ async def dispatch_callback_call(
             logger.warning(f"Cannot dispatch callback to {phone}: LiveKit credentials missing")
             return
 
-        agent_name = "Priya"
-        agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
-        business_name = "Kaamdhenu Real Estate"
-        service_type = "Luxury 2BHK/3BHK Apartments"
-        broker_phone = os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
-        broker_email = os.getenv("DEFAULT_BROKER_EMAIL", "")
-        calcom_event_type_id = os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
-        agent_id = None
-
-        if campaign_id:
-            camps = await list_campaigns()
-            camp = next((c for c in camps if c.get("id") == campaign_id), None)
-            if camp:
-                ag_id = camp.get("agent_profile_id")
-                if ag_id:
-                    ag_prof = await get_agent_profile(ag_id)
-                    if ag_prof:
-                        agent_id = ag_id
-                        agent_name = ag_prof.get("agent_name") or agent_name
-                        agent_voice = ag_prof.get("voice") or agent_voice
-                        business_name = ag_prof.get("business_name") or business_name
-                        service_type = ag_prof.get("service_type") or service_type
-                        broker_phone = ag_prof.get("broker_phone") or broker_phone
-                        broker_email = ag_prof.get("broker_email") or broker_email
-                        calcom_event_type_id = ag_prof.get("calcom_event_type_id") or calcom_event_type_id
+        profile = await find_agent_profile(campaign_id=campaign_id)
+        agent_id = profile.get("id") or None
+        agent_name = profile.get("name") or profile.get("agent_name") or "Riya"
+        agent_voice = profile.get("voice") or os.getenv("GEMINI_TTS_VOICE", "Aoede")
+        business_name = profile.get("business_name") or "Kaamdhenu Real Estate"
+        service_type = profile.get("service_type") or "Luxury 2BHK/3BHK Apartments"
+        broker_phone = profile.get("broker_phone") or profile.get("broker_whatsapp") or os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
+        broker_email = profile.get("broker_email") or os.getenv("DEFAULT_BROKER_EMAIL", "")
+        calcom_event_type_id = profile.get("calcom_event_type_id") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
 
         room_name = f"callback-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
         custom_ctx = "Context: This is a scheduled callback requested by the lead earlier.\n"
@@ -300,6 +284,7 @@ async def dispatch_callback_call(
             "agent_id": agent_id,
             "agent_name": agent_name,
             "agent_voice": agent_voice,
+            "voice": agent_voice,
             "business_name": business_name,
             "service_type": service_type,
             "broker_phone": broker_phone,
@@ -705,6 +690,7 @@ async def api_provision_inbound():
         await push_unified_log("SIP", "error", f"Inbound provisioning error: {e}")
         raise HTTPException(500, str(e))
 
+@app.post("/api/call/single")
 @app.post("/api/dispatch-call")
 @app.post("/api/call")
 async def api_dispatch(req: SingleCallReq):
@@ -718,28 +704,29 @@ async def api_dispatch(req: SingleCallReq):
     if not phone:
         raise HTTPException(400, "Phone number required")
 
-    agent_name = req.agent_name
-    agent_voice = req.agent_voice or os.getenv("GEMINI_TTS_VOICE", "Aoede")
-    business_name = req.business_name
-    service_type = req.service_type
-    broker_phone = req.broker_phone
-    broker_email = req.broker_email or os.getenv("DEFAULT_BROKER_EMAIL", "")
-    calcom_event_type_id = req.calcom_event_type_id or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
-    system_prompt = req.custom_prompt or req.system_prompt
-
-    if req.agent_id:
-        profile = await get_agent_profile(req.agent_id)
-        if profile:
-            agent_name = profile.get("agent_name") or profile.get("name") or agent_name
-            agent_voice = profile.get("voice") or agent_voice
-            business_name = profile.get("business_name") or business_name
-            service_type = profile.get("service_type") or service_type
-            system_prompt = req.custom_prompt or req.system_prompt or profile.get("system_prompt")
-            broker_phone = req.broker_phone or profile.get("broker_phone") or profile.get("broker_whatsapp")
-            broker_email = req.broker_email or profile.get("broker_email") or broker_email
-            calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or calcom_event_type_id
-
     campaign_id = req.campaign_id or None
+
+    # 1. Resolve agent profile dynamically (supports custom saved profile, agent_id, agent_name, or default 'Riya')
+    profile = await find_agent_profile(
+        agent_id=req.agent_id,
+        agent_name=req.agent_name,
+        campaign_id=campaign_id
+    )
+
+    agent_id = req.agent_id or profile.get("id") or "default"
+    agent_name = req.agent_name or profile.get("name") or profile.get("agent_name") or "Riya"
+    agent_voice = req.agent_voice or profile.get("voice") or os.getenv("GEMINI_TTS_VOICE", "Aoede")
+    business_name = req.business_name or profile.get("business_name") or "Kaamdhenu Real Estate"
+    service_type = req.service_type or profile.get("service_type") or "Luxury Properties"
+    broker_phone = req.broker_phone or profile.get("broker_phone") or profile.get("broker_whatsapp") or os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
+    broker_email = req.broker_email or profile.get("broker_email") or os.getenv("DEFAULT_BROKER_EMAIL", "")
+    calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
+
+    # Priority for system_prompt:
+    # 1. Explicitly passed in single call form (req.custom_prompt or req.system_prompt)
+    # 2. The agent profile's saved system_prompt
+    raw_prompt = req.custom_prompt or req.system_prompt or profile.get("system_prompt") or ""
+
     project_name = req.project_name or business_name
     brochure_url = req.brochure_url or ""
     site_address = req.site_address or ""
@@ -755,11 +742,12 @@ async def api_dispatch(req: SingleCallReq):
             pickup_drop_notes = req.pickup_drop_notes or camp.get("pickup_drop_notes") or pickup_drop_notes
             project_highlights = req.project_highlights or camp.get("project_highlights") or project_highlights
 
+    # Build final system prompt strictly incorporating the active agent's persona
     final_prompt = get_base_system_prompt(
         agent_name=agent_name,
         business_name=project_name or business_name,
-        custom_prompt=system_prompt,
-        lead_name=req.lead_name,
+        custom_prompt=raw_prompt,
+        lead_name=req.lead_name or "there",
         service_type=service_type
     )
 
@@ -767,16 +755,17 @@ async def api_dispatch(req: SingleCallReq):
     meta = {
         "direction": "outbound",
         "phone_number": phone,
-        "lead_name": req.lead_name,
+        "lead_name": req.lead_name or "there",
         "campaign_id": campaign_id or "",
         "project_name": project_name,
         "brochure_url": brochure_url,
         "site_address": site_address,
         "pickup_drop_notes": pickup_drop_notes,
         "project_highlights": project_highlights,
-        "agent_id": req.agent_id,
+        "agent_id": agent_id,
         "agent_name": agent_name,
         "agent_voice": agent_voice,
+        "voice": agent_voice,
         "business_name": business_name,
         "service_type": service_type,
         "broker_phone": broker_phone,

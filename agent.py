@@ -354,7 +354,7 @@ async def entrypoint(ctx: agents.JobContext):
     lead_name = "there"
     business_name = "Kaamdhenu Real Estate"
     service_type = "Luxury Properties"
-    agent_name = "Priya"
+    agent_name = "Riya"
     agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
     campaign_id = None
     broker_phone = None
@@ -389,8 +389,8 @@ async def entrypoint(ctx: agents.JobContext):
                 lead_name = m.get("lead_name", lead_name)
                 business_name = m.get("business_name", business_name)
                 service_type = m.get("service_type", service_type)
-                agent_name = m.get("agent_name", agent_name)
-                agent_voice = m.get("agent_voice") or agent_voice
+                agent_name = m.get("agent_name") or m.get("name") or agent_name
+                agent_voice = m.get("voice") or m.get("agent_voice") or agent_voice
                 campaign_id = m.get("campaign_id")
                 broker_phone = m.get("broker_phone")
                 broker_email = m.get("broker_email")
@@ -469,13 +469,16 @@ async def entrypoint(ctx: agents.JobContext):
         # ===================================================================
         # PHASE 4: BUILD SYSTEM PROMPT
         # ===================================================================
-        system_prompt = get_base_system_prompt(
-            agent_name=agent_name,
-            business_name=business_name,
-            custom_prompt=custom_prompt,
-            lead_name=lead_name,
-            service_type=service_type
-        )
+        if custom_prompt and custom_prompt.strip():
+            system_prompt = custom_prompt.strip()
+        else:
+            system_prompt = get_base_system_prompt(
+                agent_name=agent_name,
+                business_name=business_name,
+                custom_prompt=None,
+                lead_name=lead_name,
+                service_type=service_type
+            )
 
         # Ensure language mirroring layer is present
         if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
@@ -512,7 +515,7 @@ async def entrypoint(ctx: agents.JobContext):
 - STRICT RULE: You ALREADY KNOW the user's name is {lead_name}.
 - ABSOLUTELY NEVER ask "Aapka naam kya hai?" or "May I know your name?" or any variation.
 - ZERO FALSE CLAIMS: ABSOLUTELY NEVER say "Aapne inquiry ki thi", "Aapne property mein interest dikhaya tha", or claim prior inquiry.
-- Introduce yourself as a professional luxury real estate consultant presenting Kaamdhenu's premium residential properties.
+- Introduce yourself as a professional consultant representing {business_name}.
 - Dynamic Greeting: Greet with IST time of day (good morning / afternoon / evening) and ask permission: "Kya abhi aapse do minute baat ho sakti hai?"
 """
             system_prompt = system_prompt + "\n" + dynamic_lead_instruction
@@ -623,11 +626,14 @@ async def entrypoint(ctx: agents.JobContext):
             greeting_text = f"Namaste sir, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
 
         try:
+            active_project = project_name.strip() if project_name and project_name.strip() and project_name.strip() != business_name else ""
+            project_pitch = f"{business_name} ke {active_project} project" if active_project else f"{business_name}"
+
             if is_callback_call:
                 greeting_instruction = (
                     f"Speak this opening line naturally: '{greeting_text}'. "
                     f"Immediately pause and LET THE USER SPEAK. Do NOT pitch immediately. "
-                    f"If the user talks normally, answer their questions and continue property qualification smoothly. "
+                    f"If the user talks normally, answer their questions and continue property qualification smoothly following your system prompt. "
                     f"NEVER suggest or ask: 'Main aapko baad mein call karoon kya?'. Keep your focus on the conversation. "
                     f"Only if the user explicitly says they are still busy or asks to call later, politely acknowledge: 'Theek hai sir/ma'am, main aapko theek us samay par call karti hoon.' and call the schedule_callback tool with the requested time. "
                     f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
@@ -636,7 +642,7 @@ async def entrypoint(ctx: agents.JobContext):
                 greeting_instruction = (
                     f"Speak this opening line naturally: '{greeting_text}'. "
                     f"ABSOLUTE BAN: STRICTLY FORBIDDEN to say 'Aapne inquiry ki thi' or claim the lead made a prior inquiry. "
-                    f"If they say YES or are open to talk, say: 'Thank you! Hum Kalyan-Dombivli aur Thane region mein luxury 1, 2 aur 3 BHK homes offer kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi residential property dekh rahe hain?' "
+                    f"If they say YES or are open to talk, smoothly introduce {project_pitch} and ask about their requirement: 'Thank you! Hum {project_pitch} ki taraf se premium residential properties offer kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi property dekh rahe hain?' "
                     f"If they say NO or BUSY: Respectfully handle callback scheduling without pitching. "
                     f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
                 )

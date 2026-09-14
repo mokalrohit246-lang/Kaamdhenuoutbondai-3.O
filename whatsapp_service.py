@@ -444,12 +444,12 @@ async def generate_whatsapp_ai_response(
                 True
             )
         return (
-            f"Namaste {lead_name}! Thank you for reaching out to Kaamdhenu Real Estate regarding {project_name}. "
-            f"We offer spacious 2 & 3 BHK apartments at {site_address}. How can I assist you with the configurations or booking a site visit?",
+            f"Namaste {lead_name}! Thank you for reaching out regarding {project_name}. "
+            f"We offer spacious luxury apartments at {site_address}. How can I assist you with the configurations or booking a site visit?",
             False
         )
 
-    system_prompt = f"""You are Priya, a Senior Real Estate Sales Consultant at Kaamdhenu Real Estate representing the prestigious project: "{project_name}".
+    system_prompt = f"""You are a Senior Real Estate Sales Consultant representing the prestigious project: "{project_name}".
 
 PROJECT INFORMATION:
 - Project Name: {project_name}

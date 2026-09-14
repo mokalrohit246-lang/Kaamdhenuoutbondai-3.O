@@ -993,6 +993,21 @@ def _init_local_sqlite():
             except Exception:
                 pass
 
+        # Ensure default 'Riya' agent profile exists if table is empty
+        c.execute("SELECT COUNT(*) FROM agent_profiles")
+        if c.fetchone()[0] == 0:
+            now_iso = datetime.utcnow().isoformat()
+            c.execute("""
+                INSERT INTO agent_profiles (id, name, voice, model, system_prompt, enabled_tools, is_default, business_name, assigned_did, broker_whatsapp, broker_email, calcom_event_type_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "agent_default_riya", "Riya", "Aoede", "gemini-2.0-flash-exp",
+                "You are Riya, a professional luxury real estate consultant. Qualify the client's home buying requirements and arrange a confirmed site visit with complimentary cab pickup.",
+                "[]", 1, "Kaamdhenu Real Estate", "", os.getenv("DEFAULT_BROKER_PHONE", "+919892057717"),
+                os.getenv("DEFAULT_BROKER_EMAIL", ""), os.getenv("CALCOM_EVENT_TYPE_ID", "6934775"), now_iso
+            ))
+            logger.info("Seeded default agent profile 'Riya' in local SQLite.")
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1136,6 +1151,86 @@ async def get_agent_profile(pid: str):
         profile["agent_name"] = profile.get("name") or profile.get("agent_name", "")
         profile["broker_phone"] = profile.get("broker_whatsapp") or profile.get("broker_phone", "")
     return profile
+
+async def find_agent_profile(
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    campaign_id: Optional[str] = None
+) -> dict:
+    """
+    Intelligently resolves the active agent profile:
+    1. If campaign_id provided, checks campaign's assigned agent_profile_id.
+    2. If agent_id provided and valid, queries agent_profiles by ID.
+    3. If agent_name provided, matches agent_profiles by name (case-insensitive).
+    4. Fallback to default agent profile (is_default = 1).
+    5. Fallback to agent named 'Riya'.
+    6. Fallback to first agent profile in database.
+    7. Hardcoded default 'Riya' profile if database is empty.
+    """
+    clean_id = str(agent_id or "").strip()
+    clean_name = str(agent_name or "").strip()
+
+    # 1. Campaign agent check
+    if campaign_id and str(campaign_id).lower() not in ("none", "null", "undefined", "", "standalone", "quick"):
+        try:
+            camp = await get_campaign(campaign_id)
+            if camp and camp.get("agent_profile_id"):
+                p = await get_agent_profile(str(camp.get("agent_profile_id")).strip())
+                if p:
+                    return p
+        except Exception as e:
+            logger.warning(f"Campaign agent resolution error: {e}")
+
+    # 2. Lookup by agent_id
+    if clean_id and clean_id.lower() not in ("none", "null", "undefined", "", "-- choose saved agent --", "-- select agent profile --", "default"):
+        p = await get_agent_profile(clean_id)
+        if p:
+            return p
+
+    all_profiles = await list_agent_profiles()
+
+    # 3. Match in all_profiles by ID
+    if clean_id and clean_id.lower() not in ("none", "null", "undefined", "", "-- choose saved agent --", "-- select agent profile --"):
+        for p in all_profiles:
+            if str(p.get("id") or "").strip().lower() == clean_id.lower():
+                return p
+
+    # 4. Match in all_profiles by Name (case-insensitive)
+    if clean_name and clean_name.lower() not in ("none", "null", "undefined", "", "-- choose saved agent --", "-- select agent profile --"):
+        for p in all_profiles:
+            p_name = str(p.get("name") or p.get("agent_name") or "").strip().lower()
+            if p_name == clean_name.lower():
+                return p
+
+    # 5. Fallback to is_default = 1
+    for p in all_profiles:
+        if str(p.get("is_default") or "").lower() in ("1", "true"):
+            return p
+
+    # 6. Fallback to profile named 'Riya'
+    for p in all_profiles:
+        p_name = str(p.get("name") or p.get("agent_name") or "").strip().lower()
+        if p_name == "riya":
+            return p
+
+    # 7. First available profile
+    if all_profiles:
+        return all_profiles[0]
+
+    # 8. Ultimate fallback
+    return {
+        "id": "default_riya",
+        "name": "Riya",
+        "agent_name": "Riya",
+        "voice": os.getenv("GEMINI_TTS_VOICE", "Aoede"),
+        "business_name": "Kaamdhenu Real Estate",
+        "service_type": "Luxury 2BHK/3BHK Apartments",
+        "system_prompt": "You are Riya, a professional luxury real estate consultant. Qualify the client's home buying requirements and arrange a confirmed site visit with complimentary cab pickup.",
+        "broker_phone": os.getenv("DEFAULT_BROKER_PHONE", "+919892057717"),
+        "broker_email": os.getenv("DEFAULT_BROKER_EMAIL", ""),
+        "calcom_event_type_id": os.getenv("CALCOM_EVENT_TYPE_ID", "6934775"),
+        "is_default": 1
+    }
 
 # Campaigns CRUD
 async def list_campaigns():
