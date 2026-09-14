@@ -227,6 +227,79 @@ async def test_webhook_flow_simulation():
 
     print("PASS: Webhook inbound parsing, AI intent evaluation, and outbound reply flow verified.")
 
+async def test_single_call_metadata_resolution():
+    print("\n--- TEST 8: Single Call Metadata & RealEstateTools Resolution ---")
+    from unittest.mock import MagicMock
+    try:
+        import livekit
+    except ImportError:
+        class MockToolContext:
+            def __init__(self, *args, **kwargs):
+                pass
+        mock_lk = MagicMock()
+        mock_llm = MagicMock()
+        mock_llm.function_tool = lambda f: f
+        mock_llm.ToolContext = MockToolContext
+        mock_lk.agents = MagicMock()
+        mock_lk.agents.llm = mock_llm
+        mock_lk.agents.JobContext = object
+        sys.modules["livekit"] = mock_lk
+        sys.modules["livekit.agents"] = mock_lk.agents
+        sys.modules["livekit.agents.llm"] = mock_llm
+        sys.modules["livekit.api"] = mock_lk
+
+    import tools
+    
+    single_call_meta = {
+        "phone_number": "+919876543210",
+        "lead_name": "Vikram Malhotra",
+        "direction": "outbound",
+        "call_id": "test_single_call_101",
+        "campaign_id": None,  # Standalone single call without campaign
+        "project_name": "Kaamdhenu Solitaire",
+        "brochure_url": "https://example.com/brochures/solitaire.pdf",
+        "site_address": "Sector 45, Noida Expressway",
+        "pickup_drop_notes": "Complimentary Cab Pickup from Botanical Garden Metro",
+        "project_highlights": "Ultra-Luxury 3 BHK & 4 BHK Golf View Residences"
+    }
+
+    # Initialize RealEstateTools with single call metadata
+    re_tools = tools.RealEstateTools(
+        ctx=None,
+        phone_number=single_call_meta["phone_number"],
+        lead_name=single_call_meta["lead_name"],
+        direction=single_call_meta["direction"],
+        call_id=single_call_meta["call_id"],
+        campaign_id=single_call_meta["campaign_id"],
+        project_name=single_call_meta["project_name"],
+        brochure_url=single_call_meta["brochure_url"],
+        site_address=single_call_meta["site_address"],
+        pickup_drop_notes=single_call_meta["pickup_drop_notes"],
+        project_highlights=single_call_meta["project_highlights"]
+    )
+    assert re_tools.project_name == "Kaamdhenu Solitaire"
+    assert re_tools.brochure_url == "https://example.com/brochures/solitaire.pdf"
+    assert re_tools.site_address == "Sector 45, Noida Expressway"
+    assert re_tools.pickup_drop_notes == "Complimentary Cab Pickup from Botanical Garden Metro"
+    assert re_tools.project_highlights == "Ultra-Luxury 3 BHK & 4 BHK Golf View Residences"
+
+    # Test send_project_brochure without campaign ID
+    brochure_result = await re_tools.send_project_brochure(phone_number="+919876543210")
+    print(f"send_project_brochure result: {brochure_result}")
+    assert "Maine WhatsApp par brochure" in brochure_result
+
+    # Test book_site_visit without campaign ID
+    visit_result = await re_tools.book_site_visit(
+        visit_datetime="tomorrow at 11:00 AM",
+        pickup_required=True,
+        pickup_address="Noida City Center Metro",
+        client_name="Vikram Malhotra"
+    )
+    print(f"book_site_visit result: {visit_result}")
+    assert "Site visit confirmed" in visit_result
+
+    print("PASS: Single call metadata successfully bound to RealEstateTools and executed without campaign ID.")
+
 async def main():
     print("==================================================")
     print("RUNNING META WHATSAPP CLOUD API INTEGRATION TESTS")
@@ -238,8 +311,9 @@ async def main():
     await test_ai_sales_guardrails()
     await test_database_integration()
     await test_webhook_flow_simulation()
+    await test_single_call_metadata_resolution()
     print("\n==================================================")
-    print("ALL TESTS PASSED SUCCESSFULLY! (7/7) [OK]")
+    print("ALL TESTS PASSED SUCCESSFULLY! (8/8) [OK]")
     print("==================================================")
 
 if __name__ == "__main__":

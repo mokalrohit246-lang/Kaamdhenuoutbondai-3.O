@@ -343,6 +343,11 @@ async def entrypoint(ctx: agents.JobContext):
     lead_notes = ""
     lead_bhk = ""
     lead_budget = ""
+    project_name = ""
+    brochure_url = ""
+    site_address = ""
+    pickup_drop_notes = ""
+    project_highlights = ""
 
     try:
         # ===================================================================
@@ -371,6 +376,11 @@ async def entrypoint(ctx: agents.JobContext):
                 lead_notes = m.get("notes") or m.get("context") or m.get("additional_info") or ""
                 lead_bhk = m.get("bhk") or m.get("bhk_requirement") or ""
                 lead_budget = m.get("budget") or ""
+                project_name = m.get("project_name") or business_name
+                brochure_url = m.get("brochure_url") or ""
+                site_address = m.get("site_address") or ""
+                pickup_drop_notes = m.get("pickup_drop_notes") or ""
+                project_highlights = m.get("project_highlights") or ""
             except Exception as e:
                 logger.warning(f"Metadata parse warning: {e}")
 
@@ -494,7 +504,12 @@ async def entrypoint(ctx: agents.JobContext):
             broker_phone=broker_phone,
             broker_email=broker_email,
             calcom_api_key=calcom_api_key,
-            calcom_event_type_id=calcom_event_type_id
+            calcom_event_type_id=calcom_event_type_id,
+            brochure_url=brochure_url,
+            project_name=project_name,
+            site_address=site_address,
+            pickup_drop_notes=pickup_drop_notes,
+            project_highlights=project_highlights
         )
         # Pre-populate qualification data from metadata so agent has context from the start
         if valid_lead_name:

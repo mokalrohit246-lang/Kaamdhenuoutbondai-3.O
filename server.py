@@ -70,6 +70,12 @@ class SingleCallReq(BaseModel):
     notes: Optional[str] = None
     bhk_requirement: Optional[str] = None
     budget: Optional[str] = None
+    campaign_id: Optional[str] = None
+    project_name: Optional[str] = None
+    brochure_url: Optional[str] = None
+    site_address: Optional[str] = None
+    pickup_drop_notes: Optional[str] = None
+    project_highlights: Optional[str] = None
 
 class ClientNumReq(BaseModel):
     id: Optional[str] = None
@@ -721,9 +727,25 @@ async def api_dispatch(req: SingleCallReq):
             broker_email = req.broker_email or profile.get("broker_email") or broker_email
             calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or calcom_event_type_id
 
+    campaign_id = req.campaign_id or None
+    project_name = req.project_name or business_name
+    brochure_url = req.brochure_url or ""
+    site_address = req.site_address or ""
+    pickup_drop_notes = req.pickup_drop_notes or ""
+    project_highlights = req.project_highlights or ""
+
+    if campaign_id:
+        camp = await get_campaign(campaign_id)
+        if camp:
+            project_name = req.project_name or camp.get("project_name") or camp.get("name") or project_name
+            brochure_url = req.brochure_url or camp.get("brochure_url") or brochure_url
+            site_address = req.site_address or camp.get("site_address") or site_address
+            pickup_drop_notes = req.pickup_drop_notes or camp.get("pickup_drop_notes") or pickup_drop_notes
+            project_highlights = req.project_highlights or camp.get("project_highlights") or project_highlights
+
     final_prompt = get_base_system_prompt(
         agent_name=agent_name,
-        business_name=business_name,
+        business_name=project_name or business_name,
         custom_prompt=system_prompt,
         lead_name=req.lead_name,
         service_type=service_type
@@ -734,6 +756,12 @@ async def api_dispatch(req: SingleCallReq):
         "direction": "outbound",
         "phone_number": phone,
         "lead_name": req.lead_name,
+        "campaign_id": campaign_id or "",
+        "project_name": project_name,
+        "brochure_url": brochure_url,
+        "site_address": site_address,
+        "pickup_drop_notes": pickup_drop_notes,
+        "project_highlights": project_highlights,
         "agent_id": req.agent_id,
         "agent_name": agent_name,
         "agent_voice": agent_voice,
@@ -814,6 +842,11 @@ async def api_create_campaign(req: Request):
         calendar_mode = payload.get("calendar_mode", "auto")
         custom_event_id = payload.get("custom_event_id") or payload.get("calcom_event_type_id", "")
         contacts = payload.get("contacts", [])
+        project_name = payload.get("project_name") or payload.get("camp_project_name") or name
+        site_address = payload.get("site_address") or payload.get("camp_site_address") or ""
+        pickup_drop_notes = payload.get("pickup_drop_notes") or payload.get("camp_pickup_notes") or ""
+        project_highlights = payload.get("project_highlights") or payload.get("camp_highlights") or ""
+        brochure_url = payload.get("brochure_url") or ""
     else:
         form = await req.form()
         name = form.get("name", "Untitled")
@@ -827,6 +860,28 @@ async def api_create_campaign(req: Request):
         broker_email = form.get("broker_email", "")
         calendar_mode = form.get("calendar_mode", "auto")
         custom_event_id = form.get("custom_event_id") or form.get("calcom_event_type_id", "")
+        project_name = form.get("project_name") or form.get("camp_project_name") or name
+        site_address = form.get("site_address") or form.get("camp_site_address") or ""
+        pickup_drop_notes = form.get("pickup_drop_notes") or form.get("camp_pickup_notes") or ""
+        project_highlights = form.get("project_highlights") or form.get("camp_highlights") or ""
+        brochure_url = form.get("brochure_url") or ""
+
+        # Auto-upload brochure file if provided in campaign creation form
+        brochure_file = form.get("brochure_file") or form.get("camp_brochure_file")
+        if brochure_file and hasattr(brochure_file, "filename") and brochure_file.filename and hasattr(brochure_file, "read"):
+            try:
+                b_bytes = await brochure_file.read()
+                if b_bytes:
+                    orig_bname = brochure_file.filename or "brochure.pdf"
+                    clean_b = re.sub(r'[^a-zA-Z0-9._-]', '_', orig_bname)
+                    stored_n = f"camp_{int(time.time())}_{clean_b}"
+                    c_type = getattr(brochure_file, "content_type", "application/pdf") or "application/pdf"
+                    uploaded_url = await upload_brochure_file(stored_n, b_bytes, c_type)
+                    if uploaded_url:
+                        brochure_url = uploaded_url
+            except Exception as up_err:
+                logger.warning(f"Failed to auto-upload campaign brochure: {up_err}")
+
         contacts_file = form.get("contacts_file")
         contacts = []
         if contacts_file and hasattr(contacts_file, 'read'):
@@ -890,10 +945,22 @@ async def api_create_campaign(req: Request):
         "calendar_mode": calendar_mode,
         "calcom_event_type_id": str(event_type_id),
         "contacts": json.dumps(contacts),
-        "total_contacts": len(contacts)
+        "total_contacts": len(contacts),
+        "project_name": project_name or name,
+        "site_address": site_address,
+        "pickup_drop_notes": pickup_drop_notes,
+        "project_highlights": project_highlights,
+        "brochure_url": brochure_url
     }
     cid = await create_campaign(data)
-    return {"status": "created", "id": cid, "total_contacts": len(contacts), "calcom_event_type_id": event_type_id}
+    return {
+        "status": "created",
+        "id": cid,
+        "total_contacts": len(contacts),
+        "calcom_event_type_id": event_type_id,
+        "brochure_url": brochure_url,
+        "project_name": project_name
+    }
 
 @app.post("/api/campaigns/{cid}/pause")
 async def api_pause_campaign(cid: str):
@@ -990,7 +1057,7 @@ async def upload_brochure_file(filename: str, file_bytes: bytes, content_type: s
     # 2. Try Supabase Storage bucket 'campaign-brochures'
     supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "")
-    if supabase_url and supabase_key:
+    if supabase_url and supabase_key and httpx is not None:
         try:
             upload_url = f"{supabase_url}/storage/v1/object/campaign-brochures/{filename}"
             headers = {
@@ -1010,6 +1077,17 @@ async def upload_brochure_file(filename: str, file_bytes: bytes, content_type: s
             logger.warning(f"Supabase storage upload error: {e}")
 
     return fallback_url
+
+@app.post("/api/upload-brochure")
+async def api_upload_standalone_brochure(file: UploadFile = File(...)):
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    content = await file.read()
+    orig_name = file.filename or "brochure.pdf"
+    safe_name = f"brochure_{int(time.time())}_{re.sub(r'[^a-zA-Z0-9._-]', '_', orig_name)}"
+    content_type = file.content_type or "application/pdf"
+    brochure_url = await upload_brochure_file(safe_name, content, content_type)
+    return {"ok": True, "brochure_url": brochure_url, "filename": safe_name}
 
 @app.post("/api/campaigns/{cid}/upload-brochure")
 async def api_upload_campaign_brochure(cid: str, file: UploadFile = File(...)):

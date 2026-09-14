@@ -34,7 +34,12 @@ class RealEstateTools(llm.ToolContext):
         broker_email: Optional[str] = None,
         calcom_api_key: Optional[str] = None,
         calcom_event_type_id: Optional[str] = None,
-        sheets_webhook: Optional[str] = None
+        sheets_webhook: Optional[str] = None,
+        brochure_url: Optional[str] = None,
+        project_name: Optional[str] = None,
+        site_address: Optional[str] = None,
+        pickup_drop_notes: Optional[str] = None,
+        project_highlights: Optional[str] = None
     ):
         self.ctx = ctx
         self.phone_number = phone_number
@@ -47,6 +52,11 @@ class RealEstateTools(llm.ToolContext):
         self.calcom_api_key = calcom_api_key or os.getenv("CALCOM_API_KEY", "cal_live_b3cec47f49e2eeb34a38f0500002a22a")
         self.calcom_event_type_id = calcom_event_type_id or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
         self.sheets_webhook = sheets_webhook
+        self.brochure_url = brochure_url or ""
+        self.project_name = project_name or ""
+        self.site_address = site_address or ""
+        self.pickup_drop_notes = pickup_drop_notes or ""
+        self.project_highlights = project_highlights or ""
         self._call_start_time = time.time()
         self.recording_url: Optional[str] = None
         self._log_saved = False
@@ -234,10 +244,11 @@ class RealEstateTools(llm.ToolContext):
             # Trigger structured WhatsApp appointment confirmation
             try:
                 camp = await get_campaign(self.campaign_id) if self.campaign_id else None
-                p_name = (camp.get("project_name") if camp else None) or "Kaamdhenu Premium Residences"
-                p_addr = (camp.get("site_address") if camp else None) or "Near City Center, Prime Metro Corridor"
-                p_high = (camp.get("project_highlights") if camp else None) or ""
-                p_brochure = (camp.get("brochure_url") if camp else None) or ""
+                p_name = self.project_name or (camp.get("project_name") if camp else None) or "Kaamdhenu Premium Residences"
+                p_addr = self.site_address or (camp.get("site_address") if camp else None) or "Near City Center, Prime Metro Corridor"
+                p_high = self.project_highlights or (camp.get("project_highlights") if camp else None) or ""
+                p_brochure = self.brochure_url or (camp.get("brochure_url") if camp else None) or ""
+                p_pickup_notes = self.pickup_drop_notes or (camp.get("pickup_drop_notes") if camp else None) or ""
 
                 lead_d = {
                     "name": client_name or self.client_name or self.lead_name,
@@ -245,17 +256,19 @@ class RealEstateTools(llm.ToolContext):
                     "project_name": p_name,
                     "site_address": p_addr,
                     "project_highlights": p_high,
-                    "brochure_url": p_brochure
+                    "brochure_url": p_brochure,
+                    "pickup_drop_notes": p_pickup_notes
                 }
                 apt_d = {
                     "date": date,
                     "time": vtime,
                     "pickup_required": pickup_required,
-                    "pickup_address": pickup_address,
+                    "pickup_address": pickup_address or p_pickup_notes,
                     "project_name": p_name,
                     "site_address": p_addr,
                     "project_highlights": p_high,
-                    "brochure_url": p_brochure
+                    "brochure_url": p_brochure,
+                    "pickup_drop_notes": p_pickup_notes
                 }
                 asyncio.create_task(send_appointment_confirmation(
                     to_phone=self.phone_number,
@@ -448,8 +461,8 @@ class RealEstateTools(llm.ToolContext):
         self.whatsapp_status = "✅ Sent Auto"
 
         camp = await get_campaign(self.campaign_id) if self.campaign_id else None
-        p_name = (camp.get("project_name") if camp else None) or "Kaamdhenu Premium Residences"
-        brochure_url = (camp.get("brochure_url") if camp else None) or ""
+        p_name = self.project_name or (camp.get("project_name") if camp else None) or "Kaamdhenu Premium Residences"
+        brochure_url = self.brochure_url or (camp.get("brochure_url") if camp else None) or ""
 
         lead_disp_name = self.client_name or self.lead_name or "there"
 

@@ -80,8 +80,6 @@ async def book_appointment(
 ) -> str:
     clean_phone_digits = re.sub(r'\D', '', str(phone or ""))
     full_id = id or f"apt_{clean_phone_digits[-10:]}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    db = await _adb()
-
     clean_p = str(phone or "").strip()
     row = {
         "id": full_id,
@@ -99,13 +97,17 @@ async def book_appointment(
         row["calcom_booking_uid"] = calcom_booking_uid
 
     try:
-        await db.table("appointments").upsert(row, on_conflict="id").execute()
-    except Exception as e:
-        logger.warning(f"book_appointment upsert error: {e}")
+        db = await _adb()
         try:
-            await db.table("appointments").insert(row).execute()
-        except Exception as e2:
-            logger.warning(f"book_appointment insert fallback warning: {e2}")
+            await db.table("appointments").upsert(row, on_conflict="id").execute()
+        except Exception as e:
+            logger.warning(f"book_appointment upsert error: {e}")
+            try:
+                await db.table("appointments").insert(row).execute()
+            except Exception as e2:
+                logger.warning(f"book_appointment insert fallback warning: {e2}")
+    except Exception as exc:
+        logger.warning(f"Supabase book_appointment warning: {exc}")
 
     return full_id
 
