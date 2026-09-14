@@ -137,22 +137,34 @@ class RealEstateTools(llm.ToolContext):
             from datetime import datetime as _dt
             start_dt = _dt.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M")
             start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    "https://api.cal.com/v1/bookings",
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json={
-                        "eventTypeId": int(event_type_id),
-                        "start": start_iso,
-                        "timeZone": timezone,
-                        "responses": {"name": name, "email": email, "notes": notes},
-                        "metadata": {"source": "KaamdhenuAI"}
-                    }
-                )
-            if resp.status_code in (200, 201):
-                uid = resp.json().get("uid", "")
-                await push_unified_log("Cal.com", "info", f"Cal.com slot synced (UID: {uid})", call_id=self.call_id)
-                return f"Cal.com booked successfully (UID: {uid})."
+            booking_payload = {
+                "eventTypeId": int(event_type_id),
+                "start": start_iso,
+                "timeZone": timezone,
+                "responses": {"name": name, "email": email, "notes": notes},
+                "metadata": {"source": "KaamdhenuAI"}
+            }
+            booking_headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            if httpx is not None:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post("https://api.cal.com/v1/bookings", headers=booking_headers, json=booking_payload)
+                    if resp.status_code in (200, 201):
+                        uid = resp.json().get("uid", "")
+                        await push_unified_log("Cal.com", "info", f"Cal.com slot synced (UID: {uid})", call_id=self.call_id)
+                        return f"Cal.com booked successfully (UID: {uid})."
+            else:
+                import urllib.request
+                import json as _json
+                def _urllib_sync():
+                    d_bytes = _json.dumps(booking_payload).encode("utf-8")
+                    req = urllib.request.Request("https://api.cal.com/v1/bookings", data=d_bytes, headers=booking_headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=15) as r:
+                        return r.getcode(), _json.loads(r.read().decode("utf-8"))
+                code, res_json = await asyncio.to_thread(_urllib_sync)
+                if code in (200, 201):
+                    uid = res_json.get("uid", "")
+                    await push_unified_log("Cal.com", "info", f"Cal.com slot synced (UID: {uid})", call_id=self.call_id)
+                    return f"Cal.com booked successfully (UID: {uid})."
             return "Cal.com booking noted."
         except Exception as exc:
             await push_unified_log("Cal.com", "warning", f"Cal.com sync error: {exc}", call_id=self.call_id)
@@ -206,14 +218,30 @@ class RealEstateTools(llm.ToolContext):
                     "metadata": {"broker_phone": self.broker_phone, "broker_email": self.broker_email},
                     "timeZone": os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
                 }
-                async with httpx.AsyncClient(timeout=4.0) as client:
-                    resp = await client.post(url, json=body)
-                    if resp.status_code in (200, 201):
-                        data = resp.json()
-                        calcom_booking_uid = data.get("booking", {}).get("uid") or data.get("uid", "")
-                        await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
-                    else:
-                        logger.warning(f"Cal.com non-200 response: {resp.status_code} - {resp.text}")
+                if httpx is not None:
+                    async with httpx.AsyncClient(timeout=4.0) as client:
+                        resp = await client.post(url, json=body)
+                        if resp.status_code in (200, 201):
+                            data = resp.json()
+                            calcom_booking_uid = data.get("booking", {}).get("uid") or data.get("uid", "")
+                            await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
+                        else:
+                            logger.warning(f"Cal.com non-200 response: {resp.status_code} - {resp.text}")
+                else:
+                    import urllib.request
+                    import json as _json
+                    def _urllib_book():
+                        d_bytes = _json.dumps(body).encode("utf-8")
+                        req = urllib.request.Request(url, data=d_bytes, headers={"Content-Type": "application/json"}, method="POST")
+                        with urllib.request.urlopen(req, timeout=4.0) as resp:
+                            return resp.getcode(), _json.loads(resp.read().decode("utf-8"))
+                    try:
+                        c_code, c_data = await asyncio.to_thread(_urllib_book)
+                        if c_code in (200, 201):
+                            calcom_booking_uid = c_data.get("booking", {}).get("uid") or c_data.get("uid", "")
+                            await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
+                    except Exception as ub_err:
+                        logger.warning(f"Cal.com urllib booking error: {ub_err}")
             except Exception as cal_err:
                 logger.warning(f"Cal.com async booking fallback: {cal_err}")
                 await push_unified_log("Cal.com", "warning", f"Cal.com sync fallback: {cal_err}", call_id=self.call_id)

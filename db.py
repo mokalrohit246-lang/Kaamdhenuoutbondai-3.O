@@ -861,8 +861,18 @@ async def get_contact_memory(phone: Optional[str] = None):
 
 async def sync_google_sheets_row(webhook_url: str, payload: dict):
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(webhook_url, json=payload)
+        if httpx is not None:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(webhook_url, json=payload)
+        else:
+            import urllib.request
+            import json as _json
+            data_bytes = _json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(webhook_url, data=data_bytes, headers={"Content-Type": "application/json"}, method="POST")
+            def _sync():
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.getcode()
+            await asyncio.to_thread(_sync)
     except Exception as e:
         await push_unified_log("Webhook", "warning", f"Google Sheets sync failed: {e}")
 

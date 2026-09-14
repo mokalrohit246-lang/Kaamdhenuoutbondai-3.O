@@ -8,6 +8,12 @@ import random
 import re
 import ssl
 import time
+import urllib.request
+import urllib.error
+try:
+    import httpx
+except ImportError:
+    httpx = None
 import certifi
 import aiohttp
 from pathlib import Path
@@ -908,24 +914,39 @@ async def api_create_campaign(req: Request):
             clean_slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')[:20]
             rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
             slug = f"{clean_slug}-{rand_suffix}" if clean_slug else f"site-visit-{rand_suffix}"
-            async with httpx.AsyncClient(timeout=4.0) as client:
-                res = await client.post(
-                    f"https://api.cal.com/v1/event-types?apiKey={calcom_api_key}",
-                    json={
-                        "title": f"{name} - Site Visit",
-                        "slug": slug,
-                        "length": 30,
-                        "description": f"Site visits for {name}"
-                    }
-                )
-                if res.status_code in (200, 201):
-                    res_json = res.json()
-                    new_id = res_json.get("event_type", {}).get("id") or res_json.get("id")
-                    if new_id:
-                        event_type_id = str(new_id)
-                        await push_unified_log("Cal.com", "info", f"Auto-created Cal.com event type '{slug}' (ID: {event_type_id}) for campaign '{name}'")
-                else:
-                    logger.warning(f"Cal.com create event-type returned {res.status_code}: {res.text}")
+            cal_url = f"https://api.cal.com/v1/event-types?apiKey={calcom_api_key}"
+            cal_payload = {
+                "title": f"{name} - Site Visit",
+                "slug": slug,
+                "length": 30,
+                "description": f"Site visits for {name}"
+            }
+            if httpx is not None:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    res = await client.post(cal_url, json=cal_payload)
+                    if res.status_code in (200, 201):
+                        res_json = res.json()
+                        new_id = res_json.get("event_type", {}).get("id") or res_json.get("id")
+                        if new_id:
+                            event_type_id = str(new_id)
+                            await push_unified_log("Cal.com", "info", f"Auto-created Cal.com event type '{slug}' (ID: {event_type_id}) for campaign '{name}'")
+                    else:
+                        logger.warning(f"Cal.com create event-type returned {res.status_code}: {res.text}")
+            else:
+                def _urllib_cal():
+                    data_bytes = json.dumps(cal_payload).encode('utf-8')
+                    req = urllib.request.Request(cal_url, data=data_bytes, headers={"Content-Type": "application/json"}, method="POST")
+                    with urllib.request.urlopen(req, timeout=4.0) as resp:
+                        return resp.getcode(), json.loads(resp.read().decode('utf-8'))
+                try:
+                    c_code, c_json = await asyncio.to_thread(_urllib_cal)
+                    if c_code in (200, 201):
+                        new_id = c_json.get("event_type", {}).get("id") or c_json.get("id")
+                        if new_id:
+                            event_type_id = str(new_id)
+                            await push_unified_log("Cal.com", "info", f"Auto-created Cal.com event type '{slug}' (ID: {event_type_id}) for campaign '{name}'")
+                except Exception as c_err:
+                    logger.warning(f"Cal.com urllib creation fallback: {c_err}")
         except Exception as exc:
             logger.warning(f"Cal.com auto event-type creation fallback: {exc}")
             await push_unified_log("Cal.com", "warning", f"Cal.com auto event creation fallback: {exc}")
@@ -1072,24 +1093,39 @@ async def upload_brochure_file(filename: str, file_bytes: bytes, content_type: s
     # 2. Try Supabase Storage bucket 'campaign-brochures'
     supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "")
-    if supabase_url and supabase_key and httpx is not None:
-        try:
-            upload_url = f"{supabase_url}/storage/v1/object/campaign-brochures/{filename}"
-            headers = {
-                "Authorization": f"Bearer {supabase_key}",
-                "Content-Type": content_type,
-                "x-upsert": "true"
-            }
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                res = await client.post(upload_url, headers=headers, content=file_bytes)
-                if res.status_code in (200, 201):
+    if supabase_url and supabase_key:
+        upload_url = f"{supabase_url}/storage/v1/object/campaign-brochures/{filename}"
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": content_type,
+            "x-upsert": "true"
+        }
+        if httpx is not None:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    res = await client.post(upload_url, headers=headers, content=file_bytes)
+                    if res.status_code in (200, 201):
+                        public_url = f"{supabase_url}/storage/v1/object/public/campaign-brochures/{filename}"
+                        logger.info(f"Brochure uploaded to Supabase Storage: {public_url}")
+                        return public_url
+                    else:
+                        logger.warning(f"Supabase storage upload status {res.status_code}: {res.text}")
+            except Exception as e:
+                logger.warning(f"Supabase storage upload error (httpx): {e}")
+        else:
+            # Fallback to urllib.request if httpx is not installed
+            def _urllib_upload():
+                req = urllib.request.Request(upload_url, data=file_bytes, headers=headers, method="POST")
+                with urllib.request.urlopen(req, timeout=15.0) as resp:
+                    return resp.getcode()
+            try:
+                status_code = await asyncio.to_thread(_urllib_upload)
+                if status_code in (200, 201):
                     public_url = f"{supabase_url}/storage/v1/object/public/campaign-brochures/{filename}"
-                    logger.info(f"Brochure uploaded to Supabase Storage: {public_url}")
+                    logger.info(f"Brochure uploaded to Supabase Storage (urllib): {public_url}")
                     return public_url
-                else:
-                    logger.warning(f"Supabase storage upload status {res.status_code}: {res.text}")
-        except Exception as e:
-            logger.warning(f"Supabase storage upload error: {e}")
+            except Exception as ue:
+                logger.warning(f"Supabase storage upload error (urllib): {ue}")
 
     return fallback_url
 

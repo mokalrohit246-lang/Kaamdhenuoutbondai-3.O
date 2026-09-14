@@ -7,6 +7,12 @@ import ssl
 import time
 from datetime import datetime, timezone, timedelta
 import certifi
+import urllib.request
+import urllib.error
+try:
+    import httpx
+except ImportError:
+    httpx = None
 from dotenv import load_dotenv
 
 _orig_ssl = ssl.create_default_context
@@ -269,19 +275,37 @@ Conversation Transcript:
                 "contents": [{"parts": [{"text": prompt_text}]}],
                 "generationConfig": {"response_mime_type": "application/json"}
             }
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-                        parsed = json.loads(raw_json_str)
-                        if isinstance(parsed, dict):
-                            for k, v in parsed.items():
-                                if v is not None and v != "":
-                                    default_result[k] = v
-                            return default_result
+            parsed = None
+            if httpx is not None:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                            parsed = json.loads(raw_json_str)
+            else:
+                def _urllib_gemini():
+                    data_bytes = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(url, data=data_bytes, headers={"Content-Type": "application/json"}, method="POST")
+                    with urllib.request.urlopen(req, timeout=8.0) as resp:
+                        return resp.getcode(), json.loads(resp.read().decode("utf-8"))
+                try:
+                    g_code, g_data = await asyncio.to_thread(_urllib_gemini)
+                    if g_code == 200:
+                        candidates = g_data.get("candidates", [])
+                        if candidates:
+                            raw_json_str = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                            parsed = json.loads(raw_json_str)
+                except Exception as ug_err:
+                    logger.warning(f"Gemini urllib extraction fallback: {ug_err}")
+
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    if v is not None and v != "":
+                        default_result[k] = v
+                return default_result
         except Exception as llm_err:
             logger.warning(f"LLM structured extraction warning: {llm_err}")
 
