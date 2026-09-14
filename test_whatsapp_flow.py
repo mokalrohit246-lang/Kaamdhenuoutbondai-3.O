@@ -300,6 +300,101 @@ async def test_single_call_metadata_resolution():
 
     print("PASS: Single call metadata successfully bound to RealEstateTools and executed without campaign ID.")
 
+async def test_brochure_upload_resilience():
+    print("\n--- TEST 9: Brochure Upload Resilience (Standalone & Campaign Fallbacks) ---")
+    from io import BytesIO
+    from unittest.mock import MagicMock
+
+    class MockUploadFile:
+        def __init__(self, filename=None, file=None, content_type="application/pdf"):
+            self.filename = filename
+            self.file = file
+            self.content_type = content_type
+        async def read(self):
+            if self.file:
+                return self.file.read()
+            return b""
+
+    class MockJSONResponse:
+        def __init__(self, content=None, status_code=200):
+            self.content = content
+            self.status_code = status_code
+            self.body = json.dumps(content).encode()
+
+    def mock_decorator(*args, **kwargs):
+        def wrapper(func):
+            return func
+        return wrapper
+
+    mock_app = MagicMock()
+    mock_app.post = mock_decorator
+    mock_app.get = mock_decorator
+    mock_app.delete = mock_decorator
+    mock_app.mount = MagicMock()
+
+    for mod in ["aiohttp", "certifi", "dotenv", "fastapi", "fastapi.responses", "fastapi.staticfiles", "pydantic"]:
+        if mod not in sys.modules:
+            m = MagicMock()
+            if mod == "fastapi":
+                m.UploadFile = MockUploadFile
+                m.File = lambda default=None: default
+                m.FastAPI = lambda *args, **kwargs: mock_app
+                m.HTTPException = Exception
+            elif mod == "fastapi.responses":
+                m.JSONResponse = MockJSONResponse
+            elif mod == "pydantic":
+                m.BaseModel = object
+            sys.modules[mod] = m
+
+    try:
+        from fastapi import UploadFile
+    except Exception:
+        UploadFile = MockUploadFile
+
+    import server
+
+    # 9.1 Test standalone upload with valid PDF
+    pdf_bytes = b"%PDF-1.4 Mock Luxury Tower Brochure Content"
+    mock_file = UploadFile(filename="luxury_tower.pdf", file=BytesIO(pdf_bytes))
+    mock_file.content_type = "application/pdf"
+    res1 = await server.api_upload_standalone_brochure(file=mock_file)
+    # Check if JSONResponse or dict
+    body1 = json.loads(res1.body.decode()) if hasattr(res1, "body") else (getattr(res1, "content", res1))
+    print(f"Standalone upload result: {body1}")
+    assert body1.get("success") is True or body1.get("ok") is True
+    assert body1.get("brochure_url") != ""
+    assert "luxury_tower" in body1.get("filename", "")
+
+    # 9.2 Test standalone upload with empty/missing file (must NOT throw 500, must return 200 JSON)
+    res_empty = await server.api_upload_standalone_brochure(file=None)
+    body_empty = json.loads(res_empty.body.decode()) if hasattr(res_empty, "body") else (getattr(res_empty, "content", res_empty))
+    print(f"Standalone empty upload result: {body_empty}")
+    assert getattr(res_empty, "status_code", 200) == 200
+    assert body_empty.get("success") is False
+    assert "No file" in body_empty.get("error", "")
+
+    # 9.3 Test campaign upload with cid='standalone' (must NOT throw 500 or 404)
+    mock_file_sa = UploadFile(filename="standalone_project.png", file=BytesIO(b"FAKEPNGCONTENT"))
+    mock_file_sa.content_type = "image/png"
+    res_sa = await server.api_upload_campaign_brochure(cid="standalone", file=mock_file_sa)
+    body_sa = json.loads(res_sa.body.decode()) if hasattr(res_sa, "body") else (getattr(res_sa, "content", res_sa))
+    print(f"Campaign 'standalone' upload result: {body_sa}")
+    assert getattr(res_sa, "status_code", 200) == 200
+    assert body_sa.get("success") is True or body_sa.get("ok") is True
+    assert body_sa.get("brochure_url") != ""
+
+    # 9.4 Test campaign upload with non-existent cid (must gracefully succeed and return 200 JSON)
+    mock_file_nx = UploadFile(filename="custom_tower.pdf", file=BytesIO(pdf_bytes))
+    mock_file_nx.content_type = "application/pdf"
+    res_nx = await server.api_upload_campaign_brochure(cid="non_existent_camp_12345", file=mock_file_nx)
+    body_nx = json.loads(res_nx.body.decode()) if hasattr(res_nx, "body") else (getattr(res_nx, "content", res_nx))
+    print(f"Non-existent campaign upload result: {body_nx}")
+    assert getattr(res_nx, "status_code", 200) == 200
+    assert body_nx.get("success") is True or body_nx.get("ok") is True
+    assert body_nx.get("brochure_url") != ""
+
+    print("PASS: Brochure upload resilience verified — zero 500 errors, 100% JSON status 200 responses.")
+
 async def main():
     print("==================================================")
     print("RUNNING META WHATSAPP CLOUD API INTEGRATION TESTS")
@@ -312,8 +407,9 @@ async def main():
     await test_database_integration()
     await test_webhook_flow_simulation()
     await test_single_call_metadata_resolution()
+    await test_brochure_upload_resilience()
     print("\n==================================================")
-    print("ALL TESTS PASSED SUCCESSFULLY! (8/8) [OK]")
+    print("ALL TESTS PASSED SUCCESSFULLY! (9/9) [OK]")
     print("==================================================")
 
 if __name__ == "__main__":

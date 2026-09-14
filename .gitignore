@@ -26,3 +26,9 @@ yarn-error.log*
 # IDE settings
 .vscode/
 .idea/
+
+# Uploaded brochures
+brochures/*
+!brochures/.gitkeep
+static/brochures/*
+!static/brochures/.gitkeep

@@ -1318,9 +1318,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const cid = this.value;
         const previewEl = document.getElementById('sc_brochure_preview');
         const urlInput = document.getElementById('sc_brochure_url');
-        if (!cid) {
-            if (previewEl) previewEl.innerHTML = '';
-            if (urlInput) urlInput.value = '';
+        if (!cid || cid === 'standalone') {
+            if (window._single_call_brochure_url) {
+                if (urlInput) urlInput.value = window._single_call_brochure_url;
+                if (previewEl) previewEl.innerHTML = `📄 <b>Brochure Active (Standalone):</b> <a href="${window._single_call_brochure_url}" target="_blank" style="color:#25D366;text-decoration:underline;font-weight:600;">${window._single_call_brochure_url}</a>`;
+            } else {
+                if (previewEl) previewEl.innerHTML = '';
+                if (urlInput) urlInput.value = '';
+            }
             return;
         }
         const camps = window._cached_campaigns || [];
@@ -1339,8 +1344,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (urlInput) urlInput.value = camp.brochure_url;
                 if (previewEl) previewEl.innerHTML = `📄 <b>Campaign Brochure Active:</b> <a href="${camp.brochure_url}" target="_blank" style="color:#25D366;text-decoration:underline;font-weight:600;">${camp.brochure_url}</a>`;
             } else {
-                if (urlInput) urlInput.value = '';
-                if (previewEl) previewEl.innerHTML = `<span style="color:#F59E0B;">⚠️ Selected campaign has no uploaded brochure yet. Upload one below or attach URL.</span>`;
+                const currentUrl = window._single_call_brochure_url || '';
+                if (urlInput) urlInput.value = currentUrl;
+                if (previewEl) previewEl.innerHTML = currentUrl 
+                    ? `📄 <b>Uploaded Brochure Active:</b> <a href="${currentUrl}" target="_blank" style="color:#25D366;text-decoration:underline;font-weight:600;">${currentUrl}</a>`
+                    : `<span style="color:#F59E0B;">⚠️ Selected campaign has no uploaded brochure yet. Upload one below or attach URL.</span>`;
             }
         }
     });
@@ -1355,15 +1363,24 @@ document.addEventListener('DOMContentLoaded', () => {
             const fd = new FormData();
             fd.append('file', file);
             const res = await fetch('/api/upload-brochure', { method: 'POST', body: fd });
-            const data = await res.json();
-            if (res.ok && data.ok) {
-                document.getElementById('sc_brochure_url').value = data.brochure_url;
+            let data;
+            try {
+                data = await res.json();
+            } catch (jsonErr) {
+                const rawText = await res.text().catch(() => '');
+                data = { success: false, ok: false, error: rawText || `Server error (${res.status})` };
+            }
+            if ((res.ok && (data.success || data.ok)) && data.brochure_url) {
+                window._single_call_brochure_url = data.brochure_url;
+                const urlInput = document.getElementById('sc_brochure_url');
+                if (urlInput) urlInput.value = data.brochure_url;
                 if (previewEl) previewEl.innerHTML = `📄 <b>Brochure Uploaded:</b> <a href="${data.brochure_url}" target="_blank" style="color:#25D366;text-decoration:underline;font-weight:600;">${data.brochure_url}</a>`;
             } else {
-                if (previewEl) previewEl.innerHTML = `<span style="color:#EF4444;">Upload failed: ${data.detail || 'Error'}</span>`;
+                const errMsg = data.error || data.detail || 'Upload failed';
+                if (previewEl) previewEl.innerHTML = `<span style="color:#EF4444;">Upload failed: ${errMsg}</span>`;
             }
         } catch (e) {
-            if (previewEl) previewEl.innerHTML = `<span style="color:#EF4444;">Upload error: ${e}</span>`;
+            if (previewEl) previewEl.innerHTML = `<span style="color:#EF4444;">Upload error: ${e.message || e}</span>`;
         }
     });
 
@@ -1390,17 +1407,24 @@ document.addEventListener('DOMContentLoaded', () => {
         const budgetVal = (document.getElementById('sc_budget')?.value || '').trim();
 
         // Project Brochure & Site Visit Fields
-        let brochureUrlVal = (document.getElementById('sc_brochure_url')?.value || '').trim();
+        let brochureUrlVal = (document.getElementById('sc_brochure_url')?.value || window._single_call_brochure_url || '').trim();
         const scBrochureFileInput = document.getElementById('sc_brochure_file');
         if (!brochureUrlVal && scBrochureFileInput && scBrochureFileInput.files && scBrochureFileInput.files[0]) {
             try {
                 const fd = new FormData();
                 fd.append('file', scBrochureFileInput.files[0]);
                 const upRes = await fetch('/api/upload-brochure', { method: 'POST', body: fd });
-                const upData = await upRes.json();
-                if (upRes.ok && upData.ok) {
+                let upData;
+                try {
+                    upData = await upRes.json();
+                } catch(e) {
+                    upData = { success: false, ok: false };
+                }
+                if ((upRes.ok && (upData.success || upData.ok)) && upData.brochure_url) {
                     brochureUrlVal = upData.brochure_url;
-                    document.getElementById('sc_brochure_url').value = brochureUrlVal;
+                    window._single_call_brochure_url = brochureUrlVal;
+                    const urlInput = document.getElementById('sc_brochure_url');
+                    if (urlInput) urlInput.value = brochureUrlVal;
                 }
             } catch (err) {
                 console.warn("Could not auto-upload brochure before dispatch:", err);
@@ -1867,38 +1891,43 @@ function closeBrochureModal() {
 }
 
 async function uploadBrochureFile() {
-    const cid = document.getElementById('modal_wb_cid').value;
+    const cid = document.getElementById('modal_wb_cid')?.value || 'standalone';
     const fileInput = document.getElementById('modal_wb_file_input');
-    if (!fileInput.files || !fileInput.files[0]) {
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) {
         alert('Please choose a brochure file (PDF or image) to upload.');
         return null;
     }
     const btn = document.getElementById('btn_upload_brochure');
-    btn.disabled = true;
-    btn.textContent = '⏳ Uploading...';
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Uploading...'; }
     try {
         const formData = new FormData();
         formData.append('file', fileInput.files[0]);
-        const res = await fetch(`/api/campaigns/${cid}/upload-brochure`, {
+        const endpoint = (cid && cid !== 'standalone') ? `/api/campaigns/${cid}/upload-brochure` : `/api/upload-brochure`;
+        const res = await fetch(endpoint, {
             method: 'POST',
             body: formData
         });
-        const data = await res.json();
-        if (res.ok && data.ok) {
+        let data;
+        try {
+            data = await res.json();
+        } catch (jsonErr) {
+            const rawText = await res.text().catch(() => '');
+            data = { success: false, ok: false, error: rawText || `Server error (${res.status})` };
+        }
+        if ((res.ok && (data.success || data.ok)) && data.brochure_url) {
             document.getElementById('modal_wb_brochure_url').value = data.brochure_url;
             document.getElementById('modal_wb_file_status').innerHTML = '<span class="badge" style="background:rgba(37,211,102,0.2);color:#25D366;">Uploaded Successfully</span>';
             document.getElementById('modal_wb_url_preview').innerHTML = `📄 <b>Uploaded:</b> <a href="${data.brochure_url}" target="_blank" style="color:#38BDF8;text-decoration:underline;">${data.brochure_url}</a>`;
             return data.brochure_url;
         } else {
-            alert('Upload failed: ' + (data.detail || 'Server error'));
+            alert('Upload failed: ' + (data.error || data.detail || 'Server error'));
             return null;
         }
     } catch(e) {
-        alert('Upload network error: ' + e);
+        alert('Upload network error: ' + (e.message || e));
         return null;
     } finally {
-        btn.disabled = false;
-        btn.textContent = '⬆️ Upload Brochure';
+        if (btn) { btn.disabled = false; btn.textContent = '⬆️ Upload Brochure'; }
     }
 }
 

@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import random
+import re
 import ssl
+import time
 import certifi
 import aiohttp
 from pathlib import Path
@@ -52,6 +54,10 @@ app = FastAPI(title="Kaamdhenu 3.0 Voice Platform", version="3.0.0")
 BROCHURE_DIR = Path(__file__).parent / "brochures"
 BROCHURE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/brochures", StaticFiles(directory=str(BROCHURE_DIR)), name="brochures")
+
+STATIC_BROCHURE_DIR = Path(__file__).parent / "static" / "brochures"
+STATIC_BROCHURE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/brochures", StaticFiles(directory=str(STATIC_BROCHURE_DIR)), name="static_brochures")
 
 class SingleCallReq(BaseModel):
     phone: Optional[str] = None
@@ -1049,10 +1055,19 @@ class TestBrochureReq(BaseModel):
     phone: str
 
 async def upload_brochure_file(filename: str, file_bytes: bytes, content_type: str = "application/pdf") -> str:
-    # 1. Save locally for guaranteed immediate access
-    local_path = BROCHURE_DIR / filename
-    local_path.write_bytes(file_bytes)
     fallback_url = f"/brochures/{filename}"
+    # 1. Save locally to both brochures/ and static/brochures/ for guaranteed immediate access
+    try:
+        BROCHURE_DIR.mkdir(parents=True, exist_ok=True)
+        (BROCHURE_DIR / filename).write_bytes(file_bytes)
+    except Exception as local_err:
+        logger.warning(f"Error saving to brochures/: {local_err}")
+
+    try:
+        STATIC_BROCHURE_DIR.mkdir(parents=True, exist_ok=True)
+        (STATIC_BROCHURE_DIR / filename).write_bytes(file_bytes)
+    except Exception as static_err:
+        logger.warning(f"Error saving to static/brochures/: {static_err}")
 
     # 2. Try Supabase Storage bucket 'campaign-brochures'
     supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -1079,31 +1094,88 @@ async def upload_brochure_file(filename: str, file_bytes: bytes, content_type: s
     return fallback_url
 
 @app.post("/api/upload-brochure")
-async def api_upload_standalone_brochure(file: UploadFile = File(...)):
-    if not file or not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-    content = await file.read()
-    orig_name = file.filename or "brochure.pdf"
-    safe_name = f"brochure_{int(time.time())}_{re.sub(r'[^a-zA-Z0-9._-]', '_', orig_name)}"
-    content_type = file.content_type or "application/pdf"
-    brochure_url = await upload_brochure_file(safe_name, content, content_type)
-    return {"ok": True, "brochure_url": brochure_url, "filename": safe_name}
+async def api_upload_standalone_brochure(file: Optional[UploadFile] = File(None)):
+    try:
+        if not file or not file.filename:
+            return JSONResponse(
+                status_code=200,
+                content={"success": False, "ok": False, "error": "No file uploaded", "brochure_url": ""}
+            )
+        content = await file.read()
+        if not content:
+            return JSONResponse(
+                status_code=200,
+                content={"success": False, "ok": False, "error": "Uploaded file is empty", "brochure_url": ""}
+            )
+        orig_name = file.filename or "brochure.pdf"
+        safe_name = f"brochure_{int(time.time())}_{re.sub(r'[^a-zA-Z0-9._-]', '_', orig_name)}"
+        content_type = file.content_type or "application/pdf"
+        brochure_url = await upload_brochure_file(safe_name, content, content_type)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "ok": True,
+                "status": "uploaded",
+                "brochure_url": brochure_url,
+                "filename": safe_name
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in api_upload_standalone_brochure: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=200,
+            content={"success": False, "ok": False, "error": str(e), "detail": str(e), "brochure_url": ""}
+        )
 
 @app.post("/api/campaigns/{cid}/upload-brochure")
-async def api_upload_campaign_brochure(cid: str, file: UploadFile = File(...)):
-    camp = await get_campaign(cid)
-    if not camp:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+async def api_upload_campaign_brochure(cid: str, file: Optional[UploadFile] = File(None)):
+    try:
+        if not file or not file.filename:
+            return JSONResponse(
+                status_code=200,
+                content={"success": False, "ok": False, "error": "No file uploaded", "brochure_url": ""}
+            )
 
-    content = await file.read()
-    orig_name = file.filename or "brochure.pdf"
-    safe_name = f"brochure_{cid}_{int(time.time())}_{re.sub(r'[^a-zA-Z0-9._-]', '_', orig_name)}"
-    content_type = file.content_type or "application/pdf"
+        content = await file.read()
+        if not content:
+            return JSONResponse(
+                status_code=200,
+                content={"success": False, "ok": False, "error": "Uploaded file is empty", "brochure_url": ""}
+            )
+        orig_name = file.filename or "brochure.pdf"
+        clean_cid = re.sub(r'[^a-zA-Z0-9_-]', '_', str(cid or "standalone"))
+        safe_name = f"brochure_{clean_cid}_{int(time.time())}_{re.sub(r'[^a-zA-Z0-9._-]', '_', orig_name)}"
+        content_type = file.content_type or "application/pdf"
 
-    brochure_url = await upload_brochure_file(safe_name, content, content_type)
-    await update_campaign(cid, {"brochure_url": brochure_url})
-    await push_unified_log("Campaign", "info", f"Brochure uploaded for campaign {cid}: {safe_name}")
-    return {"status": "uploaded", "brochure_url": brochure_url, "filename": safe_name}
+        brochure_url = await upload_brochure_file(safe_name, content, content_type)
+
+        # Update campaign if it's a real campaign in DB
+        if cid and str(cid).lower() not in ("standalone", "none", "null", "undefined", ""):
+            try:
+                camp = await get_campaign(cid)
+                if camp:
+                    await update_campaign(cid, {"brochure_url": brochure_url})
+                    await push_unified_log("Campaign", "info", f"Brochure uploaded for campaign {cid}: {safe_name}")
+            except Exception as db_err:
+                logger.warning(f"Could not update campaign {cid} with brochure: {db_err}")
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "ok": True,
+                "status": "uploaded",
+                "brochure_url": brochure_url,
+                "filename": safe_name
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in api_upload_campaign_brochure: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=200,
+            content={"success": False, "ok": False, "error": str(e), "detail": str(e), "brochure_url": ""}
+        )
 
 @app.post("/api/campaigns/{cid}/update-details")
 async def api_update_campaign_details(cid: str, req: CampaignDetailsUpdateReq):
