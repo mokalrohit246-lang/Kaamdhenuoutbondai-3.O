@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 _orig_ssl = ssl.create_default_context
@@ -32,7 +33,12 @@ from db import (
     list_campaigns, create_campaign, update_campaign_status, find_campaign_by_inbound_number,
     get_pending_callbacks, mark_callback_dispatched, get_pending_callbacks_due, mark_callback_completed,
     get_and_claim_due_callbacks, emergency_cleanup_pending_callbacks,
-    get_due_callbacks_epoch, claim_due_callback, normalize_phone
+    get_due_callbacks_epoch, claim_due_callback, normalize_phone,
+    get_campaign, update_campaign, list_whatsapp_logs, insert_whatsapp_log, find_recent_outbound_context
+)
+from whatsapp_service import (
+    send_text_message, send_document_message, send_appointment_confirmation,
+    generate_whatsapp_ai_response, format_whatsapp_phone, WHATSAPP_VERIFY_TOKEN
 )
 from prompts import get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER
 
@@ -41,6 +47,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("server")
 
 app = FastAPI(title="Kaamdhenu 3.0 Voice Platform", version="3.0.0")
+
+# Mount brochures static directory
+BROCHURE_DIR = Path(__file__).parent / "brochures"
+BROCHURE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/brochures", StaticFiles(directory=str(BROCHURE_DIR)), name="brochures")
 
 class SingleCallReq(BaseModel):
     phone: Optional[str] = None
@@ -956,3 +967,236 @@ async def api_campaign_export(cid: str, type: str = "full"):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={fname}"}
     )
+
+# ============================================================
+# META WHATSAPP CLOUD API & CAMPAIGN BROCHURES
+# ============================================================
+class CampaignDetailsUpdateReq(BaseModel):
+    project_name: Optional[str] = None
+    site_address: Optional[str] = None
+    project_highlights: Optional[str] = None
+    pickup_drop_notes: Optional[str] = None
+    brochure_url: Optional[str] = None
+
+class TestBrochureReq(BaseModel):
+    phone: str
+
+async def upload_brochure_file(filename: str, file_bytes: bytes, content_type: str = "application/pdf") -> str:
+    # 1. Save locally for guaranteed immediate access
+    local_path = BROCHURE_DIR / filename
+    local_path.write_bytes(file_bytes)
+    fallback_url = f"/brochures/{filename}"
+
+    # 2. Try Supabase Storage bucket 'campaign-brochures'
+    supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "")
+    if supabase_url and supabase_key:
+        try:
+            upload_url = f"{supabase_url}/storage/v1/object/campaign-brochures/{filename}"
+            headers = {
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": content_type,
+                "x-upsert": "true"
+            }
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                res = await client.post(upload_url, headers=headers, content=file_bytes)
+                if res.status_code in (200, 201):
+                    public_url = f"{supabase_url}/storage/v1/object/public/campaign-brochures/{filename}"
+                    logger.info(f"Brochure uploaded to Supabase Storage: {public_url}")
+                    return public_url
+                else:
+                    logger.warning(f"Supabase storage upload status {res.status_code}: {res.text}")
+        except Exception as e:
+            logger.warning(f"Supabase storage upload error: {e}")
+
+    return fallback_url
+
+@app.post("/api/campaigns/{cid}/upload-brochure")
+async def api_upload_campaign_brochure(cid: str, file: UploadFile = File(...)):
+    camp = await get_campaign(cid)
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    content = await file.read()
+    orig_name = file.filename or "brochure.pdf"
+    safe_name = f"brochure_{cid}_{int(time.time())}_{re.sub(r'[^a-zA-Z0-9._-]', '_', orig_name)}"
+    content_type = file.content_type or "application/pdf"
+
+    brochure_url = await upload_brochure_file(safe_name, content, content_type)
+    await update_campaign(cid, {"brochure_url": brochure_url})
+    await push_unified_log("Campaign", "info", f"Brochure uploaded for campaign {cid}: {safe_name}")
+    return {"status": "uploaded", "brochure_url": brochure_url, "filename": safe_name}
+
+@app.post("/api/campaigns/{cid}/update-details")
+async def api_update_campaign_details(cid: str, req: CampaignDetailsUpdateReq):
+    camp = await get_campaign(cid)
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    await update_campaign(cid, updates)
+    updated_camp = await get_campaign(cid)
+    await push_unified_log("Campaign", "info", f"Project details updated for campaign {cid}")
+    return {"status": "updated", "campaign": updated_camp}
+
+@app.post("/api/campaigns/{cid}/test-brochure")
+async def api_test_campaign_brochure(cid: str, req: TestBrochureReq):
+    camp = await get_campaign(cid)
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    phone = req.phone.strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="Phone number is required")
+
+    project_name = camp.get("project_name") or camp.get("name") or "Kaamdhenu Residences"
+    brochure_url = (camp.get("brochure_url") or "").strip()
+
+    if brochure_url:
+        full_doc_url = brochure_url
+        if brochure_url.startswith("/"):
+            port = os.getenv("PORT", "8000")
+            full_doc_url = f"http://localhost:{port}{brochure_url}"
+
+        res = await send_document_message(
+            to_phone=phone,
+            document_url=full_doc_url,
+            caption=f"Official Brochure & Floor Plans — {project_name}",
+            filename=f"{project_name.replace(' ', '_')}_Brochure.pdf",
+            campaign_id=cid
+        )
+    else:
+        p_addr = camp.get("site_address") or "Near City Center, Metro Corridor"
+        p_high = camp.get("project_highlights") or "• Luxury 2BHK & 3BHK Air-Conditioned Homes\n• 30+ Lifestyle Amenities"
+        test_msg = (
+            f"🏡 *{project_name.upper()} — PROJECT OVERVIEW*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 *Location:* {p_addr}\n\n"
+            f"✨ *Key Highlights:*\n{p_high}\n\n"
+            f"(Note: Upload a PDF brochure in the Campaign Dashboard to deliver official PDF documents via WhatsApp.)"
+        )
+        res = await send_text_message(to_phone=phone, text=test_msg, campaign_id=cid)
+
+    return {"status": "dispatched", "phone": phone, "result": res}
+
+@app.get("/api/whatsapp/logs")
+async def api_whatsapp_logs(phone: Optional[str] = None, limit: int = 100):
+    return await list_whatsapp_logs(limit=limit, phone=phone)
+
+@app.get("/api/whatsapp/webhook")
+async def whatsapp_webhook_verify(
+    hub_mode: Optional[str] = Query(None, alias="hub.mode"),
+    hub_verify_token: Optional[str] = Query(None, alias="hub.verify_token"),
+    hub_challenge: Optional[str] = Query(None, alias="hub.challenge")
+):
+    """
+    Handle Meta WhatsApp Webhook Verification Challenge.
+    """
+    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", WHATSAPP_VERIFY_TOKEN)
+    logger.info(f"Meta webhook verification request: mode={hub_mode}")
+
+    if hub_mode == "subscribe" and hub_verify_token == verify_token:
+        logger.info("Meta webhook verification challenge passed!")
+        return PlainTextResponse(content=hub_challenge or "", status_code=200)
+
+    logger.warning(f"Meta webhook verification failed: token mismatch (expected {verify_token}, got {hub_verify_token})")
+    raise HTTPException(status_code=403, detail="Verification token mismatch")
+
+@app.post("/api/whatsapp/webhook")
+async def whatsapp_webhook_inbound(request: Request):
+    """
+    Receive and process inbound messages from Meta WhatsApp Cloud API.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"status": "invalid_json"}, status_code=400)
+
+    for entry in data.get("entry", []):
+        for change in entry.get("changes", []):
+            val = change.get("value", {})
+            messages = val.get("messages", [])
+            contacts = val.get("contacts", [])
+
+            for msg in messages:
+                from_wa = msg.get("from", "")
+                msg_type = msg.get("type", "")
+                user_text = ""
+
+                if msg_type == "text":
+                    user_text = msg.get("text", {}).get("body", "").strip()
+                elif msg_type == "button":
+                    user_text = msg.get("button", {}).get("text", "").strip()
+                elif msg_type == "interactive":
+                    user_text = (
+                        msg.get("interactive", {}).get("button_reply", {}).get("title")
+                        or msg.get("interactive", {}).get("list_reply", {}).get("title")
+                        or ""
+                    )
+
+                if not from_wa or not user_text:
+                    continue
+
+                contact_name = "there"
+                if contacts:
+                    contact_name = contacts[0].get("profile", {}).get("name", "there")
+
+                # Log inbound message
+                await insert_whatsapp_log(
+                    phone_number=from_wa,
+                    message=user_text,
+                    status="received",
+                    direction="inbound",
+                    message_type=msg_type
+                )
+                await push_unified_log("WhatsApp", "info", f"📩 Inbound WhatsApp from {from_wa} ({contact_name}): {user_text[:80]}")
+
+                # Context lookup for project & lead
+                lead_ctx = {"lead_name": contact_name, "phone": from_wa}
+                campaign_ctx = {}
+
+                # 1. Check recent outbound context by caller phone
+                recent_ctx = await find_recent_outbound_context(from_wa)
+                if recent_ctx.get("found"):
+                    lead_ctx["lead_name"] = recent_ctx.get("lead_name") or contact_name
+                    cid = recent_ctx.get("campaign_id")
+                    if cid:
+                        camp = await get_campaign(cid)
+                        if camp:
+                            campaign_ctx = camp
+
+                # 2. If no campaign found yet, pick active campaign
+                if not campaign_ctx:
+                    all_camps = await list_campaigns()
+                    active_camps = [c for c in all_camps if c.get("status") == "active"]
+                    if active_camps:
+                        campaign_ctx = active_camps[0]
+
+                # Generate AI response using Gemini Real Estate Sales rules
+                reply_text, wants_brochure = await generate_whatsapp_ai_response(
+                    incoming_text=user_text,
+                    campaign_context=campaign_ctx,
+                    lead_context=lead_ctx
+                )
+
+                # Send text response
+                cid_val = campaign_ctx.get("id")
+                await send_text_message(
+                    to_phone=from_wa,
+                    text=reply_text,
+                    campaign_id=cid_val
+                )
+
+                # If user asked for brochure and campaign has brochure_url, auto-dispatch document
+                brochure_url = campaign_ctx.get("brochure_url")
+                if wants_brochure and brochure_url:
+                    p_name = campaign_ctx.get("project_name") or campaign_ctx.get("name") or "Kaamdhenu Residences"
+                    await send_document_message(
+                        to_phone=from_wa,
+                        document_url=brochure_url,
+                        caption=f"Official Project Brochure & Floor Plans — {p_name}",
+                        filename=f"{p_name.replace(' ', '_')}_Brochure.pdf",
+                        campaign_id=cid_val
+                    )
+
+    return {"status": "ok"}

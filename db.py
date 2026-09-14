@@ -1,7 +1,10 @@
 import logging
 import os
 import uuid
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None
 import sqlite3
 import re
 import time
@@ -109,19 +112,87 @@ async def book_appointment(
 # Backward compatible alias
 insert_appointment = book_appointment
 
-async def insert_whatsapp_log(phone_number: str, message: str, status: str = "sent", call_id: Optional[str] = None):
+async def insert_whatsapp_log(
+    phone_number: str,
+    message: str,
+    status: str = "sent",
+    call_id: Optional[str] = None,
+    direction: str = "outbound",
+    message_type: str = "text",
+    campaign_id: Optional[str] = None
+):
+    log_id = str(uuid.uuid4())
+    now_iso = datetime.utcnow().isoformat()
+    # 1. Supabase insert
     try:
         db = await _adb()
-        await db.table("whatsapp_logs").insert({
-            "id": str(uuid.uuid4()),
+        row = {
+            "id": log_id,
             "phone_number": phone_number,
-            "message": message[:1000],
+            "message": message[:2000],
             "status": status,
-            "call_id": call_id,
-            "created_at": datetime.utcnow().isoformat()
-        }).execute()
+            "direction": direction,
+            "message_type": message_type,
+            "campaign_id": campaign_id or "",
+            "call_id": call_id or "",
+            "created_at": now_iso
+        }
+        await db.table("whatsapp_logs").insert(row).execute()
     except Exception as e:
-        logger.warning(f"Failed to log whatsapp message: {e}")
+        logger.warning(f"Failed to log whatsapp message in Supabase: {e}")
+
+    # 2. SQLite local fallback
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO whatsapp_logs (id, phone_number, message, status, direction, message_type, campaign_id, call_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (log_id, phone_number, message[:2000], status, direction, message_type, campaign_id or "", call_id or "", now_iso))
+        conn.commit()
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"Failed to log whatsapp message in SQLite: {sqle}")
+
+async def list_whatsapp_logs(limit: int = 100, phone: Optional[str] = None) -> list:
+    """Retrieve WhatsApp conversation logs from Supabase or SQLite fallback."""
+    logs = []
+    # 1. Supabase
+    try:
+        db = await _adb()
+        q = db.table("whatsapp_logs").select("*").order("created_at", desc=True).limit(limit)
+        if phone:
+            norm = normalize_phone(phone)
+            q = q.ilike("phone_number", f"%{norm}%")
+        res = await q.execute()
+        logs = res.data or []
+    except Exception as exc:
+        logger.warning(f"Supabase list_whatsapp_logs warning: {exc}")
+
+    # 2. SQLite fallback
+    if not logs:
+        try:
+            _init_local_sqlite()
+            conn = sqlite3.connect(LOCAL_DB_FILE)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            if phone:
+                norm = normalize_phone(phone)
+                c.execute("SELECT * FROM whatsapp_logs WHERE phone_number LIKE ? ORDER BY created_at DESC LIMIT ?", (f"%{norm}%", limit))
+            else:
+                c.execute("SELECT * FROM whatsapp_logs ORDER BY created_at DESC LIMIT ?", (limit,))
+            logs = [dict(r) for r in c.fetchall()]
+            conn.close()
+        except Exception as sqle:
+            logger.warning(f"SQLite list_whatsapp_logs warning: {sqle}")
+
+    # Decorate with standard field aliases
+    for l in logs:
+        l["phone"] = l.get("phone_number") or l.get("phone", "")
+        l["content"] = l.get("message") or l.get("content", "")
+
+    return logs
 
 async def check_slot(date: str, time: str) -> bool:
     db = await _adb()
@@ -854,6 +925,62 @@ def _init_local_sqlite():
                 c.execute(f"ALTER TABLE scheduled_callbacks ADD COLUMN {col_name} {col_type}")
             except Exception:
                 pass
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS whatsapp_logs (
+                id TEXT PRIMARY KEY,
+                phone_number TEXT NOT NULL,
+                message TEXT DEFAULT '',
+                status TEXT DEFAULT 'sent',
+                direction TEXT DEFAULT 'outbound',
+                message_type TEXT DEFAULT 'text',
+                campaign_id TEXT DEFAULT '',
+                call_id TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+        for col_name, col_type in [
+            ("direction", "TEXT DEFAULT 'outbound'"),
+            ("message_type", "TEXT DEFAULT 'text'"),
+            ("campaign_id", "TEXT DEFAULT ''"),
+            ("call_id", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE whatsapp_logs ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT DEFAULT 'active',
+                allocated_minutes REAL DEFAULT 500,
+                consumed_minutes REAL DEFAULT 0,
+                agent_profile_id TEXT DEFAULT '',
+                dedicated_inbound_number TEXT DEFAULT '',
+                calcom_event_type_id TEXT DEFAULT '6934775',
+                brochure_url TEXT DEFAULT '',
+                project_name TEXT DEFAULT '',
+                site_address TEXT DEFAULT '',
+                project_highlights TEXT DEFAULT '',
+                pickup_drop_notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+        for col_name, col_type in [
+            ("brochure_url", "TEXT DEFAULT ''"),
+            ("project_name", "TEXT DEFAULT ''"),
+            ("site_address", "TEXT DEFAULT ''"),
+            ("project_highlights", "TEXT DEFAULT ''"),
+            ("pickup_drop_notes", "TEXT DEFAULT ''"),
+            ("calcom_event_type_id", "TEXT DEFAULT '6934775'"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE campaigns ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1000,10 +1127,12 @@ async def get_agent_profile(pid: str):
 
 # Campaigns CRUD
 async def list_campaigns():
-    db = await _adb()
-    res = await db.table("campaigns").select("*").order("created_at", desc=True).execute()
-    camps = res.data or []
+    camps = []
+    # 1. Supabase
     try:
+        db = await _adb()
+        res = await db.table("campaigns").select("*").order("created_at", desc=True).execute()
+        camps = res.data or []
         call_res = await db.table("call_logs").select("campaign_id, direction, outcome, lead_score, site_visit_date").execute()
         all_calls = call_res.data or []
         for c in camps:
@@ -1014,22 +1143,125 @@ async def list_campaigns():
             c["hot_leads"] = len([x for x in c_calls if x.get("lead_score") == "Hot"])
             c["site_visits"] = len([x for x in c_calls if x.get("site_visit_date")])
     except Exception as e:
-        logger.warning(f"Error enriching campaign stats: {e}")
+        logger.warning(f"Error listing campaigns from Supabase: {e}")
+
+    # 2. SQLite fallback
+    if not camps:
+        try:
+            _init_local_sqlite()
+            conn = sqlite3.connect(LOCAL_DB_FILE)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("SELECT * FROM campaigns ORDER BY created_at DESC")
+            camps = [dict(r) for r in c.fetchall()]
+            conn.close()
+        except Exception as sqle:
+            logger.warning(f"SQLite list_campaigns warning: {sqle}")
+
     return camps
 
+async def get_campaign(campaign_id: str) -> Optional[dict]:
+    """Fetch campaign by ID from Supabase or local SQLite fallback."""
+    if not campaign_id:
+        return None
+    # 1. Supabase
+    try:
+        db = await _adb()
+        res = await db.table("campaigns").select("*").eq("id", campaign_id).maybe_single().execute()
+        if res and res.data:
+            return res.data
+    except Exception as e:
+        logger.warning(f"Supabase get_campaign fallback: {e}")
+
+    # 2. SQLite fallback
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM campaigns WHERE id = ?", (campaign_id,))
+        row = c.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as sqle:
+        logger.warning(f"SQLite get_campaign warning: {sqle}")
+
+    return None
+
 async def create_campaign(data: dict):
-    db = await _adb()
     cid = data.get("id") or str(uuid.uuid4())
     data["id"] = cid
-    data["created_at"] = datetime.utcnow().isoformat()
+    now_iso = datetime.utcnow().isoformat()
+    data.setdefault("created_at", now_iso)
     data.setdefault("status", "active")
     data.setdefault("consumed_minutes", 0)
-    await db.table("campaigns").upsert(data, on_conflict="id").execute()
+
+    # 1. Supabase
+    try:
+        db = await _adb()
+        await db.table("campaigns").upsert(data, on_conflict="id").execute()
+    except Exception as exc:
+        logger.warning(f"Supabase create_campaign warning: {exc}")
+
+    # 2. SQLite
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO campaigns (id, name, status, allocated_minutes, consumed_minutes, agent_profile_id, dedicated_inbound_number, calcom_event_type_id, brochure_url, project_name, site_address, project_highlights, pickup_drop_notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name, status=excluded.status, allocated_minutes=excluded.allocated_minutes,
+                consumed_minutes=excluded.consumed_minutes, agent_profile_id=excluded.agent_profile_id,
+                dedicated_inbound_number=excluded.dedicated_inbound_number, calcom_event_type_id=excluded.calcom_event_type_id,
+                brochure_url=excluded.brochure_url, project_name=excluded.project_name,
+                site_address=excluded.site_address, project_highlights=excluded.project_highlights,
+                pickup_drop_notes=excluded.pickup_drop_notes
+        """, (
+            cid, data.get("name", "Campaign"), data.get("status", "active"),
+            float(data.get("allocated_minutes", 500)), float(data.get("consumed_minutes", 0)),
+            data.get("agent_profile_id", ""), data.get("dedicated_inbound_number", ""),
+            data.get("calcom_event_type_id", "6934775"), data.get("brochure_url", ""),
+            data.get("project_name", ""), data.get("site_address", ""),
+            data.get("project_highlights", ""), data.get("pickup_drop_notes", ""),
+            data.get("created_at", now_iso)
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"SQLite create_campaign error: {sqle}")
+
     return cid
 
+async def update_campaign(campaign_id: str, updates: dict) -> bool:
+    """Update campaign fields (such as brochure_url, project_name, etc.) in Supabase and SQLite."""
+    if not campaign_id or not updates:
+        return False
+    # 1. Supabase
+    try:
+        db = await _adb()
+        await db.table("campaigns").update(updates).eq("id", campaign_id).execute()
+    except Exception as e:
+        logger.warning(f"Supabase update_campaign warning: {e}")
+
+    # 2. SQLite
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        set_clauses = [f"{k} = ?" for k in updates.keys()]
+        values = list(updates.values()) + [campaign_id]
+        c.execute(f"UPDATE campaigns SET {', '.join(set_clauses)} WHERE id = ?", values)
+        conn.commit()
+        conn.close()
+    except Exception as sqle:
+        logger.warning(f"SQLite update_campaign warning: {sqle}")
+
+    return True
+
 async def update_campaign_status(cid: str, status: str):
-    db = await _adb()
-    await db.table("campaigns").update({"status": status}).eq("id", cid).execute()
+    await update_campaign(cid, {"status": status})
 
 async def add_campaign_minutes(campaign_id: str, minutes: float):
     """Add consumed minutes. Auto-sets status to quota_exhausted if over limit."""
@@ -1043,7 +1275,7 @@ async def add_campaign_minutes(campaign_id: str, minutes: float):
             update = {"consumed_minutes": new_total}
             if new_total >= allocated:
                 update["status"] = "quota_exhausted"
-            await db.table("campaigns").update(update).eq("id", campaign_id).execute()
+            await update_campaign(campaign_id, update)
     except Exception as e:
         logger.error(f"Error adding campaign minutes: {e}")
 

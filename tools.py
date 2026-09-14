@@ -3,14 +3,20 @@ import logging
 import os
 import time
 import re
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None
 from typing import Optional
 from livekit import agents, api
 from livekit.agents import llm
 from db import (
     check_slot, get_next_available, insert_appointment, book_appointment, log_call,
     push_unified_log, add_contact_memory, sync_google_sheets_row, insert_whatsapp_log,
-    save_callback
+    save_callback, get_campaign
+)
+from whatsapp_service import (
+    send_text_message, send_document_message, send_appointment_confirmation, format_whatsapp_phone
 )
 
 logger = logging.getLogger("kaamdhenu-tools")
@@ -71,6 +77,7 @@ class RealEstateTools(llm.ToolContext):
             self.book_appointment,
             self.book_calcom,
             self.book_site_visit,
+            self.send_project_brochure,
             self.send_whatsapp_brochure,
             self.send_broker_hot_lead_alert,
             self.send_sms_confirmation,
@@ -223,6 +230,52 @@ class RealEstateTools(llm.ToolContext):
             )
             pickup_msg = f" with cab pickup from {pickup_address}" if pickup_required and pickup_address else ""
             await push_unified_log("Tools", "info", f"Site visit booked: {client_name} on {visit_datetime}{pickup_msg} (Cal.com UID: {calcom_booking_uid or 'Local'})", call_id=self.call_id)
+
+            # Trigger structured WhatsApp appointment confirmation
+            try:
+                camp = await get_campaign(self.campaign_id) if self.campaign_id else None
+                p_name = (camp.get("project_name") if camp else None) or "Kaamdhenu Premium Residences"
+                p_addr = (camp.get("site_address") if camp else None) or "Near City Center, Prime Metro Corridor"
+                p_high = (camp.get("project_highlights") if camp else None) or ""
+                p_brochure = (camp.get("brochure_url") if camp else None) or ""
+
+                lead_d = {
+                    "name": client_name or self.client_name or self.lead_name,
+                    "phone": self.phone_number,
+                    "project_name": p_name,
+                    "site_address": p_addr,
+                    "project_highlights": p_high,
+                    "brochure_url": p_brochure
+                }
+                apt_d = {
+                    "date": date,
+                    "time": vtime,
+                    "pickup_required": pickup_required,
+                    "pickup_address": pickup_address,
+                    "project_name": p_name,
+                    "site_address": p_addr,
+                    "project_highlights": p_high,
+                    "brochure_url": p_brochure
+                }
+                asyncio.create_task(send_appointment_confirmation(
+                    to_phone=self.phone_number,
+                    lead_data=lead_d,
+                    appointment_data=apt_d,
+                    campaign_id=self.campaign_id,
+                    call_id=self.call_id
+                ))
+                # Also alert broker WhatsApp
+                asyncio.create_task(self.send_broker_hot_lead_alert(
+                    name=client_name or self.lead_name,
+                    phone=self.phone_number,
+                    budget=self.budget,
+                    property_type=bhk or "2BHK/3BHK",
+                    date=date,
+                    time=vtime
+                ))
+            except Exception as wa_err:
+                logger.warning(f"Error triggering appointment confirmation WhatsApp: {wa_err}")
+
             return f"Site visit confirmed for {visit_datetime}! Ref: {booking_id}.{' Cab pickup arranged from ' + pickup_address + '.' if pickup_required and pickup_address else ''}"
         except Exception as e:
             logger.error(f"Site visit booking error: {e}")
@@ -389,67 +442,86 @@ class RealEstateTools(llm.ToolContext):
         return f"Done sir, main aapko theek {human_time_str} par call karti hoon. Thank you!"
 
     @llm.function_tool
-    async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
-        """Send property brochure, floor plans, and site location to lead via WhatsApp. Call when client agrees to receive details."""
+    async def send_project_brochure(self, phone_number: str = "") -> str:
+        """Send the official project brochure and floor plans PDF directly to the lead's WhatsApp using Meta WhatsApp Cloud API. Call whenever the client requests brochure, photos, pricing, or floor plans."""
         phone = phone_number or self.phone_number
         self.whatsapp_status = "✅ Sent Auto"
-        sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-        token = os.getenv("TWILIO_AUTH_TOKEN", "")
-        from_wa = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-        msg = f"Namaste {self.client_name or self.lead_name}! \U0001f3e1\nThank you for speaking with Kaamdhenu Real Estate.\nHere are the brochure & floor plans for our premium properties.\nLocation: Near City Center.\nSee you at the site visit!"
 
-        await insert_whatsapp_log(phone, msg, "dispatched", self.call_id)
+        camp = await get_campaign(self.campaign_id) if self.campaign_id else None
+        p_name = (camp.get("project_name") if camp else None) or "Kaamdhenu Premium Residences"
+        brochure_url = (camp.get("brochure_url") if camp else None) or ""
 
-        if not (sid and token):
-            await push_unified_log("WhatsApp", "info", f"Brochure dispatched (demo): {phone}", call_id=self.call_id)
-            return "Brochure sent to your WhatsApp."
-        try:
-            from twilio.rest import Client
-            to_wa = f"whatsapp:{phone}" if not phone.startswith("whatsapp:") else phone
-            loop = asyncio.get_event_loop()
-            client = Client(sid, token)
-            await loop.run_in_executor(None, lambda: client.messages.create(body=msg, from_=from_wa, to=to_wa))
-            await insert_whatsapp_log(phone, msg, "delivered", self.call_id)
-            await push_unified_log("WhatsApp", "info", f"Brochure sent to lead: {phone}", call_id=self.call_id)
-            return "Brochure sent to your WhatsApp."
-        except Exception as exc:
-            await insert_whatsapp_log(phone, msg, f"failed: {exc}", self.call_id)
-            await push_unified_log("WhatsApp", "error", f"Lead WhatsApp error: {exc}", call_id=self.call_id)
-            return "Brochure queued for delivery."
+        lead_disp_name = self.client_name or self.lead_name or "there"
+
+        # 1. If PDF brochure is configured, send document
+        if brochure_url:
+            caption = f"Namaste {lead_disp_name}! Here is the official brochure & floor plans for {p_name}."
+            filename = f"{p_name.replace(' ', '_')}_Brochure.pdf"
+            await send_document_message(
+                to_phone=phone,
+                document_url=brochure_url,
+                caption=caption,
+                filename=filename,
+                campaign_id=self.campaign_id,
+                call_id=self.call_id
+            )
+        else:
+            # Send rich text summary if brochure PDF not yet uploaded
+            text_summary = (
+                f"Namaste {lead_disp_name}! 🏡\n"
+                f"Thank you for your interest in *{p_name}*.\n"
+                f"• Configurations: Premium 2BHK & 3BHK Air-Conditioned Homes\n"
+                f"• Location: Prime Metro Corridor, Near City Center\n"
+                f"• Amenities: Clubhouse, Swimming Pool, Landscaped Gardens, Kids Play Area\n"
+                f"• Special Offer: Free cab pickup & drop available for site visits!\n\n"
+                f"Would you like to visit this Saturday or Sunday to see the sample flat?"
+            )
+            await send_text_message(
+                to_phone=phone,
+                text=text_summary,
+                campaign_id=self.campaign_id,
+                call_id=self.call_id
+            )
+
+        await push_unified_log("WhatsApp", "info", f"Brochure delivered to {phone} for {p_name}", call_id=self.call_id)
+        return "Maine WhatsApp par brochure aur floor plans bhej diye hain. Bas 15-20 seconds mein aapko receive ho jayega."
+
+    @llm.function_tool
+    async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
+        """Send property brochure, floor plans, and site location to lead via WhatsApp. Call when client agrees to receive details."""
+        return await self.send_project_brochure(phone_number=phone_number)
 
     @llm.function_tool
     async def send_broker_hot_lead_alert(self, name: str, phone: str, budget: str, property_type: str, date: str, time: str) -> str:
-        """Send immediate Hot Lead notification to on-site broker WhatsApp."""
+        """Send immediate Hot Lead notification to on-site broker WhatsApp via Meta WhatsApp Cloud API."""
         broker_num = self.broker_phone
         if not broker_num:
             return "Broker alert skipped (no broker number configured)."
-        sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-        token = os.getenv("TWILIO_AUTH_TOKEN", "")
-        from_wa = os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")
-        if not (sid and token):
-            return "Broker alert recorded."
-        try:
-            from twilio.rest import Client
-            to_wa = f"whatsapp:{broker_num}" if not broker_num.startswith("whatsapp:") else broker_num
-            msg = (
-                f"\U0001f525 *NEW HOT LEAD SITE VISIT BOOKED*\n"
-                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                f"\U0001f464 *Lead Name:* {name}\n"
-                f"\U0001f4de *Phone:* {phone}\n"
-                f"\U0001f3e2 *Requirement:* {property_type or '2BHK/3BHK'}\n"
-                f"\U0001f4b0 *Budget:* {budget or 'Standard'}\n"
-                f"\U0001f4c5 *Visit Slot:* {date} at {time}\n"
-                f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-                f"\U0001f449 *Action:* Please call for confirmation & arrange site pass."
-            )
-            loop = asyncio.get_event_loop()
-            client = Client(sid, token)
-            await loop.run_in_executor(None, lambda: client.messages.create(body=msg, from_=from_wa, to=to_wa))
+
+        msg = (
+            f"🔥 *NEW HOT LEAD SITE VISIT BOOKED*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 *Lead Name:* {name}\n"
+            f"📞 *Phone:* {phone}\n"
+            f"🏢 *Requirement:* {property_type or '2BHK/3BHK'}\n"
+            f"💰 *Budget:* {budget or 'Standard'}\n"
+            f"📅 *Visit Slot:* {date} at {time}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👉 *Action:* Please call for confirmation & arrange site pass."
+        )
+
+        res = await send_text_message(
+            to_phone=broker_num,
+            text=msg,
+            campaign_id=self.campaign_id,
+            call_id=self.call_id
+        )
+        if res.get("success"):
             await push_unified_log("WhatsApp", "info", f"Hot Lead Alert sent to broker {broker_num}", call_id=self.call_id)
             return "Broker notified via WhatsApp."
-        except Exception as exc:
-            await push_unified_log("WhatsApp", "error", f"Broker alert failed: {exc}", call_id=self.call_id)
-            return "Broker alert queued."
+        else:
+            await push_unified_log("WhatsApp", "warning", f"Broker alert delivery status: {res}", call_id=self.call_id)
+            return "Broker alert recorded."
 
     @llm.function_tool
     async def send_sms_confirmation(self, phone: str, message: str) -> str:

@@ -258,6 +258,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
         <div class="camp-subtab active" id="tab_camp_outbound" onclick="switchCampTab('outbound')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid var(--primary-emerald); color: var(--primary-emerald); font-weight: 600; font-size: 12.5px;">📲 Campaign Outbound Logs</div>
         <div class="camp-subtab" id="tab_camp_callbacks" onclick="switchCampTab('callbacks')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 12.5px;">🔄 Inbound Callbacks</div>
         <div class="camp-subtab" id="tab_camp_dedicated" onclick="switchCampTab('dedicated')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 12.5px;">🏢 Dedicated Inbound Logs</div>
+        <div class="camp-subtab" id="tab_camp_whatsapp" onclick="switchCampTab('whatsapp')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); font-size: 12.5px;">💬 WhatsApp Logs</div>
       </div>
 
       <!-- Outbound Container -->
@@ -329,6 +330,24 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent-cyan); }
             </tr>
           </thead>
           <tbody id="tbl_camp_dedicated"></tbody>
+        </table>
+      </div>
+
+      <!-- WhatsApp Logs Container -->
+      <div id="subview_camp_whatsapp" style="display:none; overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px; border:1px solid #1E293B;">
+        <table style="min-width:1100px;">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Phone</th>
+              <th>Direction</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Content / Caption</th>
+              <th>Media / Brochure</th>
+            </tr>
+          </thead>
+          <tbody id="tbl_camp_whatsapp"></tbody>
         </table>
       </div>
     </div>
@@ -750,10 +769,11 @@ function editAgent(id) {
 
 // Campaigns
 let currentCampSubTab = 'outbound';
+window._cached_campaigns = [];
 
 function switchCampTab(tab) {
     currentCampSubTab = tab;
-    const tabs = ['outbound', 'callbacks', 'dedicated'];
+    const tabs = ['outbound', 'callbacks', 'dedicated', 'whatsapp'];
     tabs.forEach(t => {
         const tabEl = document.getElementById(`tab_camp_${t}`);
         const viewEl = document.getElementById(`subview_camp_${t}`);
@@ -781,6 +801,35 @@ async function loadSelectedCampaignLogs() {
     try {
         const selEl = document.getElementById('sel_campaign_filter');
         const cid = selEl ? selEl.value : 'all';
+
+        if (currentCampSubTab === 'whatsapp') {
+            const res = await fetch(`/api/whatsapp/logs?limit=50`);
+            if (res.ok) {
+                const logs = await res.json();
+                const tbl = document.getElementById('tbl_camp_whatsapp');
+                if (tbl) {
+                    const filtered = (cid && cid !== 'all') ? logs.filter(l => String(l.campaign_id) === String(cid)) : logs;
+                    tbl.innerHTML = filtered.length ? filtered.map(l => {
+                        const isOut = (l.direction || 'outbound') === 'outbound';
+                        const dirBadge = isOut ? '<span class="badge badge-booked">Outbound</span>' : '<span class="badge" style="background:rgba(6,182,212,0.2);color:#38BDF8;">Inbound</span>';
+                        const timeStr = l.created_at ? l.created_at.substring(0,19).replace('T', ' ') : '-';
+                        const mediaHtml = l.media_url ? `<a href="${l.media_url}" target="_blank" style="color:#38BDF8;text-decoration:underline;">📄 View File</a>` : '—';
+                        return `
+                        <tr>
+                            <td>${timeStr}</td>
+                            <td><b>${l.phone}</b></td>
+                            <td>${dirBadge}</td>
+                            <td><span class="badge badge-cold">${l.message_type || 'text'}</span></td>
+                            <td><span class="badge ${l.status === 'sent' || l.status === 'delivered' ? 'badge-booked' : 'badge-warm'}">${l.status || 'sent'}</span></td>
+                            <td style="max-width:350px;white-space:normal;word-break:break-word;">${l.content || '—'}</td>
+                            <td>${mediaHtml}</td>
+                        </tr>`;
+                    }).join('') : '<tr><td colspan="7" style="text-align:center;color:#64748B;padding:20px;">No WhatsApp messages recorded yet</td></tr>';
+                }
+            }
+            return;
+        }
+
         const res = await fetch(`/api/campaigns/${cid}/logs?category=${currentCampSubTab}`);
         if (res.ok) {
             const calls = await res.json();
@@ -807,6 +856,7 @@ const loadCampaigns = async () => {
         const res = await fetch('/api/campaigns');
         if (res.ok) {
             const camps = await res.json();
+            window._cached_campaigns = camps;
             document.getElementById('campaigns_list').innerHTML = camps.length ? camps.map(c => {
                 const consumed = Number(c.consumed_minutes || 0);
                 const allocated = Number(c.allocated_minutes || 500);
@@ -814,6 +864,10 @@ const loadCampaigns = async () => {
                 const barColor = pct >= 100 ? '#EF4444' : (pct >= 80 ? '#F59E0B' : '#10B981');
                 const statusBadge = c.status === 'active' ? 'badge-booked' : (c.status === 'paused' ? 'badge-warm' : 'badge-hot');
                 const isPaused = c.status === 'paused';
+                const hasBrochure = Boolean(c.brochure_url);
+                const brochureBadge = hasBrochure
+                    ? `<a href="${c.brochure_url}" target="_blank" style="font-size:11px;color:#25D366;margin-left:8px;text-decoration:none;font-weight:600;">📄 Brochure Active</a>`
+                    : `<span style="font-size:11px;color:#F59E0B;margin-left:8px;font-weight:600;">⚠️ No Brochure</span>`;
                 return `
                 <div class="card" style="margin-bottom:14px; border: 1px solid #334155; background: #0F172A;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
@@ -822,8 +876,10 @@ const loadCampaigns = async () => {
                             <span class="badge ${statusBadge}">${(c.status||'active').toUpperCase()}</span>
                             <span style="font-size:11px;color:#94A3B8;margin-left:8px;">📅 Cal.com ID: <code style="color:#38BDF8;">${c.calcom_event_type_id || '6934775'}</code></span>
                             ${c.dedicated_inbound_number ? `<span style="font-size:11px;color:#10B981;margin-left:8px;">📞 DID: ${c.dedicated_inbound_number}</span>` : ''}
+                            ${brochureBadge}
                         </div>
-                        <div style="display:flex;gap:6px;">
+                        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                            <button class="btn btn-sm" style="background:#25D366;color:#0F172A;font-weight:700;" onclick="openBrochureModal('${c.id}')">📱 WhatsApp & Brochure</button>
                             <button class="btn btn-sm ${isPaused ? 'btn-cyan' : 'btn-danger'}" onclick="toggleCampaignPause('${c.id}', '${c.status}')">${isPaused ? '▶️ Resume' : '⏸️ Pause'}</button>
                             <a href="/api/campaigns/${c.id}/export-csv?type=daily" class="btn btn-sm btn-cyan">📥 Daily CSV</a>
                             <a href="/api/campaigns/${c.id}/export-csv?type=full" class="btn btn-sm btn-cyan">📥 Full CSV</a>
@@ -1587,6 +1643,224 @@ async function deleteClient(id) {
     await fetch(`/api/client-numbers/${id}`, { method: 'DELETE' });
     location.reload();
 }
+
+// WhatsApp & Brochure Modal Handlers
+function openBrochureModal(cid) {
+    const camp = (window._cached_campaigns || []).find(c => String(c.id) === String(cid));
+    if (!camp) return;
+
+    document.getElementById('modal_wb_cid').value = cid;
+    document.getElementById('modal_wb_title').innerHTML = `<span>📱 WhatsApp & Project Brochure: <span style="color:#25D366;">${camp.name}</span></span>`;
+    document.getElementById('modal_wb_project_name').value = camp.project_name || camp.name || '';
+    document.getElementById('modal_wb_site_address').value = camp.site_address || '';
+    document.getElementById('modal_wb_highlights').value = camp.project_highlights || '';
+    document.getElementById('modal_wb_pickup_notes').value = camp.pickup_drop_notes || '';
+    
+    const brochureUrl = camp.brochure_url || '';
+    document.getElementById('modal_wb_brochure_url').value = brochureUrl;
+    const previewEl = document.getElementById('modal_wb_url_preview');
+    const statusEl = document.getElementById('modal_wb_file_status');
+    const fileInput = document.getElementById('modal_wb_file_input');
+    if (fileInput) fileInput.value = '';
+    
+    if (brochureUrl) {
+        statusEl.innerHTML = '<span class="badge" style="background:rgba(37,211,102,0.2);color:#25D366;">Active Brochure</span>';
+        previewEl.innerHTML = `📄 <b>Current URL:</b> <a href="${brochureUrl}" target="_blank" style="color:#38BDF8;text-decoration:underline;">${brochureUrl}</a>`;
+    } else {
+        statusEl.innerHTML = '<span class="badge" style="background:rgba(245,158,11,0.2);color:#F59E0B;">No Brochure</span>';
+        previewEl.innerHTML = '<span style="color:#64748B;">No brochure file uploaded yet.</span>';
+    }
+    
+    document.getElementById('modal_wb_test_result').innerHTML = '';
+    document.getElementById('modal_whatsapp_brochure').style.display = 'flex';
+}
+
+function closeBrochureModal() {
+    document.getElementById('modal_whatsapp_brochure').style.display = 'none';
+}
+
+async function uploadBrochureFile() {
+    const cid = document.getElementById('modal_wb_cid').value;
+    const fileInput = document.getElementById('modal_wb_file_input');
+    if (!fileInput.files || !fileInput.files[0]) {
+        alert('Please choose a brochure file (PDF or image) to upload.');
+        return null;
+    }
+    const btn = document.getElementById('btn_upload_brochure');
+    btn.disabled = true;
+    btn.textContent = '⏳ Uploading...';
+    try {
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        const res = await fetch(`/api/campaigns/${cid}/upload-brochure`, {
+            method: 'POST',
+            body: formData
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            document.getElementById('modal_wb_brochure_url').value = data.brochure_url;
+            document.getElementById('modal_wb_file_status').innerHTML = '<span class="badge" style="background:rgba(37,211,102,0.2);color:#25D366;">Uploaded Successfully</span>';
+            document.getElementById('modal_wb_url_preview').innerHTML = `📄 <b>Uploaded:</b> <a href="${data.brochure_url}" target="_blank" style="color:#38BDF8;text-decoration:underline;">${data.brochure_url}</a>`;
+            return data.brochure_url;
+        } else {
+            alert('Upload failed: ' + (data.detail || 'Server error'));
+            return null;
+        }
+    } catch(e) {
+        alert('Upload network error: ' + e);
+        return null;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '⬆️ Upload Brochure';
+    }
+}
+
+async function saveProjectDetails() {
+    const cid = document.getElementById('modal_wb_cid').value;
+    const fileInput = document.getElementById('modal_wb_file_input');
+    let brochureUrl = document.getElementById('modal_wb_brochure_url').value;
+
+    const btn = document.getElementById('btn_save_project_details');
+    btn.disabled = true;
+    btn.textContent = '⏳ Saving...';
+
+    try {
+        if (fileInput.files && fileInput.files[0]) {
+            const uploadedUrl = await uploadBrochureFile();
+            if (uploadedUrl) {
+                brochureUrl = uploadedUrl;
+            }
+        }
+
+        const payload = {
+            project_name: document.getElementById('modal_wb_project_name').value.trim(),
+            site_address: document.getElementById('modal_wb_site_address').value.trim(),
+            project_highlights: document.getElementById('modal_wb_highlights').value.trim(),
+            pickup_drop_notes: document.getElementById('modal_wb_pickup_notes').value.trim(),
+            brochure_url: brochureUrl
+        };
+
+        const res = await fetch(`/api/campaigns/${cid}/update-details`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            alert('✅ Project details and brochure saved successfully!');
+            await loadCampaigns();
+            closeBrochureModal();
+        } else {
+            alert('❌ Failed to save: ' + (data.detail || 'Server error'));
+        }
+    } catch(e) {
+        alert('Save error: ' + e);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '💾 Save Project Details';
+    }
+}
+
+async function sendSampleWhatsApp() {
+    const cid = document.getElementById('modal_wb_cid').value;
+    const phone = document.getElementById('modal_wb_test_phone').value.trim();
+    const resEl = document.getElementById('modal_wb_test_result');
+    if (!phone) {
+        alert('Please enter a WhatsApp phone number with country code (e.g. +919876543210).');
+        return;
+    }
+    const btn = document.getElementById('btn_send_sample_wa');
+    btn.disabled = true;
+    btn.textContent = '⏳ Sending...';
+    resEl.innerHTML = '<span style="color:#38BDF8;">Sending sample brochure & intro message to ' + phone + '...</span>';
+
+    try {
+        const res = await fetch(`/api/campaigns/${cid}/test-brochure`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({to_phone: phone})
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            resEl.innerHTML = `<span style="color:#10B981;">✅ Sent successfully! Status: ${data.results?.doc?.status || 'OK'}. Check WhatsApp.</span>`;
+        } else {
+            resEl.innerHTML = `<span style="color:#EF4444;">❌ Send error: ${data.detail || JSON.stringify(data)}</span>`;
+        }
+    } catch(e) {
+        resEl.innerHTML = `<span style="color:#EF4444;">❌ Network error: ${e.message}</span>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '📤 Send Sample';
+    }
+}
 </script>
+
+<!-- Modal WhatsApp & Brochure Management -->
+<div id="modal_whatsapp_brochure" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.82); backdrop-filter:blur(5px); z-index:9999; align-items:center; justify-content:center; padding:16px;">
+  <div style="background:#0F172A; border:1px solid #334155; border-radius:12px; width:100%; max-width:680px; max-height:90vh; overflow-y:auto; padding:24px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.7); position:relative;">
+    
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #334155; padding-bottom:14px; margin-bottom:18px;">
+      <div>
+        <h3 id="modal_wb_title" style="color:#F8FAFC; font-size:17px; font-weight:700; display:flex; align-items:center; gap:8px;">
+          <span>📱 WhatsApp & Project Brochure</span>
+        </h3>
+        <p style="color:#94A3B8; font-size:12px; margin-top:3px;">Manage brochure, property details, and WhatsApp delivery</p>
+      </div>
+      <button type="button" onclick="closeBrochureModal()" style="background:transparent; border:none; color:#94A3B8; font-size:24px; cursor:pointer; padding:2px 8px; line-height:1;">&times;</button>
+    </div>
+
+    <input type="hidden" id="modal_wb_cid" value="" />
+
+    <!-- Section 1: Brochure File Upload -->
+    <div style="background:#1E293B; border:1px solid #334155; border-radius:8px; padding:16px; margin-bottom:18px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <label style="font-weight:700; color:#38BDF8; font-size:13px;">📄 Project Brochure (PDF or Image)</label>
+        <span id="modal_wb_file_status" style="font-size:12px;"></span>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <input type="file" id="modal_wb_file_input" accept=".pdf,.png,.jpg,.jpeg,.webp" style="flex:1; padding:8px; font-size:12px; background:#0F172A; border:1px solid #334155; border-radius:6px; color:#fff;" />
+        <button type="button" class="btn btn-sm btn-cyan" onclick="uploadBrochureFile()" id="btn_upload_brochure">⬆️ Upload Brochure</button>
+      </div>
+      <div id="modal_wb_url_preview" style="margin-top:10px; font-size:12px; word-break:break-all; color:#94A3B8;"></div>
+      <input type="hidden" id="modal_wb_brochure_url" value="" />
+    </div>
+
+    <!-- Section 2: Project Information -->
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:18px;">
+      <div class="form-group" style="grid-column:1/-1;">
+        <label style="font-weight:600;">Project Name</label>
+        <input type="text" id="modal_wb_project_name" placeholder="e.g. Kaamdhenu Grandeur" />
+      </div>
+      <div class="form-group" style="grid-column:1/-1;">
+        <label style="font-weight:600;">Site Address</label>
+        <textarea id="modal_wb_site_address" rows="2" placeholder="e.g. Sector 150, Noida Expressway, Near Metro Station"></textarea>
+      </div>
+      <div class="form-group" style="grid-column:1/-1;">
+        <label style="font-weight:600;">Key Highlights / Amenities</label>
+        <textarea id="modal_wb_highlights" rows="2" placeholder="e.g. 2 & 3 BHK Luxury Residences, 50,000 sq.ft Clubhouse, 80% Green Area"></textarea>
+      </div>
+      <div class="form-group" style="grid-column:1/-1;">
+        <label style="font-weight:600;">Free Pickup & Drop Service Notes</label>
+        <input type="text" id="modal_wb_pickup_notes" placeholder="e.g. Free AC Cab pickup/drop available across Delhi NCR for site visit" />
+      </div>
+    </div>
+
+    <div style="display:flex; justify-content:flex-end; gap:10px; border-bottom:1px solid #334155; padding-bottom:18px; margin-bottom:18px;">
+      <button type="button" class="btn" style="background:#10B981; color:#000; font-weight:700; padding:9px 20px;" onclick="saveProjectDetails()" id="btn_save_project_details">💾 Save Project Details</button>
+    </div>
+
+    <!-- Section 3: Test WhatsApp Dispatch -->
+    <div style="background:rgba(37, 211, 102, 0.08); border:1px solid rgba(37, 211, 102, 0.3); border-radius:8px; padding:16px;">
+      <label style="font-weight:700; color:#25D366; font-size:13px; display:block; margin-bottom:6px;">🧪 Send Sample to WhatsApp</label>
+      <p style="font-size:12px; color:#94A3B8; margin-bottom:10px;">Instantly send the saved project brochure PDF & introductory message to your phone via Meta WhatsApp Cloud API.</p>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <input type="text" id="modal_wb_test_phone" placeholder="+919876543210 (with country code)" style="flex:1; min-width:220px;" />
+        <button type="button" class="btn" style="background:#25D366; color:#0F172A; font-weight:700; padding:8px 18px;" onclick="sendSampleWhatsApp()" id="btn_send_sample_wa">📤 Send Sample</button>
+      </div>
+      <div id="modal_wb_test_result" style="margin-top:10px; font-size:12px; font-weight:600;"></div>
+    </div>
+
+  </div>
+</div>
 </body>
 </html>
