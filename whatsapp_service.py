@@ -191,41 +191,80 @@ async def send_text_message(
         return {"success": False, "error": str(e)}
 
 
-async def send_document_message(
+async def send_project_brochure(
     to_phone: str,
     document_url: str,
+    lead_name: str = "",
+    project_name: str = "",
+    filename: Optional[str] = None,
     caption: str = "",
-    filename: str = "Kaamdhenu_Project_Brochure.pdf",
     campaign_id: Optional[str] = None,
-    call_id: Optional[str] = None
+    call_id: Optional[str] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
-    Send a document (PDF brochure) to a WhatsApp user using Meta Cloud API.
+    Send the project brochure PDF using Meta's official approved template: 'project_brochure_shar'.
+    Enables sending brochures autonomously to leads without 24-hour window restrictions.
+
+    Meta Template Configuration:
+      - Template Name: 'project_brochure_shar'
+      - Language: 'en'
+      - Header: document (Dynamic PDF link from campaign / single call context)
+      - Body Parameters:
+          {{1}}: Lead / Customer Name (Default: "Valued Client")
+          {{2}}: Project / Business Name (Default: session's business_name or "Provident Palm Vista")
     """
     clean_to = format_whatsapp_phone(to_phone)
     if not clean_to:
-        logger.warning("send_document_message aborted: empty phone number")
+        logger.warning("send_project_brochure aborted: empty phone number")
         return {"success": False, "error": "Invalid phone number"}
+
+    if not document_url:
+        logger.warning("send_project_brochure aborted: empty document_url")
+        return {"success": False, "error": "Missing brochure document URL"}
+
+    # Dynamic fallback defaults as specified in requirements
+    raw_lead = (lead_name or kwargs.get("name") or kwargs.get("client_name") or "").strip()
+    if not raw_lead and caption:
+        m_name = re.search(r'Namaste\s+([^!]+)!', caption)
+        if m_name:
+            raw_lead = m_name.group(1).strip()
+    if not raw_lead or raw_lead.lower() in ("there", "caller", "unknown", "none", "null", "undefined", "lead"):
+        final_lead_name = "Valued Client"
+    else:
+        final_lead_name = raw_lead
+
+    raw_project = (project_name or kwargs.get("business_name") or "").strip()
+    if not raw_project and caption and "—" in caption:
+        raw_project = caption.split("—")[-1].strip()
+    if not raw_project and filename and filename.endswith("_Brochure.pdf"):
+        raw_project = filename.replace("_Brochure.pdf", "").replace("_", " ").strip()
+    if not raw_project or raw_project.lower() in ("none", "null", "undefined"):
+        final_project_name = os.getenv("DEFAULT_PROJECT_NAME") or os.getenv("BUSINESS_NAME") or "Provident Palm Vista"
+    else:
+        final_project_name = raw_project
+
+    clean_pname = re.sub(r'[^\w\s-]', '', final_project_name).strip()
+    doc_filename = filename.strip() if filename and filename.strip() else f"{clean_pname.replace(' ', '_')}_Brochure.pdf"
 
     token = os.getenv("WHATSAPP_TOKEN", WHATSAPP_TOKEN)
     phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", WHATSAPP_PHONE_NUMBER_ID)
 
-    doc_caption = caption or "Official Project Brochure & Floor Plans — Kaamdhenu Real Estate"
-
+    # Simulated mode if credentials are not configured
     if not (token and phone_id):
-        logger.info(f"[SIMULATED WHATSAPP DOC] To: {clean_to} | File: {filename} | URL: {document_url}")
-        sim_id = f"sim_doc_{int(time.time())}"
+        logger.info(f"[SIMULATED WHATSAPP TEMPLATE] To: {clean_to} | Template: project_brochure_shar | File: {doc_filename} | URL: {document_url}")
+        sim_id = f"sim_tmpl_{int(time.time())}"
         await insert_whatsapp_log(
             phone_number=clean_to,
-            message=f"[DOCUMENT] {filename} -> {document_url} | Caption: {doc_caption}",
+            message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
             status="simulated",
             call_id=call_id,
             direction="outbound",
-            message_type="document",
+            message_type="template",
             campaign_id=campaign_id
         )
         await push_unified_log(
-            "WhatsApp", "info", f"📄 [Demo/Simulated] WhatsApp brochure sent to {clean_to} ({filename})", call_id=call_id
+            "WhatsApp", "info", f"📄 [Demo/Simulated] Meta template 'project_brochure_shar' sent to {clean_to} ({doc_filename})", call_id=call_id
         )
         return {"success": True, "simulated": True, "message_id": sim_id}
 
@@ -234,15 +273,44 @@ async def send_document_message(
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
+
     payload = {
         "messaging_product": "whatsapp",
         "recipient_type": "individual",
         "to": clean_to,
-        "type": "document",
-        "document": {
-            "link": document_url,
-            "caption": doc_caption,
-            "filename": filename
+        "type": "template",
+        "template": {
+            "name": "project_brochure_shar",
+            "language": {
+                "code": "en"
+            },
+            "components": [
+                {
+                    "type": "header",
+                    "parameters": [
+                        {
+                            "type": "document",
+                            "document": {
+                                "link": document_url,
+                                "filename": doc_filename
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "body",
+                    "parameters": [
+                        {
+                            "type": "text",
+                            "text": final_lead_name
+                        },
+                        {
+                            "type": "text",
+                            "text": final_project_name
+                        }
+                    ]
+                }
+            ]
         }
     }
 
@@ -256,45 +324,50 @@ async def send_document_message(
                 msg_id = messages[0].get("id", "")
             await insert_whatsapp_log(
                 phone_number=clean_to,
-                message=f"[DOCUMENT] {filename} -> {document_url} | Caption: {doc_caption}",
+                message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
                 status="sent",
                 call_id=call_id,
                 direction="outbound",
-                message_type="document",
+                message_type="template",
                 campaign_id=campaign_id
             )
             await push_unified_log(
-                "WhatsApp", "info", f"📄 Project brochure PDF delivered to {clean_to} (ID: {msg_id})", call_id=call_id
+                "WhatsApp", "info", f"📄 Meta template brochure delivered to {clean_to} (ID: {msg_id})", call_id=call_id
             )
             return {"success": True, "message_id": msg_id, "data": resp_data}
         else:
             err_msg = resp_data.get("error", {}).get("message", json.dumps(resp_data))
-            logger.error(f"Meta WhatsApp API Error (document): {err_msg}")
+            logger.error(f"Meta WhatsApp API Error (template project_brochure_shar): {err_msg}")
             await insert_whatsapp_log(
                 phone_number=clean_to,
-                message=f"[DOCUMENT] {filename} -> {document_url}",
+                message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url}",
                 status=f"failed: {err_msg}",
                 call_id=call_id,
                 direction="outbound",
-                message_type="document",
+                message_type="template",
                 campaign_id=campaign_id
             )
             await push_unified_log(
-                "WhatsApp", "error", f"❌ Brochure PDF delivery failed to {clean_to}: {err_msg}", call_id=call_id
+                "WhatsApp", "error", f"❌ Meta template brochure delivery failed to {clean_to}: {err_msg}", call_id=call_id
             )
             return {"success": False, "error": err_msg, "status_code": status_code}
     except Exception as e:
-        logger.error(f"Error calling Meta WhatsApp API (document): {e}")
+        logger.error(f"Error calling Meta WhatsApp API (template project_brochure_shar): {e}")
         await insert_whatsapp_log(
             phone_number=clean_to,
-            message=f"[DOCUMENT] {filename} -> {document_url}",
+            message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url}",
             status=f"exception: {e}",
             call_id=call_id,
             direction="outbound",
-            message_type="document",
+            message_type="template",
             campaign_id=campaign_id
         )
         return {"success": False, "error": str(e)}
+
+
+# Backward-compatible aliases for all callers
+send_brochure = send_project_brochure
+send_document_message = send_project_brochure
 
 
 async def send_appointment_confirmation(
@@ -371,14 +444,15 @@ async def send_appointment_confirmation(
         call_id=call_id
     )
 
-    # 2. If brochure_url is present, send the PDF document as a follow-up
+    # 2. If brochure_url is present, send the PDF document as a follow-up via approved Meta template
     brochure_url = appointment_data.get("brochure_url") or lead_data.get("brochure_url")
     if brochure_url:
         try:
-            await send_document_message(
+            await send_project_brochure(
                 to_phone=clean_to,
                 document_url=brochure_url,
-                caption=f"Project Brochure & Floor Plans — {project_name}",
+                lead_name=lead_name,
+                project_name=project_name,
                 filename=f"{project_name.replace(' ', '_')}_Brochure.pdf",
                 campaign_id=campaign_id,
                 call_id=call_id
