@@ -220,8 +220,8 @@ async def extract_crm_qualification_from_transcript(transcript: str, fallback_da
         "job_profession": fallback_data.get("occupation", "") or "",
         "bhk": fallback_data.get("bhk", "") or "",
         "budget": fallback_data.get("budget", "") or "",
-        "timeline": fallback_data.get("possession", "Ready-to-Move") or "Ready-to-Move",
-        "funding_type": fallback_data.get("funding", "Bank Loan") or "Bank Loan",
+        "timeline": fallback_data.get("possession", "") or "-",
+        "funding_type": fallback_data.get("funding", "") or "-",
         "lead_score": fallback_data.get("lead_score", "Cold") or "Cold",
         "site_visit_interest": f"Yes ({fallback_data.get('site_visit')})" if fallback_data.get("site_visit") else "No",
         "cab_required": "Yes" if fallback_data.get("pickup") else "No",
@@ -245,9 +245,9 @@ Extract the customer qualification details into this EXACT JSON structure with t
     "job_profession": "Job / Business / Self-Employed or empty",
     "bhk": "1BHK / 2BHK / 3BHK or empty",
     "budget": "extracted budget string or empty",
-    "timeline": "Ready-to-Move / Under-Construction / 3-6 Months",
-    "funding_type": "Bank Loan / Self-Funding",
-    "lead_score": "Hot / Warm / Cold",
+    "timeline": "Ready-to-Move / Under-Construction / 3-6 Months or - if not mentioned",
+    "funding_type": "Bank Loan / Self-Funding or - if not mentioned",
+    "lead_score": "Hot / Warm / Cold / Dropped",
     "site_visit_interest": "Yes (Date/Time) / No / Maybe",
     "cab_required": "Yes / No",
     "main_objection": "Extracted objection or None",
@@ -259,9 +259,9 @@ Rules:
 2. "job_profession": IT, Corporate, Business, Self-Employed, etc.
 3. "bhk": Preferred BHK (e.g. 1BHK, 2BHK, 3BHK).
 4. "budget": Budget mentioned (e.g. 50L, 75 Lakhs, 1 Cr, etc.).
-5. "timeline": Ready-to-Move, Under-Construction, 3-6 Months, etc.
-6. "funding_type": Bank Loan or Self-Funding.
-7. "lead_score": "Hot" if site visit agreed, "Warm" if engaged/callback requested, "Cold" if disinterested/no answer.
+5. "timeline": ONLY if explicitly discussed by the caller (Ready-to-Move, Under-Construction, 3-6 Months). If NOT explicitly mentioned by the caller, return "-".
+6. "funding_type": ONLY if explicitly discussed (Bank Loan or Self-Funding). If NOT mentioned by caller, return "-".
+7. "lead_score": "Hot" if site visit booked or brochure requested, "Warm" if caller had active, genuine queries, "Cold" if disinterested/no engagement, "Dropped" if caller hung up quickly (<30s) or rejected immediately.
 8. "site_visit_interest": "Yes (Date/Time)", "No", or "Maybe".
 9. "cab_required": "Yes" if user wants/agreed to complimentary pickup cab, else "No".
 10. "main_objection": Reason for hesitation (e.g. "Price too high", "Looking in different area", "Call later", or "None").
@@ -329,14 +329,14 @@ Conversation Transcript:
     elif any(k in text_lower for k in ["business", "vyapar", "dukaan", "shop", "own work", "self"]):
         default_result["job_profession"] = "Business / Self-Employed"
 
-    if any(k in text_lower for k in ["loan", "bank", "emi", "finance"]):
+    if any(k in text_lower for k in ["bank loan", "home loan", "loan karwana", "emi pe", "finance karwana"]):
         default_result["funding_type"] = "Bank Loan"
-    elif any(k in text_lower for k in ["own funds", "self fund", "cash", "direct"]):
+    elif any(k in text_lower for k in ["own funds", "self fund", "self-funding", "direct cash"]):
         default_result["funding_type"] = "Self-Funding"
 
-    if any(k in text_lower for k in ["ready", "turant", "immediately"]):
+    if any(k in text_lower for k in ["ready to move", "ready-to-move", "turant shift", "immediate possession"]):
         default_result["timeline"] = "Ready-to-Move"
-    elif any(k in text_lower for k in ["under-construction", "construction", "next year"]):
+    elif any(k in text_lower for k in ["under-construction", "under construction", "next year possession"]):
         default_result["timeline"] = "Under-Construction"
 
     if any(k in text_lower for k in ["whatsapp pe bhejo", "whatsapp bhej do", "whatsapp kar do", "send on whatsapp", "haan whatsapp", "bhej dijiye"]):
@@ -683,16 +683,24 @@ async def entrypoint(ctx: agents.JobContext):
             except Exception:
                 pass
 
-        # Extract from tool_ctx if available
+        # Extract from tool_ctx if available (Strict: never assume Ready-to-Move or Bank Loan)
         t_client_name = getattr(tool_ctx, "client_name", "") or lead_name
         t_location = getattr(tool_ctx, "current_location", "")
         t_occupation = getattr(tool_ctx, "occupation", "")
         t_bhk = getattr(tool_ctx, "bhk_requirement", "")
         t_budget = getattr(tool_ctx, "budget", "")
-        t_purpose = getattr(tool_ctx, "purpose", "Self-Use")
-        t_possession = getattr(tool_ctx, "possession_timeline", "Ready-to-Move")
-        t_funding = getattr(tool_ctx, "funding_type", "Bank Loan")
-        t_lead_score = getattr(tool_ctx, "lead_score", "Warm" if dur > 15 else "Cold")
+        t_purpose = getattr(tool_ctx, "purpose", "") or "-"
+        t_possession = getattr(tool_ctx, "possession_timeline", "") or "-"
+        t_funding = getattr(tool_ctx, "funding_type", "") or "-"
+        
+        # Strict lead scoring: calls < 30s or short hang-ups must be Cold or Dropped (never default to Warm)
+        if dur < 15:
+            default_score = "Dropped"
+        elif dur < 30:
+            default_score = "Cold"
+        else:
+            default_score = "Cold"
+        t_lead_score = getattr(tool_ctx, "lead_score", "") or default_score
         t_commitment = getattr(tool_ctx, "commitment_risk", "Low")
         t_site_visit = getattr(tool_ctx, "site_visit_date", "")
         t_pickup = getattr(tool_ctx, "pickup_required", False)
@@ -796,33 +804,58 @@ async def entrypoint(ctx: agents.JobContext):
         }
         crm_data = await extract_crm_qualification_from_transcript(full_transcript, fallback_data)
 
-        loc_pref = crm_data.get("location") or t_location
-        job_prof = crm_data.get("job_profession") or t_occupation
-        bhk_pref = crm_data.get("bhk") or t_bhk
-        bud_range = crm_data.get("budget") or t_budget
-        time_frame = crm_data.get("timeline") or t_possession
-        fund_type = crm_data.get("funding_type") or t_funding
-        final_score = crm_data.get("lead_score") or t_lead_score
+        loc_pref = crm_data.get("location") or t_location or "-"
+        job_prof = crm_data.get("job_profession") or t_occupation or "-"
+        bhk_pref = crm_data.get("bhk") or t_bhk or "-"
+        bud_range = crm_data.get("budget") or t_budget or "-"
+
+        # Strict timeline: never default or invent Ready-to-Move
+        raw_time = (crm_data.get("timeline") or t_possession or "-").strip()
+        time_frame = raw_time if raw_time and raw_time not in ("None", "null", "") else "-"
+        lower_tr = full_transcript.lower()
+        if time_frame == "Ready-to-Move" and not any(w in lower_tr for w in ["ready to move", "ready-to-move", "turant shift", "immediate possession"]):
+            time_frame = "-"
+
+        # Strict funding: never default or invent Bank Loan
+        raw_fund = (crm_data.get("funding_type") or t_funding or "-").strip()
+        fund_type = raw_fund if raw_fund and raw_fund not in ("None", "null", "") else "-"
+        if fund_type == "Bank Loan" and not any(w in lower_tr for w in ["bank loan", "home loan", "loan", "emi", "finance"]):
+            fund_type = "-"
+
+        # Strict lead scoring evaluation:
+        # Calls < 30s or rejected -> strictly Cold or Dropped
+        # Calls asking for brochure / site visit -> Hot
+        # Calls with genuine qualification discussion -> Warm
+        wa_consent = crm_data.get("whatsapp_consent", False)
+        if t_site_visit or wa_consent or (t_whatsapp and "Consent" in t_whatsapp):
+            final_score = "Hot"
+        elif dur < 25 or t_outcome in ("rejected", "no_answer", "busy", "hung_up"):
+            final_score = "Dropped" if dur < 15 else "Cold"
+        else:
+            cand_score = crm_data.get("lead_score")
+            if cand_score in ("Hot", "Warm", "Cold", "Dropped"):
+                final_score = cand_score
+            else:
+                final_score = "Warm" if (bhk_pref != "-" and bud_range != "-") else "Cold"
+
         sv_interest = crm_data.get("site_visit_interest") or (f"Yes ({t_site_visit})" if t_site_visit else "No")
         cab_req = crm_data.get("cab_required") or ("Yes" if t_pickup else "No")
         main_obj = crm_data.get("main_objection") or t_objection or "None"
-        wa_consent = crm_data.get("whatsapp_consent", False)
         wa_status = "✅ Consent Given" if wa_consent else (t_whatsapp if t_whatsapp != "— Not Requested" else "— Not Requested")
 
-        # Resolve recording_url
+        # Resolve recording_url (Check local file or verified tool context; do NOT synthesize phantom URLs)
         rec_url = getattr(tool_ctx, "recording_url", None)
         if not rec_url and call_id:
-            s3_endpoint = os.getenv("S3_ENDPOINT_URL", "").rstrip("/")
-            s3_bucket = os.getenv("S3_BUCKET", "")
-            supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-            if s3_endpoint and s3_bucket:
-                rec_url = f"{s3_endpoint}/{s3_bucket}/recordings/{call_id}.mp4"
-            elif supabase_url:
-                rec_url = f"{supabase_url}/storage/v1/object/public/recordings/{call_id}.mp4"
+            from pathlib import Path
+            for ext in (".mp3", ".wav", ".mp4", ".ogg"):
+                rec_file = Path("recordings") / f"{call_id}{ext}"
+                if rec_file.exists():
+                    rec_url = f"/recordings/{call_id}{ext}"
+                    break
 
         visit_str = f" | Visit: {t_site_visit}" if t_site_visit else ""
         cab_str = f" (Cab: {t_pickup_loc or 'Yes'})" if t_pickup else ""
-        summary = f"{t_client_name} ({clean_phone}): {bhk_pref or t_bhk or 'TBD'} | Budget: {bud_range or t_budget or 'TBD'} | {t_purpose}{visit_str}{cab_str} | Score: {final_score} | Duration: {dur}s"
+        summary = f"{t_client_name} ({clean_phone}): {bhk_pref or 'TBD'} | Budget: {bud_range or 'TBD'} | {t_purpose}{visit_str}{cab_str} | Score: {final_score} | Duration: {dur}s"
 
         try:
             await log_call(

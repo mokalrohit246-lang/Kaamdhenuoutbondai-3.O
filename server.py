@@ -65,6 +65,15 @@ STATIC_BROCHURE_DIR = Path(__file__).parent / "static" / "brochures"
 STATIC_BROCHURE_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static/brochures", StaticFiles(directory=str(STATIC_BROCHURE_DIR)), name="static_brochures")
 
+# Mount recordings static directory
+RECORDINGS_DIR = Path(__file__).parent / "recordings"
+RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/recordings", StaticFiles(directory=str(RECORDINGS_DIR)), name="recordings")
+
+STATIC_RECORDINGS_DIR = Path(__file__).parent / "static" / "recordings"
+STATIC_RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/recordings", StaticFiles(directory=str(STATIC_RECORDINGS_DIR)), name="static_recordings")
+
 class SingleCallReq(BaseModel):
     phone: Optional[str] = None
     phone_number: Optional[str] = None
@@ -444,17 +453,26 @@ async def health():
     return {"status": "online", "service": "Kaamdhenu AI 3.0", "livekit_url": os.getenv("LIVEKIT_URL", "")}
 
 def enrich_recording_url(item: dict) -> dict:
-    """Ensure recording_url is populated from row or S3/Supabase storage URL if available."""
-    if not item.get("recording_url"):
-        cid = item.get("id") or item.get("call_id") or ""
-        if cid:
-            s3_endpoint = os.getenv("S3_ENDPOINT_URL", "").rstrip("/")
-            s3_bucket = os.getenv("S3_BUCKET", "")
-            supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
-            if s3_endpoint and s3_bucket:
-                item["recording_url"] = f"{s3_endpoint}/{s3_bucket}/recordings/{cid}.mp4"
-            elif supabase_url:
-                item["recording_url"] = f"{supabase_url}/storage/v1/object/public/recordings/{cid}.mp4"
+    """Ensure recording_url is populated only if file actually exists; never synthesize broken URLs."""
+    raw_url = item.get("recording_url")
+    if raw_url and str(raw_url).strip() not in ("", "None", "null", "-"):
+        item["recording_url"] = str(raw_url).strip()
+        return item
+
+    # Check local filesystem in RECORDINGS_DIR or STATIC_RECORDINGS_DIR
+    cid = item.get("id") or item.get("call_id") or ""
+    if cid:
+        for ext in (".mp3", ".wav", ".mp4", ".ogg", ".webm"):
+            rec_path = RECORDINGS_DIR / f"{cid}{ext}"
+            if rec_path.exists():
+                item["recording_url"] = f"/recordings/{cid}{ext}"
+                return item
+            static_rec_path = STATIC_RECORDINGS_DIR / f"{cid}{ext}"
+            if static_rec_path.exists():
+                item["recording_url"] = f"/static/recordings/{cid}{ext}"
+                return item
+
+    item["recording_url"] = None
     return item
 
 @app.get("/api/stats")
@@ -485,16 +503,31 @@ async def api_crm(phone: Optional[str] = None):
     return await get_contact_memory(phone=phone)
 
 @app.get("/api/campaigns/{campaign_id}/export")
-async def export_campaign_csv(campaign_id: str):
+async def export_campaign_csv(campaign_id: str, request: Request):
     calls = await get_calls(campaign_id=campaign_id, limit=1000)
+    calls = [enrich_recording_url(c) for c in calls]
+    base_url = str(request.base_url).rstrip("/")
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Date & Time", "Lead Name", "Phone Number", "Lead Score", "Outcome", "Summary", "Duration (s)", "Cost (INR)"])
+    writer.writerow([
+        "Date & Time", "Lead Name", "Phone Number", "Lead Score", "Timeline",
+        "Funding / Loan", "BHK", "Budget", "Outcome", "Summary",
+        "Duration (s)", "Cost (INR)", "Recording_Link"
+    ])
     for c in calls:
+        rec = c.get("recording_url") or "-"
+        if rec != "-" and rec.startswith("/"):
+            rec = f"{base_url}{rec}"
         writer.writerow([
             c.get("timestamp", ""), c.get("lead_name", ""), c.get("phone_number", ""),
-            c.get("lead_score", "Cold"), c.get("outcome", ""), c.get("summary", ""),
-            c.get("duration_seconds", 0), c.get("cost_inr", 0.0)
+            c.get("lead_score", "Cold"),
+            c.get("timeline") or c.get("possession_timeline") or "-",
+            c.get("funding_type") or "-",
+            c.get("bhk_preference") or c.get("bhk_requirement") or "-",
+            c.get("budget_range") or c.get("budget") or "-",
+            c.get("outcome", ""), c.get("summary", ""),
+            c.get("duration_seconds", 0), c.get("cost_inr", 0.0),
+            rec
         ])
     output.seek(0)
     return StreamingResponse(
@@ -1006,45 +1039,113 @@ async def api_campaign_logs(cid: str, category: str = "outbound"):
     return [enrich_recording_url(c) for c in calls]
 
 @app.get("/api/campaigns/{cid}/export-csv")
-async def api_campaign_export(cid: str, type: str = "full"):
+async def api_campaign_export(cid: str, request: Request, type: str = "full"):
     c_id = None if cid == "all" else cid
     calls = await get_calls(campaign_id=c_id, limit=5000)
     if type == "daily":
         today = datetime.utcnow().strftime("%Y-%m-%d")
         calls = [c for c in calls if c.get("timestamp", "").startswith(today)]
+    calls = [enrich_recording_url(c) for c in calls]
+    base_url = str(request.base_url).rstrip("/")
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "Time & Duration", "Client & Phone", "Location & Job", "BHK & Budget",
-        "Timeline & Funding", "Lead Score", "Site Visit & Cab", "Next Callback",
-        "Main Objection", "WhatsApp Status", "AI Ground Summary", "Cost"
+        "Call Date", "Call Time", "Phone Number", "Lead Name", "Duration (s)",
+        "Lead Score", "Timeline", "Loan / Funding", "BHK", "Budget",
+        "Location", "Job / Occupation", "Site Visit & Cab", "Next Callback",
+        "Main Objection", "WhatsApp Status", "AI Ground Summary", "Cost (INR)",
+        "Recording_Link"
     ])
     for c in calls:
+        ts = c.get("timestamp", "")
+        call_date = ts[:10] if len(ts) >= 10 else "-"
+        call_time = ts[11:16] if len(ts) >= 16 else "-"
         dur = c.get("duration_seconds", 0)
-        time_dur = f"{c.get('timestamp', '')[:16]} ({dur}s)"
-        client_phone = f"{c.get('client_name', c.get('lead_name', ''))} ({c.get('phone_number', '')})"
-        loc = c.get("current_location", "")
-        occ = c.get("occupation", "")
-        loc_job = f"{loc} / {occ}".strip(" /") or "-"
-        bhk = c.get("bhk_requirement", "")
-        bud = c.get("budget", "")
-        bhk_bud = f"{bhk} | {bud}".strip(" |") or "-"
-        time_l = c.get("possession_timeline", "")
-        fund = c.get("funding_type", "")
-        timeline_fund = f"{time_l} | {fund}".strip(" |") or "-"
+        phone = c.get("phone_number", "-")
+        lead = c.get("client_name") or c.get("lead_name") or "-"
+        score = c.get("lead_score", "Cold")
+        tl = c.get("timeline") or c.get("possession_timeline") or "-"
+        fund = c.get("funding_type") or "-"
+        bhk = c.get("bhk_preference") or c.get("bhk_requirement") or "-"
+        bud = c.get("budget_range") or c.get("budget") or "-"
+        loc = c.get("location_preference") or c.get("current_location") or "-"
+        job = c.get("job_profile") or c.get("occupation") or "-"
         visit_date = c.get("site_visit_date", "")
         pickup = "Yes - " + c.get("pickup_location", "") if c.get("pickup_required") else "No"
         visit_cab = f"{visit_date} (Cab: {pickup})" if visit_date else "-"
         cost_str = f"₹{c.get('cost_inr', 0.0)}"
+        rec_link = c.get("recording_url") or "-"
+        if rec_link != "-" and rec_link.startswith("/"):
+            rec_link = f"{base_url}{rec_link}"
 
         writer.writerow([
-            time_dur, client_phone, loc_job, bhk_bud, timeline_fund,
-            c.get("lead_score", "Cold"), visit_cab, c.get("next_callback", "-"),
-            c.get("objection", "-"), c.get("whatsapp_status", "-"),
-            c.get("summary", "-"), cost_str
+            call_date, call_time, phone, lead, dur,
+            score, tl, fund, bhk, bud,
+            loc, job, visit_cab, c.get("next_callback", "-"),
+            c.get("main_objection") or c.get("objection") or "-",
+            c.get("whatsapp_status", "-"),
+            c.get("summary", "-"), cost_str, rec_link
         ])
     output.seek(0)
     fname = f"campaign_{cid[:8] if cid != 'all' else 'all'}_{type}_report.csv"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={fname}"}
+    )
+
+@app.get("/api/logs/export/csv")
+async def api_export_logs_csv(request: Request, direction: Optional[str] = None, type: str = "full"):
+    """Dedicated endpoint to export call logs with direct playback/download links."""
+    calls = await get_calls(direction=direction, limit=5000)
+    if type == "daily":
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        calls = [c for c in calls if c.get("timestamp", "").startswith(today)]
+    calls = [enrich_recording_url(c) for c in calls]
+    base_url = str(request.base_url).rstrip("/")
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Call Date", "Call Time", "Phone Number", "Lead Name", "Duration (s)",
+        "Lead Score", "Timeline", "Loan / Funding", "BHK", "Budget",
+        "Location", "Job / Occupation", "Site Visit & Cab", "Next Callback",
+        "Main Objection", "WhatsApp Status", "AI Ground Summary", "Cost (INR)",
+        "Recording_Link"
+    ])
+    for c in calls:
+        ts = c.get("timestamp", "")
+        call_date = ts[:10] if len(ts) >= 10 else "-"
+        call_time = ts[11:16] if len(ts) >= 16 else "-"
+        dur = c.get("duration_seconds", 0)
+        phone = c.get("phone_number", "-")
+        lead = c.get("client_name") or c.get("lead_name") or "-"
+        score = c.get("lead_score", "Cold")
+        tl = c.get("timeline") or c.get("possession_timeline") or "-"
+        fund = c.get("funding_type") or "-"
+        bhk = c.get("bhk_preference") or c.get("bhk_requirement") or "-"
+        bud = c.get("budget_range") or c.get("budget") or "-"
+        loc = c.get("location_preference") or c.get("current_location") or "-"
+        job = c.get("job_profile") or c.get("occupation") or "-"
+        visit_date = c.get("site_visit_date", "")
+        pickup = "Yes - " + c.get("pickup_location", "") if c.get("pickup_required") else "No"
+        visit_cab = f"{visit_date} (Cab: {pickup})" if visit_date else "-"
+        rec_link = c.get("recording_url") or "-"
+        if rec_link != "-" and rec_link.startswith("/"):
+            rec_link = f"{base_url}{rec_link}"
+
+        writer.writerow([
+            call_date, call_time, phone, lead, dur,
+            score, tl, fund, bhk, bud,
+            loc, job, visit_cab, c.get("next_callback", "-"),
+            c.get("main_objection") or c.get("objection") or "-",
+            c.get("whatsapp_status", "-"),
+            c.get("summary", "-"),
+            f"₹{c.get('cost_inr', 0.0)}",
+            rec_link
+        ])
+    output.seek(0)
+    tag = direction or "all"
+    fname = f"call_logs_{tag}_{type}_report.csv"
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",

@@ -394,8 +394,8 @@ async def log_call(
     summary: str, reason: str, duration_seconds: int, cost_inr: float,
     recording_url: Optional[str] = None,
     client_name: str = "", current_location: str = "", occupation: str = "",
-    bhk_requirement: str = "", budget: str = "", purpose: str = "Self-Use",
-    possession_timeline: str = "Ready-to-Move", funding_type: str = "Bank Loan",
+    bhk_requirement: str = "", budget: str = "", purpose: str = "-",
+    possession_timeline: str = "-", funding_type: str = "-",
     commitment_risk: str = "Low", site_visit_date: str = "",
     pickup_required: bool = False, pickup_location: str = "",
     next_callback: str = "", objection: str = "", whatsapp_status: str = "— Not Requested",
@@ -407,13 +407,24 @@ async def log_call(
 ):
     try:
         db = await _adb()
-        loc = location_preference or current_location or ""
-        job = job_profile or occupation or ""
-        bhk_val = bhk_preference or bhk_requirement or ""
-        bud = budget_range or budget or ""
-        tl = timeline or possession_timeline or "Ready-to-Move"
-        fund = funding_type or "Bank Loan"
-        score = lead_score or "Warm"
+        loc = location_preference or current_location or "-"
+        job = job_profile or occupation or "-"
+        bhk_val = bhk_preference or bhk_requirement or "-"
+        bud = budget_range or budget or "-"
+        tl = timeline or possession_timeline or "-"
+        fund = funding_type or "-"
+        
+        # Strict lead scoring: calls < 30s or incomplete calls must NOT default to Warm
+        dur_sec = int(duration_seconds)
+        if lead_score:
+            score = lead_score
+        elif dur_sec < 15:
+            score = "Dropped"
+        elif dur_sec < 30:
+            score = "Cold"
+        else:
+            score = "Cold"
+
         cab = cab_required if cab_required else ("Yes" if pickup_required else "No")
         cab_bool = True if str(cab).lower() in ("true", "yes", "1") or pickup_required else False
         obj = main_objection or objection or ""
@@ -462,8 +473,8 @@ async def log_call(
             row[k] = v
         if campaign_id:
             row["campaign_id"] = campaign_id
-        if recording_url:
-            row["recording_url"] = recording_url
+        if recording_url and str(recording_url).strip() not in ("", "None", "null", "-"):
+            row["recording_url"] = str(recording_url).strip()
 
         # Resilient upsert: gracefully strip any column not defined in schema cache
         while True:
