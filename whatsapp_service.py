@@ -250,13 +250,16 @@ async def send_project_brochure(
     token = os.getenv("WHATSAPP_TOKEN", WHATSAPP_TOKEN)
     phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", WHATSAPP_PHONE_NUMBER_ID)
 
+    template_name = (kwargs.get("template_name") or os.getenv("WHATSAPP_TEMPLATE_NAME") or "project_brochure_shar").strip()
+    template_lang = (kwargs.get("template_lang") or os.getenv("WHATSAPP_TEMPLATE_LANG") or "en").strip()
+
     # Simulated mode if credentials are not configured
     if not (token and phone_id):
-        logger.info(f"[SIMULATED WHATSAPP TEMPLATE] To: {clean_to} | Template: project_brochure_shar | File: {doc_filename} | URL: {document_url}")
+        logger.info(f"[SIMULATED WHATSAPP TEMPLATE] To: {clean_to} | Template: {template_name} | File: {doc_filename} | URL: {document_url}")
         sim_id = f"sim_tmpl_{int(time.time())}"
         await insert_whatsapp_log(
             phone_number=clean_to,
-            message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
+            message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
             status="simulated",
             call_id=call_id,
             direction="outbound",
@@ -264,7 +267,7 @@ async def send_project_brochure(
             campaign_id=campaign_id
         )
         await push_unified_log(
-            "WhatsApp", "info", f"📄 [Demo/Simulated] Meta template 'project_brochure_shar' sent to {clean_to} ({doc_filename})", call_id=call_id
+            "WhatsApp", "info", f"📄 [Demo/Simulated] Meta template '{template_name}' sent to {clean_to} ({doc_filename})", call_id=call_id
         )
         return {"success": True, "simulated": True, "message_id": sim_id}
 
@@ -280,9 +283,9 @@ async def send_project_brochure(
         "to": clean_to,
         "type": "template",
         "template": {
-            "name": "project_brochure_shar",
+            "name": template_name,
             "language": {
-                "code": "en"
+                "code": template_lang
             },
             "components": [
                 {
@@ -324,7 +327,7 @@ async def send_project_brochure(
                 msg_id = messages[0].get("id", "")
             await insert_whatsapp_log(
                 phone_number=clean_to,
-                message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
+                message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
                 status="sent",
                 call_id=call_id,
                 direction="outbound",
@@ -337,10 +340,10 @@ async def send_project_brochure(
             return {"success": True, "message_id": msg_id, "data": resp_data}
         else:
             err_msg = resp_data.get("error", {}).get("message", json.dumps(resp_data))
-            logger.error(f"Meta WhatsApp API Error (template project_brochure_shar): {err_msg}")
+            logger.error(f"Meta WhatsApp API Error (template {template_name}): {err_msg}")
             await insert_whatsapp_log(
                 phone_number=clean_to,
-                message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url}",
+                message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url}",
                 status=f"failed: {err_msg}",
                 call_id=call_id,
                 direction="outbound",
@@ -352,10 +355,10 @@ async def send_project_brochure(
             )
             return {"success": False, "error": err_msg, "status_code": status_code}
     except Exception as e:
-        logger.error(f"Error calling Meta WhatsApp API (template project_brochure_shar): {e}")
+        logger.error(f"Error calling Meta WhatsApp API (template {template_name}): {e}")
         await insert_whatsapp_log(
             phone_number=clean_to,
-            message=f"[TEMPLATE: project_brochure_shar] {doc_filename} -> {document_url}",
+            message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url}",
             status=f"exception: {e}",
             call_id=call_id,
             direction="outbound",
