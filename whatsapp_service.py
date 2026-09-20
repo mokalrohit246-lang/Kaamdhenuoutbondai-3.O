@@ -203,12 +203,18 @@ async def send_project_brochure(
     **kwargs
 ) -> Dict[str, Any]:
     """
-    Send the project brochure PDF using Meta's official approved template: 'project_brochure_shar'.
+    Send the project brochure PDF using Meta's official approved template: 'project_brochure_share'.
     Enables sending brochures autonomously to leads without 24-hour window restrictions.
 
+    Includes automatic fallback retry for Meta Error #132001:
+      1. Try: project_brochure_share + en_US
+      2. Retry: project_brochure_share + en
+      3. Retry: project_brochure_shar  + en_US
+      4. Retry: project_brochure_shar  + en
+
     Meta Template Configuration:
-      - Template Name: 'project_brochure_shar'
-      - Language: 'en'
+      - Template Name: 'project_brochure_share' (approved name in Meta Business Manager)
+      - Language: 'en_US' (primary), 'en' (fallback)
       - Header: document (Dynamic PDF link from campaign / single call context)
       - Body Parameters:
           {{1}}: Lead / Customer Name (Default: "Valued Client")
@@ -250,16 +256,17 @@ async def send_project_brochure(
     token = os.getenv("WHATSAPP_TOKEN", WHATSAPP_TOKEN)
     phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", WHATSAPP_PHONE_NUMBER_ID)
 
-    template_name = (kwargs.get("template_name") or os.getenv("WHATSAPP_TEMPLATE_NAME") or "project_brochure_shar").strip()
-    template_lang = (kwargs.get("template_lang") or os.getenv("WHATSAPP_TEMPLATE_LANG") or "en").strip()
+    # Primary template name and language (corrected from truncated 'shar' to full 'share')
+    primary_name = (kwargs.get("template_name") or os.getenv("WHATSAPP_TEMPLATE_NAME") or "project_brochure_share").strip()
+    primary_lang = (kwargs.get("template_lang") or os.getenv("WHATSAPP_TEMPLATE_LANG") or "en_US").strip()
 
     # Simulated mode if credentials are not configured
     if not (token and phone_id):
-        logger.info(f"[SIMULATED WHATSAPP TEMPLATE] To: {clean_to} | Template: {template_name} | File: {doc_filename} | URL: {document_url}")
+        logger.info(f"[SIMULATED WHATSAPP TEMPLATE] To: {clean_to} | Template: {primary_name} | Lang: {primary_lang} | File: {doc_filename} | URL: {document_url}")
         sim_id = f"sim_tmpl_{int(time.time())}"
         await insert_whatsapp_log(
             phone_number=clean_to,
-            message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
+            message=f"[TEMPLATE: {primary_name}] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
             status="simulated",
             call_id=call_id,
             direction="outbound",
@@ -267,7 +274,7 @@ async def send_project_brochure(
             campaign_id=campaign_id
         )
         await push_unified_log(
-            "WhatsApp", "info", f"📄 [Demo/Simulated] Meta template '{template_name}' sent to {clean_to} ({doc_filename})", call_id=call_id
+            "WhatsApp", "info", f"📄 [Demo/Simulated] Meta template '{primary_name}' ({primary_lang}) sent to {clean_to} ({doc_filename})", call_id=call_id
         )
         return {"success": True, "simulated": True, "message_id": sim_id}
 
@@ -277,88 +284,142 @@ async def send_project_brochure(
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": clean_to,
-        "type": "template",
-        "template": {
-            "name": template_name,
-            "language": {
-                "code": template_lang
-            },
-            "components": [
-                {
-                    "type": "header",
-                    "parameters": [
-                        {
-                            "type": "document",
-                            "document": {
-                                "link": document_url,
-                                "filename": doc_filename
-                            }
-                        }
-                    ]
+    def _build_template_payload(tmpl_name: str, lang_code: str) -> dict:
+        return {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": clean_to,
+            "type": "template",
+            "template": {
+                "name": tmpl_name,
+                "language": {
+                    "code": lang_code
                 },
-                {
-                    "type": "body",
-                    "parameters": [
-                        {
-                            "type": "text",
-                            "text": final_lead_name
-                        },
-                        {
-                            "type": "text",
-                            "text": final_project_name
-                        }
-                    ]
-                }
-            ]
+                "components": [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type": "document",
+                                "document": {
+                                    "link": document_url,
+                                    "filename": doc_filename
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {
+                                "type": "text",
+                                "text": final_lead_name
+                            },
+                            {
+                                "type": "text",
+                                "text": final_project_name
+                            }
+                        ]
+                    }
+                ]
+            }
         }
-    }
+
+    def _is_132001_error(code: int, data: dict) -> bool:
+        """Check if the response is Meta Error #132001 (template name/translation mismatch)."""
+        if code in (200, 201):
+            return False
+        err = data.get("error", {})
+        err_code = err.get("code", 0)
+        err_subcode = err.get("error_subcode", 0)
+        err_msg = err.get("message", "").lower()
+        return (
+            err_code == 132001 or err_subcode == 132001
+            or "does not exist" in err_msg
+            or "132001" in str(err_code) or "132001" in str(err_subcode)
+        )
+
+    # Fallback chain for Meta Error #132001:
+    # 1. project_brochure_share + en_US  (most likely correct)
+    # 2. project_brochure_share + en     (if en_US not matching)
+    # 3. project_brochure_shar  + en_US  (if name was actually truncated in Meta)
+    # 4. project_brochure_shar  + en     (last resort)
+    fallback_chain = [
+        (primary_name, primary_lang),
+    ]
+    # Add smart fallbacks (avoid duplicates)
+    for name, lang in [
+        ("project_brochure_share", "en"),
+        ("project_brochure_shar", "en_US"),
+        ("project_brochure_shar", "en"),
+        ("project_brochure_share", "en_US"),
+    ]:
+        if (name, lang) not in fallback_chain:
+            fallback_chain.append((name, lang))
+
+    last_err_msg = ""
+    last_status_code = 0
 
     try:
-        status_code, resp_data = await _post_json(url, headers=headers, json_payload=payload, timeout=12.0)
+        for attempt_idx, (tmpl_name, lang_code) in enumerate(fallback_chain):
+            payload = _build_template_payload(tmpl_name, lang_code)
+            status_code, resp_data = await _post_json(url, headers=headers, json_payload=payload, timeout=12.0)
+            last_status_code = status_code
 
-        if status_code in (200, 201):
-            msg_id = ""
-            messages = resp_data.get("messages", [])
-            if messages:
-                msg_id = messages[0].get("id", "")
-            await insert_whatsapp_log(
-                phone_number=clean_to,
-                message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
-                status="sent",
-                call_id=call_id,
-                direction="outbound",
-                message_type="template",
-                campaign_id=campaign_id
-            )
-            await push_unified_log(
-                "WhatsApp", "info", f"📄 Meta template brochure delivered to {clean_to} (ID: {msg_id})", call_id=call_id
-            )
-            return {"success": True, "message_id": msg_id, "data": resp_data}
-        else:
-            err_msg = resp_data.get("error", {}).get("message", json.dumps(resp_data))
-            logger.error(f"Meta WhatsApp API Error (template {template_name}): {err_msg}")
-            await insert_whatsapp_log(
-                phone_number=clean_to,
-                message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url}",
-                status=f"failed: {err_msg}",
-                call_id=call_id,
-                direction="outbound",
-                message_type="template",
-                campaign_id=campaign_id
-            )
-            await push_unified_log(
-                "WhatsApp", "error", f"❌ Meta template brochure delivery failed to {clean_to}: {err_msg}", call_id=call_id
-            )
-            return {"success": False, "error": err_msg, "status_code": status_code}
-    except Exception as e:
-        logger.error(f"Error calling Meta WhatsApp API (template {template_name}): {e}")
+            if status_code in (200, 201):
+                msg_id = ""
+                messages = resp_data.get("messages", [])
+                if messages:
+                    msg_id = messages[0].get("id", "")
+                used_label = f"{tmpl_name}/{lang_code}"
+                await insert_whatsapp_log(
+                    phone_number=clean_to,
+                    message=f"[TEMPLATE: {used_label}] {doc_filename} -> {document_url} | Lead: {final_lead_name} | Project: {final_project_name}",
+                    status="sent",
+                    call_id=call_id,
+                    direction="outbound",
+                    message_type="template",
+                    campaign_id=campaign_id
+                )
+                if attempt_idx > 0:
+                    logger.info(f"Meta template succeeded on fallback attempt #{attempt_idx + 1}: {used_label}")
+                await push_unified_log(
+                    "WhatsApp", "info", f"📄 Meta template brochure delivered to {clean_to} (ID: {msg_id}, tpl: {used_label})", call_id=call_id
+                )
+                return {"success": True, "message_id": msg_id, "data": resp_data, "template_used": used_label}
+
+            # Check if this is a 132001 error — if so, try the next fallback
+            if _is_132001_error(status_code, resp_data) and attempt_idx < len(fallback_chain) - 1:
+                err_detail = resp_data.get("error", {}).get("message", "")
+                logger.warning(f"Meta Error #132001 with {tmpl_name}/{lang_code}: {err_detail} — retrying with next fallback...")
+                continue
+
+            # Non-132001 error or last fallback exhausted — break and report
+            last_err_msg = resp_data.get("error", {}).get("message", json.dumps(resp_data))
+            break
+
+        # All attempts exhausted or non-retryable error
+        if not last_err_msg:
+            last_err_msg = "All template name/language fallback combinations failed (Error #132001)"
+        logger.error(f"Meta WhatsApp API Error (template): {last_err_msg}")
         await insert_whatsapp_log(
             phone_number=clean_to,
-            message=f"[TEMPLATE: {template_name}] {doc_filename} -> {document_url}",
+            message=f"[TEMPLATE FAILED] {doc_filename} -> {document_url}",
+            status=f"failed: {last_err_msg}",
+            call_id=call_id,
+            direction="outbound",
+            message_type="template",
+            campaign_id=campaign_id
+        )
+        await push_unified_log(
+            "WhatsApp", "error", f"❌ Meta template brochure delivery failed to {clean_to}: {last_err_msg}", call_id=call_id
+        )
+        return {"success": False, "error": last_err_msg, "status_code": last_status_code}
+    except Exception as e:
+        logger.error(f"Error calling Meta WhatsApp API (template): {e}")
+        await insert_whatsapp_log(
+            phone_number=clean_to,
+            message=f"[TEMPLATE: {primary_name}] {doc_filename} -> {document_url}",
             status=f"exception: {e}",
             call_id=call_id,
             direction="outbound",
