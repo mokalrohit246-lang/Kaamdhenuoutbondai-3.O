@@ -70,7 +70,7 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
             input_cfg = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=300,
+                    silence_duration_ms=250,
                     prefix_padding_ms=100
                 )
             )
@@ -97,7 +97,7 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
         llm=_google_llm(model="gemini-2.0-flash") if _google_llm else None,
         tts=tts,
         vad=silero.VAD.load(
-            min_silence_duration=0.3,
+            min_silence_duration=0.25,
             prefix_padding_duration=0.1
         ),
         tools=tools
@@ -428,12 +428,15 @@ async def entrypoint(ctx: agents.JobContext):
         # ===================================================================
         # PHASE 3: ASYNC DB LOOKUPS (only for inbound, run concurrently)
         # ===================================================================
+        inbound_prior_project = ""  # Tracks prior project context for returning callers
         if direction == "inbound":
             # Run both lookups concurrently to minimize delay
             camp_task = asyncio.create_task(find_campaign_by_inbound_number(phone_number))
             ctx_task = asyncio.create_task(find_recent_outbound_context(phone_number))
 
             camp = await camp_task
+            ctx_info = await ctx_task  # Always resolve — we need this for returning caller memory
+
             if camp:
                 campaign_id = camp.get("id")
                 log_category = "dedicated_inbound"
@@ -450,24 +453,40 @@ async def entrypoint(ctx: agents.JobContext):
                         custom_prompt = ag_prof.get("system_prompt") or custom_prompt
                         calcom_event_type_id = ag_prof.get("calcom_event_type_id") or camp.get("calcom_event_type_id") or calcom_event_type_id
                 await push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id)
-            else:
-                ctx_info = await ctx_task
-                if ctx_info.get("found"):
+
+            # ALWAYS check for returning caller context (even if dedicated campaign matched)
+            if ctx_info.get("found"):
+                prior_lead = ctx_info.get("lead_name", "")
+                # CRITICAL: project_name must NEVER equal the lead's own name
+                prior_proj = ctx_info.get("project_name") or ""
+                if prior_proj and prior_lead and prior_proj.strip().lower() == prior_lead.strip().lower():
+                    prior_proj = ""
+                prior_proj = prior_proj or business_name
+
+                # Update lead_name if we found a real name from CRM
+                if prior_lead and prior_lead.strip().lower() not in ("there", "caller", "unknown", "lead", ""):
+                    lead_name = prior_lead
+
+                # Store prior project for greeting injection
+                inbound_prior_project = prior_proj
+                project_name = prior_proj
+
+                if not campaign_id:
                     campaign_id = ctx_info.get("campaign_id") or campaign_id
-                    lead_name = ctx_info.get("lead_name", lead_name)
-                    # CRITICAL: project_name must NEVER equal the lead's own name
-                    proj_name = ctx_info.get("project_name") or ""
-                    if proj_name and lead_name and proj_name.strip().lower() == lead_name.strip().lower():
-                        proj_name = ""
-                    proj_name = proj_name or business_name
-                    log_category = "campaign_callback"
-                    custom_prompt = (
-                        f"You are {agent_name}, Senior Property Consultant for Kaamdhenu Real Estate.\n"
-                        f"Important context: The client {lead_name} was recently called regarding {proj_name}.\n"
-                        f"Greeting: Speak this opening line: 'Namaste {lead_name}! Main {agent_name} Kaamdhenu Real Estate se baat kar rahi hoon. Aapko humare {proj_name} ke regarding call gaya tha... Batayein main aapki kya madad kar sakti hoon?'\n"
-                        f"Speak naturally, instantly mirroring the caller's language (Hindi, Marathi, Gujarati, English, etc.) without announcing the switch."
-                    )
-                    await push_unified_log("CRM", "info", f"Callback detected from prior campaign lead: {lead_name}", call_id=call_id)
+                log_category = log_category if camp else "campaign_callback"
+
+                # Build context-aware system prompt for returning callers
+                custom_prompt = (
+                    f"You are {agent_name}, Senior Property Consultant for Kaamdhenu Real Estate.\n"
+                    f"CRITICAL CONTEXT: The caller ({lead_name}) was RECENTLY contacted regarding the '{prior_proj}' project.\n"
+                    f"They are calling BACK — this is NOT a cold call. They already know about the project.\n"
+                    f"Do NOT introduce the project from scratch. Acknowledge the prior conversation and ask how you can help further.\n"
+                    f"If they ask about the same project, provide detailed answers. If they want to discuss something new, smoothly transition.\n"
+                    f"Speak naturally, instantly mirroring the caller's language (Hindi, Marathi, Gujarati, English, etc.) without announcing the switch."
+                )
+                await push_unified_log("CRM", "info", f"Returning caller detected: {lead_name} (prior project: {prior_proj})", call_id=call_id)
+            elif not camp:
+                await push_unified_log("CRM", "info", f"Fresh inbound caller — no prior CRM context found", call_id=call_id)
 
         # ===================================================================
         # PHASE 4: BUILD SYSTEM PROMPT
@@ -643,7 +662,24 @@ async def entrypoint(ctx: agents.JobContext):
             "scheduled callback" in (lead_notes or "").lower()
         )
 
-        if direction == "inbound":
+        # Re-evaluate valid_lead_name since Phase 3 may have updated lead_name from CRM
+        valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
+
+        if direction == "inbound" and inbound_prior_project and valid_lead_name:
+            # RETURNING CALLER — acknowledge prior outreach with project context
+            greeting_text = (
+                f"Namaste {lead_name} ji! Main {agent_name}, {business_name} se baat kar rahi hoon. "
+                f"Thodi der pehle humari {inbound_prior_project} project ke silsile mein baat hui thi... "
+                f"Bataiye, isme main aapki aur kya madad kar sakti hoon?"
+            )
+        elif direction == "inbound" and inbound_prior_project:
+            # Returning caller but name unknown
+            greeting_text = (
+                f"Namaste! Main {agent_name}, {business_name} se. "
+                f"Abhi kuch der pehle aapko humari {inbound_prior_project} project ke baare mein call gaya tha... "
+                f"Bataiye, main aapki kaise madad kar sakti hoon?"
+            )
+        elif direction == "inbound":
             greeting_text = f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I help you today?"
         elif is_callback_call:
             greeting_text = f"Namaste {lead_name} ji, {agent_name} baat kar rahi hoon {business_name} se. Aapne call karne ko kaha tha."
@@ -656,7 +692,17 @@ async def entrypoint(ctx: agents.JobContext):
             active_project = project_name.strip() if project_name and project_name.strip() and project_name.strip() != business_name else ""
             project_pitch = f"{business_name} ke {active_project} project" if active_project else f"{business_name}"
 
-            if is_callback_call:
+            if direction == "inbound" and inbound_prior_project:
+                # RETURNING INBOUND CALLER — acknowledge prior outreach, don't pitch from scratch
+                greeting_instruction = (
+                    f"Speak this opening line naturally: '{greeting_text}'. "
+                    f"This is a RETURNING caller who was recently contacted about {inbound_prior_project}. "
+                    f"After greeting, PAUSE and let the caller speak first. They are calling back for a reason — listen to what they need. "
+                    f"Answer their questions about {inbound_prior_project} with detailed knowledge. "
+                    f"Do NOT re-introduce yourself or the project from scratch. Do NOT say 'Aapne inquiry ki thi'. "
+                    f"Seamlessly mirror whatever language the user speaks without announcing or commenting on language changes."
+                )
+            elif is_callback_call:
                 greeting_instruction = (
                     f"Speak this opening line naturally: '{greeting_text}'. "
                     f"Immediately pause and LET THE USER SPEAK. Do NOT pitch immediately. "
