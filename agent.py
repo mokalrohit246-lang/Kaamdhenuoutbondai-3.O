@@ -63,14 +63,14 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # ULTRA-FAST PURE GEMINI REALTIME
+    # ULTRA-FAST PURE GEMINI REALTIME — aggressive endpointing for sub-second latency
     if use_realtime and _google_realtime is not None:
         try:
             from google.genai import types as _gt
             input_cfg = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
                     end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=500,
+                    silence_duration_ms=300,
                     prefix_padding_ms=100
                 )
             )
@@ -89,14 +89,17 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
                 tools=tools
             )
 
-    # PIPELINE FALLBACK
+    # PIPELINE FALLBACK — tuned Silero VAD for aggressive turn detection
     stt = _deepgram_stt(model=os.getenv("STT_MODEL", "nova-3"), language="multi") if _deepgram_stt and os.getenv("DEEPGRAM_API_KEY") else None
     tts = _google_tts(voice_name=gemini_voice) if _google_tts else None
     return AgentSession(
         stt=stt,
         llm=_google_llm(model="gemini-2.0-flash") if _google_llm else None,
         tts=tts,
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(
+            min_silence_duration=0.3,
+            prefix_padding_duration=0.1
+        ),
         tools=tools
     )
 
@@ -494,6 +497,19 @@ async def entrypoint(ctx: agents.JobContext):
 """
         system_prompt = system_prompt + "\n" + strict_rules
 
+        # === HUMAN BACKCHANNEL & FILLER BEHAVIOR FOR NATURAL CONVERSATION ===
+        conversational_speed_rules = """
+[CONVERSATIONAL SPEED & HUMAN FILLERS]
+- Respond INSTANTLY without thinking pauses. NEVER leave dead air or awkward silences.
+- When the user asks a question, IMMEDIATELY start your response with natural Indian conversational fillers:
+  'हाँ जी...', 'जी बिल्कुल...', 'हाँ तो सर...', 'हाँ...', 'Achha...', 'Ji sir...', 'Bilkul...' before answering specifics.
+- Keep sentences SHORT, CRISP, and conversational — like a real Indian executive on a phone call.
+- NEVER monologue. After every 2-3 sentences, pause briefly to let the caller respond.
+- Use active listening sounds: 'Hmm', 'Ji', 'Achha' while the user is speaking.
+- If the user is silent for more than 2 seconds, gently prompt: 'Sir/Ma'am, aap sun rahe hain na?' or 'Hello? Main sun rahi hoon.'
+"""
+        system_prompt = system_prompt + "\n" + conversational_speed_rules
+
         # === DYNAMIC LEAD CONTEXT INJECTION FOR OUTBOUND CALLS ===
         valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
         if direction == "outbound" and valid_lead_name:
@@ -548,16 +564,48 @@ async def entrypoint(ctx: agents.JobContext):
 
         session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt, voice=agent_voice)
 
+        transcript_entries = []
+        def _record_speech(speaker: str, text: str):
+            if text and str(text).strip():
+                transcript_entries.append(f"{speaker}: {str(text).strip()}")
+
+        # ===================================================================
+        # PHASE 5a: OUTBOUND SIP DIAL — BEFORE session start to prevent
+        # ringing / SIP 183 early media from being streamed into Gemini.
+        # wait_until_answered=True ensures we gate on 200 OK (call answered).
+        # ===================================================================
+        if direction == "outbound" and phone_number:
+            trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
+            if trunk_id:
+                try:
+                    await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
+                    await ctx.api.sip.create_sip_participant(
+                        api.CreateSIPParticipantRequest(
+                            room_name=ctx.room.name,
+                            sip_trunk_id=trunk_id,
+                            sip_call_to=phone_number,
+                            participant_identity=f"sip_{phone_number}",
+                            wait_until_answered=True
+                        )
+                    )
+                    await push_unified_log("SIP", "info", f"Call answered by {phone_number} (200 OK)", call_id=call_id)
+                    # 500ms audio drain buffer: flush residual ringing/early-media
+                    # artifacts from the audio track before Gemini starts listening
+                    await asyncio.sleep(0.5)
+                except Exception as dial_err:
+                    await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
+                    ctx.shutdown()
+                    return
+
+        # ===================================================================
+        # PHASE 5b: START GEMINI SESSION — now that the call is answered and
+        # audio is clean (no ringing artifacts feeding into the model).
+        # ===================================================================
         session_start_task = asyncio.create_task(session.start(
             room=ctx.room,
             agent=KaamdhenuAssistant(instructions=system_prompt),
             room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
         ))
-
-        transcript_entries = []
-        def _record_speech(speaker: str, text: str):
-            if text and str(text).strip():
-                transcript_entries.append(f"{speaker}: {str(text).strip()}")
 
         try:
             @session.on("user_speech_committed")
@@ -575,27 +623,6 @@ async def entrypoint(ctx: agents.JobContext):
                 _record_speech("Agent", str(content))
         except Exception:
             pass
-
-        # Outbound dial
-        if direction == "outbound" and phone_number:
-            trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
-            if trunk_id:
-                try:
-                    await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
-                    await ctx.api.sip.create_sip_participant(
-                        api.CreateSIPParticipantRequest(
-                            room_name=ctx.room.name,
-                            sip_trunk_id=trunk_id,
-                            sip_call_to=phone_number,
-                            participant_identity=f"sip_{phone_number}",
-                            wait_until_answered=True
-                        )
-                    )
-                    await push_unified_log("SIP", "info", f"Call answered by {phone_number}", call_id=call_id)
-                except Exception as dial_err:
-                    await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
-                    ctx.shutdown()
-                    return
 
         await session_start_task
         await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
