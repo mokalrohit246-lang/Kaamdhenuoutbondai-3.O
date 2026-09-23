@@ -16,7 +16,8 @@ from db import (
     save_callback, get_campaign
 )
 from whatsapp_service import (
-    send_text_message, send_document_message, send_appointment_confirmation, format_whatsapp_phone
+    send_text_message, send_document_message, send_appointment_confirmation,
+    send_site_visit_confirmation, format_whatsapp_phone
 )
 
 logger = logging.getLogger("kaamdhenu-tools")

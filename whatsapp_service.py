@@ -434,6 +434,209 @@ send_brochure = send_project_brochure
 send_document_message = send_project_brochure
 
 
+async def send_site_visit_confirmation(
+    to_phone: str,
+    customer_name: str = "",
+    project_name: str = "",
+    visit_time: str = "",
+    cab_details: str = "",
+    campaign_id: Optional[str] = None,
+    call_id: Optional[str] = None,
+    **kwargs
+) -> Dict[str, Any]:
+    """
+    Send site visit / appointment confirmation using Meta's approved Utility template:
+    'site_visit_confirmation'.
+
+    Bypasses the 24-hour customer window restriction since Utility templates are
+    pre-approved by Meta for transactional/confirmation messages.
+
+    Includes automatic fallback retry for Meta Error #132001:
+      1. Try: site_visit_confirmation + en_US
+      2. Retry: site_visit_confirmation + en
+
+    Template Body Parameters:
+      {{1}}: customer_name (default: "Valued Client")
+      {{2}}: project_name (e.g. "Provident Palm Vista")
+      {{3}}: visit_time (e.g. "2026-09-25 11:00 AM")
+      {{4}}: cab_details (e.g. "Cab pickup from Thane Station" or "Direct Site Visit")
+    """
+    clean_to = format_whatsapp_phone(to_phone)
+    if not clean_to:
+        logger.warning("send_site_visit_confirmation aborted: empty phone number")
+        return {"success": False, "error": "Invalid phone number"}
+
+    # Resolve parameter defaults
+    final_name = (customer_name or kwargs.get("name") or kwargs.get("client_name") or "").strip()
+    if not final_name or final_name.lower() in ("there", "caller", "unknown", "none", "null", "undefined", "lead"):
+        final_name = "Valued Client"
+
+    final_project = (project_name or kwargs.get("business_name") or "").strip()
+    if not final_project or final_project.lower() in ("none", "null", "undefined"):
+        final_project = os.getenv("DEFAULT_PROJECT_NAME") or os.getenv("BUSINESS_NAME") or "Kaamdhenu Premium Residences"
+
+    final_visit_time = (visit_time or kwargs.get("date_time") or kwargs.get("visit_datetime") or "").strip()
+    if not final_visit_time:
+        final_visit_time = "To be confirmed"
+
+    final_cab = (cab_details or kwargs.get("pickup_info") or kwargs.get("pickup_address") or "").strip()
+    if not final_cab:
+        final_cab = "Direct Site Visit / Self-Arranged"
+
+    token = os.getenv("WHATSAPP_TOKEN", WHATSAPP_TOKEN)
+    phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID", WHATSAPP_PHONE_NUMBER_ID)
+
+    primary_name = (kwargs.get("template_name") or os.getenv("WHATSAPP_SITE_VISIT_TEMPLATE") or "site_visit_confirmation").strip()
+    primary_lang = (kwargs.get("template_lang") or os.getenv("WHATSAPP_SITE_VISIT_TEMPLATE_LANG") or "en_US").strip()
+
+    # Simulated mode if credentials are not configured
+    if not (token and phone_id):
+        logger.info(
+            f"[SIMULATED SITE VISIT TEMPLATE] To: {clean_to} | Template: {primary_name} | "
+            f"Name: {final_name} | Project: {final_project} | Time: {final_visit_time} | Cab: {final_cab}"
+        )
+        sim_id = f"sim_sv_{int(time.time())}"
+        await insert_whatsapp_log(
+            phone_number=clean_to,
+            message=f"[TEMPLATE: {primary_name}] Site Visit: {final_name} @ {final_project} on {final_visit_time} | Cab: {final_cab}",
+            status="simulated",
+            call_id=call_id,
+            direction="outbound",
+            message_type="template",
+            campaign_id=campaign_id
+        )
+        await push_unified_log(
+            "WhatsApp", "info",
+            f"📍 [Simulated] Site visit confirmation template sent to {clean_to} ({final_project}, {final_visit_time})",
+            call_id=call_id
+        )
+        return {"success": True, "simulated": True, "message_id": sim_id}
+
+    url = get_messages_url()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    def _build_sv_payload(tmpl_name: str, lang_code: str) -> dict:
+        return {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": clean_to,
+            "type": "template",
+            "template": {
+                "name": tmpl_name,
+                "language": {
+                    "code": lang_code
+                },
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": final_name},
+                            {"type": "text", "text": final_project},
+                            {"type": "text", "text": final_visit_time},
+                            {"type": "text", "text": final_cab}
+                        ]
+                    }
+                ]
+            }
+        }
+
+    def _is_132001_error(code: int, data: dict) -> bool:
+        if code in (200, 201):
+            return False
+        err = data.get("error", {})
+        err_code = err.get("code", 0)
+        err_subcode = err.get("error_subcode", 0)
+        err_msg = err.get("message", "").lower()
+        return (
+            err_code == 132001 or err_subcode == 132001
+            or "does not exist" in err_msg
+        )
+
+    # Fallback chain: en_US → en (avoid duplicates)
+    fallback_chain = [(primary_name, primary_lang)]
+    for name, lang in [
+        (primary_name, "en"),
+        (primary_name, "en_US"),
+    ]:
+        if (name, lang) not in fallback_chain:
+            fallback_chain.append((name, lang))
+
+    last_err_msg = ""
+    last_status_code = 0
+
+    try:
+        for attempt_idx, (tmpl_name, lang_code) in enumerate(fallback_chain):
+            payload = _build_sv_payload(tmpl_name, lang_code)
+            status_code, resp_data = await _post_json(url, headers=headers, json_payload=payload, timeout=12.0)
+            last_status_code = status_code
+
+            if status_code in (200, 201):
+                msg_id = ""
+                messages = resp_data.get("messages", [])
+                if messages:
+                    msg_id = messages[0].get("id", "")
+                used_label = f"{tmpl_name}/{lang_code}"
+                await insert_whatsapp_log(
+                    phone_number=clean_to,
+                    message=f"[TEMPLATE: {used_label}] Site Visit: {final_name} @ {final_project} on {final_visit_time}",
+                    status="sent",
+                    call_id=call_id,
+                    direction="outbound",
+                    message_type="template",
+                    campaign_id=campaign_id
+                )
+                if attempt_idx > 0:
+                    logger.info(f"Site visit template succeeded on fallback attempt #{attempt_idx + 1}: {used_label}")
+                await push_unified_log(
+                    "WhatsApp", "info",
+                    f"📍 Site visit confirmation delivered to {clean_to} (ID: {msg_id}, tpl: {used_label})",
+                    call_id=call_id
+                )
+                return {"success": True, "message_id": msg_id, "data": resp_data, "template_used": used_label}
+
+            if _is_132001_error(status_code, resp_data) and attempt_idx < len(fallback_chain) - 1:
+                err_detail = resp_data.get("error", {}).get("message", "")
+                logger.warning(f"Meta Error #132001 with {tmpl_name}/{lang_code}: {err_detail} — retrying...")
+                continue
+
+            last_err_msg = resp_data.get("error", {}).get("message", json.dumps(resp_data))
+            break
+
+        if not last_err_msg:
+            last_err_msg = "All site_visit_confirmation template fallbacks failed (Error #132001)"
+        logger.error(f"Meta WhatsApp API Error (site visit template): {last_err_msg}")
+        await insert_whatsapp_log(
+            phone_number=clean_to,
+            message=f"[TEMPLATE FAILED: {primary_name}] Site Visit: {final_name} @ {final_project}",
+            status=f"failed: {last_err_msg}",
+            call_id=call_id,
+            direction="outbound",
+            message_type="template",
+            campaign_id=campaign_id
+        )
+        await push_unified_log(
+            "WhatsApp", "error",
+            f"❌ Site visit confirmation failed to {clean_to}: {last_err_msg}",
+            call_id=call_id
+        )
+        return {"success": False, "error": last_err_msg, "status_code": last_status_code}
+    except Exception as e:
+        logger.error(f"Error calling Meta WhatsApp API (site visit template): {e}")
+        await insert_whatsapp_log(
+            phone_number=clean_to,
+            message=f"[TEMPLATE: {primary_name}] Site Visit: {final_name} @ {final_project}",
+            status=f"exception: {e}",
+            call_id=call_id,
+            direction="outbound",
+            message_type="template",
+            campaign_id=campaign_id
+        )
+        return {"success": False, "error": str(e)}
+
+
 async def send_appointment_confirmation(
     to_phone: str,
     lead_data: dict,
@@ -500,13 +703,27 @@ async def send_appointment_confirmation(
         f"— *Kaamdhenu Real Estate Advisory*"
     )
 
-    # 1. Send confirmation text
-    res = await send_text_message(
+    # 1. Send confirmation via approved Meta Utility template (bypasses 24h window)
+    visit_time_str = f"{date} {time_slot}"
+    res = await send_site_visit_confirmation(
         to_phone=clean_to,
-        text=msg_body,
+        customer_name=lead_name,
+        project_name=project_name,
+        visit_time=visit_time_str,
+        cab_details=pickup_info,
         campaign_id=campaign_id,
         call_id=call_id
     )
+
+    # If template fails (e.g. not approved yet), fallback to plain text within 24h window
+    if not res.get("success") and not res.get("simulated"):
+        logger.warning(f"Site visit template failed, falling back to plain text: {res.get('error')}")
+        res = await send_text_message(
+            to_phone=clean_to,
+            text=msg_body,
+            campaign_id=campaign_id,
+            call_id=call_id
+        )
 
     # 2. If brochure_url is present, send the PDF document as a follow-up via approved Meta template
     brochure_url = appointment_data.get("brochure_url") or lead_data.get("brochure_url")
