@@ -355,9 +355,9 @@ async def entrypoint(ctx: agents.JobContext):
     direction = "outbound"
     phone_number = ""
     lead_name = "there"
-    business_name = "VedaLifeSpaces"
-    service_type = "The Horizon Bellagio Alibaug"
-    agent_name = "Aria"
+    business_name = os.getenv("BUSINESS_NAME", "")
+    service_type = os.getenv("SERVICE_TYPE", "")
+    agent_name = os.getenv("AGENT_NAME", "Assistant")
     agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
     campaign_id = None
     broker_phone = None
@@ -370,7 +370,7 @@ async def entrypoint(ctx: agents.JobContext):
     lead_notes = ""
     lead_bhk = ""
     lead_budget = ""
-    project_name = "The Horizon Bellagio Alibaug"
+    project_name = os.getenv("PROJECT_NAME", "")
     brochure_url = ""
     site_address = ""
     pickup_drop_notes = ""
@@ -477,21 +477,19 @@ async def entrypoint(ctx: agents.JobContext):
 
                 # Build context-aware system prompt for returning callers
                 custom_prompt = (
-                    f"You are {agent_name}, Senior Property Consultant for Kaamdhenu Real Estate.\n"
-                    f"CRITICAL CONTEXT: The caller ({lead_name}) was RECENTLY contacted regarding the '{prior_proj}' project.\n"
-                    f"They are calling BACK — this is NOT a cold call. They already know about the project.\n"
-                    f"Do NOT introduce the project from scratch. Acknowledge the prior conversation and ask how you can help further.\n"
-                    f"If they ask about the same project, provide detailed answers. If they want to discuss something new, smoothly transition.\n"
-                    f"Speak naturally, instantly mirroring the caller's language (Hindi, Marathi, Gujarati, English, etc.) without announcing the switch."
+                    f"You are {agent_name} representing {business_name or 'our service'}.\n"
+                    f"CRITICAL CONTEXT: The caller ({lead_name}) was RECENTLY contacted regarding '{prior_proj}'.\n"
+                    f"They are calling BACK — this is NOT a cold call. Acknowledge the prior conversation and ask how you can help further.\n"
+                    f"Speak naturally, instantly mirroring the caller's language without announcing the switch."
                 )
-                await push_unified_log("CRM", "info", f"Returning caller detected: {lead_name} (prior project: {prior_proj})", call_id=call_id)
+                await push_unified_log("CRM", "info", f"Returning caller detected: {lead_name} (prior context: {prior_proj})", call_id=call_id)
             elif not camp:
                 await push_unified_log("CRM", "info", f"Fresh inbound caller — no prior CRM context found", call_id=call_id)
 
         # ===================================================================
         # PHASE 4: BUILD SYSTEM PROMPT
         # ===================================================================
-        # Determine if a custom prompt was supplied vs falling back to default real estate blueprint
+        # Determine if a custom prompt was supplied vs falling back to default blueprint
         has_custom_prompt = bool(
             custom_prompt
             and custom_prompt.strip()
@@ -514,14 +512,11 @@ async def entrypoint(ctx: agents.JobContext):
         if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
             system_prompt = system_prompt + "\n\n" + DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
 
-        # Append strict real estate rules ONLY if NO custom prompt was supplied (default real estate flow)
-        if not has_custom_prompt:
+        # Ensure caller name is never confused with an organization or project name
+        if not has_custom_prompt and valid_lead_name:
             strict_rules = f"""
-[STRICT REAL ESTATE RULES]
-- THE CALLER'S NAME IS NEVER A PROPERTY OR PROJECT NAME.
-- If the user's name is {lead_name}, NEVER say "{lead_name} project" or "{lead_name} property".
-- You represent {business_name} projects. If no specific project was previously chosen, ask open-endedly: "Aap kis location ya project ke baare mein jaankari lena chahte hain?"
-- NEVER confuse the person's identity with the property name.
+[CALLER IDENTITY RULE]
+- The user's name is {lead_name}. NEVER confuse the caller's name with an organization, project, or product name.
 """
             system_prompt = system_prompt + "\n" + strict_rules
 
@@ -674,93 +669,41 @@ async def entrypoint(ctx: agents.JobContext):
         # Re-evaluate valid_lead_name since Phase 3 may have updated lead_name from CRM
         valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
 
-        is_veda_project = (
-            "veda" in (business_name or "").lower() or
-            "bellagio" in (project_name or "").lower() or
-            "alibaug" in (project_name or "").lower() or
-            "horizon" in (project_name or "").lower() or
-            (agent_name or "").lower() == "aria"
-        )
-
-        if direction == "inbound" and inbound_prior_project and valid_lead_name:
-            # RETURNING CALLER — acknowledge prior outreach with project context
-            greeting_text = (
-                f"Namaste {lead_name} ji! Main {agent_name}, {business_name} se baat kar rahi hoon. "
-                f"Thodi der pehle humari {inbound_prior_project} project ke silsile mein baat hui thi... "
-                f"Bataiye, isme main aapki aur kya madad kar sakti hoon?"
-            )
-        elif direction == "inbound" and inbound_prior_project:
-            # Returning caller but name unknown
-            greeting_text = (
-                f"Namaste! Main {agent_name}, {business_name} se. "
-                f"Abhi kuch der pehle aapko humari {inbound_prior_project} project ke baare mein call gaya tha... "
-                f"Bataiye, main aapki kaise madad kar sakti hoon?"
-            )
-        elif direction == "inbound":
-            greeting_text = f"Hello! Thank you for calling {business_name}. I am {agent_name}. How can I assist you today?"
-        elif is_callback_call:
-            greeting_text = f"Hello {lead_name}! I am {agent_name} from {business_name}, calling back as requested. How can I assist you today?"
-        elif is_veda_project:
-            client_target = lead_name if valid_lead_name else "Sir"
-            greeting_text = f"Hello! Am I speaking with {client_target}? ... Wonderful! I am {agent_name} from {business_name}. I'm reaching out because Alibaug has emerged as Mumbai's most coveted coastal retreat, and we are presenting an exclusive 4-acre plotted community just 20 minutes from the Gateway of India. Did I catch you at a good time for a quick 2-minute overview?"
-        elif valid_lead_name:
-            greeting_text = f"Namaste {lead_name} ji, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
-        else:
-            greeting_text = f"Namaste sir, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
-
         try:
-            active_project = project_name.strip() if project_name and project_name.strip() and project_name.strip() != business_name else ""
-            project_pitch = f"{business_name} ke {active_project} project" if active_project else f"{business_name}"
-
-            if is_veda_project and not is_callback_call and direction != "inbound":
-                greeting_instruction = (
-                    f"Speak this exact opening line naturally in English: '{greeting_text}'. "
-                    f"CRITICAL: NEVER call any WhatsApp tools during the greeting or without explicit agreement. "
-                    f"After delivering the opening line, PAUSE and listen to the client's reply. "
-                    f"Language: Start in English. If the client speaks or switches to Hindi or Hinglish, seamlessly mirror their language without announcing the switch. "
-                    f"Turn style: Short, voice-friendly (1-3 sentences), natural conversational tone. "
-                    f"If they say YES or are open to talk: "
-                    f"Share that The Horizon Bellagio offers 42 exclusive villa land plots (1,800 to 5,000 sq. ft.) with up to 2.2 FSI and 6 designer facade styles. "
-                    f"CLARIFY STRICTLY: 'We sell curated land plots for custom villas, not ready-made apartments or constructed homes.' "
-                    f"Ask if they are looking for a private family coastal retreat or a plotted land investment. "
-                    f"STRICT GATEWAY OF INDIA PICKUP RULE: If the client asks for home/suburb pickup (Kalyan, Dombivli, Thane, Navi Mumbai, etc.): "
-                    f"'Our curated site visits and sea transit begin exclusively from the Gateway of India in Mumbai. You would need to arrive at the Gateway, where our team will arrange the onward sea crossing to Mandwa and the estate.' "
-                    f"STRICT BROCHURE & WHATSAPP CONSENT RULE: DO NOT claim a brochure is already ready or sent. DO NOT proactively say 'I have sent details on WhatsApp'. "
-                    f"First build conversation and brief the project. "
-                    f"If the client asks for a brochure, or if you ask permission and they verbally say YES ('Yes', 'Haan', 'Sure'): "
-                    f"'Our official architectural brochure is currently being finalized. I have noted your request, and our team will share it with you on WhatsApp as soon as it is released.' "
-                    f"Trigger the send_whatsapp_brochure tool ONLY at this specific point! "
-                    f"If they say NO: Respect it immediately without pushiness, and continue or close politely."
-                )
-            elif direction == "inbound" and inbound_prior_project:
-                # RETURNING INBOUND CALLER — acknowledge prior outreach, don't pitch from scratch
-                greeting_instruction = (
-                    f"Speak this opening line naturally: '{greeting_text}'. "
-                    f"This is a RETURNING caller who was recently contacted about {inbound_prior_project}. "
-                    f"After greeting, PAUSE and let the caller speak first. They are calling back for a reason — listen to what they need. "
-                    f"Answer their questions about {inbound_prior_project} with detailed knowledge. "
-                    f"Do NOT re-introduce yourself or the project from scratch. Do NOT say 'Aapne inquiry ki thi'. "
-                    f"Seamlessly mirror whatever language the user speaks without announcing or commenting on language changes."
-                )
+            if direction == "inbound":
+                if inbound_prior_project:
+                    greeting_instruction = (
+                        f"This is a returning inbound caller who previously engaged regarding '{inbound_prior_project}'. "
+                        "Acknowledge the previous interaction courteously, and ask how you can assist them further today. "
+                        "Follow the persona, product details, and style defined in your system prompt. "
+                        "Keep your opening short (1-2 sentences) and let the caller speak. "
+                        "CRITICAL: Do NOT execute any tools during the opening greeting."
+                    )
+                else:
+                    greeting_instruction = (
+                        "Deliver your opening inbound welcome greeting strictly following your system prompt instructions and persona. "
+                        "Welcome the caller and ask how you can assist them today. Keep it short, warm, and natural (1-2 sentences). "
+                        "CRITICAL: Do NOT execute any tools during the opening greeting."
+                    )
             elif is_callback_call:
+                customer_ref = f"{lead_name}" if valid_lead_name else "the customer"
                 greeting_instruction = (
-                    f"Speak this opening line naturally: '{greeting_text}'. "
-                    f"Immediately pause and LET THE USER SPEAK. Do NOT pitch immediately. "
-                    f"If the user talks normally, answer their questions and continue property qualification smoothly following your system prompt. "
-                    f"NEVER suggest or ask: 'Main aapko baad mein call karoon kya?'. Keep your focus on the conversation. "
-                    f"Only if the user explicitly says they are still busy or asks to call later, politely acknowledge: 'Theek hai sir/ma'am, main aapko theek us samay par call karti hoon.' and call the schedule_callback tool with the requested time. "
-                    f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
+                    f"Greet {customer_ref} courteously following your system prompt instructions and persona. "
+                    "Mention you are calling back as requested, and ask how you can help them. "
+                    "Pause immediately to let them speak. "
+                    "CRITICAL: Do NOT execute any tools during the opening greeting."
                 )
             else:
+                customer_ref = f"to {lead_name}" if valid_lead_name else ""
                 greeting_instruction = (
-                    f"Speak this opening line naturally: '{greeting_text}'. "
-                    f"ABSOLUTE BAN: STRICTLY FORBIDDEN to say 'Aapne inquiry ki thi' or claim the lead made a prior inquiry. "
-                    f"If they say YES or are open to talk, smoothly introduce {project_pitch} and ask about their requirement: 'Thank you! Hum {project_pitch} ki taraf se premium residential properties offer kar rahe hain. Kya aap filhal apne rehne ke liye ya investment ke purpose se koi property dekh rahe hain?' "
-                    f"If they say NO or BUSY: Respectfully handle callback scheduling without pitching. "
-                    f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
+                    f"Initiate this outbound call {customer_ref} strictly following the opening hook, persona, and rules defined in your system prompt. "
+                    "Deliver the opening line/hook naturally and concisely (1-2 sentences), then pause to listen to the customer's response. "
+                    "CRITICAL: Do NOT execute any tools during the initial greeting."
                 )
-            if valid_lead_name and not is_veda_project:
-                greeting_instruction += f" IMPORTANT: You already know the customer's name is {lead_name}. Do NOT ask for their name."
+
+            if valid_lead_name:
+                greeting_instruction += f" Note: You already know the customer's name is {lead_name}."
+
             await session.generate_reply(instructions=greeting_instruction)
             await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
         except Exception as ge:

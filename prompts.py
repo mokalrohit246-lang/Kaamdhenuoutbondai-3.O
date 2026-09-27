@@ -15,18 +15,16 @@ GLOBAL_NATURAL_CONVERSATION_LAYER = """
 - Use natural backchanneling in whatever language the customer is speaking (e.g. "Ji bilkul", "Haanji", "Right", "Samajh gayi", "Sahi kaha aapne", "Barobar", "Hao hao", "Sari") naturally before answering.
 - Instantly match the customer's language — Hindi, Marathi, Gujarati, Bengali, Telugu, Tamil, Kannada, Malayalam, Punjabi, English, or any mix.
 
-3. ETHICAL REAL-ESTATE PERSUASION & OBJECTION HANDLING:
-- Consultative approach: Ask open questions to qualify needs (villa plots vs apartments, coastal retreat vs investment, budget, timeline).
-- If customer asks for brochure: "Our official architectural brochure is currently being finalized. I have noted your request, and our team will share it with you on WhatsApp as soon as it is released." (Trigger `send_whatsapp_brochure` ONLY after agreement).
-- Objection: "Not interested" -> "No problem at all! Just to understand, are you currently exploring any coastal holiday homes or land opportunities, or is your focus elsewhere?"
-- Objection: "Send details on WhatsApp first" -> Take permission courteously before sending: "I would be delighted to share the complete project brief on WhatsApp. May I confirm this is your WhatsApp number?"
-- Push for Site Visit: Highlight limited inventory of 42 plots, sample facade walkthrough, and curated Gateway of India sea transit.
+3. CONSULTATIVE CONVERSATION & OBJECTION HANDLING:
+- Strictly follow the core persona, product/service details, and objection handling defined in your primary system instructions.
+- Listen actively to customer requirements and address their queries with clarity, conciseness, and warmth.
+- If customer asks for details/brochure/menu on WhatsApp: confirm their consent and trigger the WhatsApp tool ONLY if agreed or requested.
+- If customer says "Not interested" or "Busy": acknowledge politely without being aggressive or pushy.
 
 4. CRITICAL TOOL EXECUTION RULES:
-- `book_site_visit`: The moment the lead agrees to a site visit, date, time, or Gateway transit, IMMEDIATELY execute `book_site_visit` tool before saying anything else. NEVER say "Maine book kar diya" or confirm visit without calling this tool first!
-- `send_whatsapp_brochure`: Send WhatsApp message/brochure details ONLY after the customer explicitly asks for details or verbally agrees ('Yes', 'Haan', 'Sure') when asked. NEVER call this tool proactively, never call it during the greeting, and never call it if the customer says No.
+- `send_whatsapp_brochure` / `send_project_brochure`: Send requested brochure, menu, or details via WhatsApp to the user when they verbally request or agree to receive information. NEVER call this tool proactively, never call it during the greeting, and never call it if the customer says No.
+- `book_site_visit` / `book_appointment`: Call when the customer explicitly agrees to a scheduled meeting, visit, or appointment.
 - `schedule_callback`: STRICTLY FORBIDDEN unless the lead explicitly says they are busy, driving, in a meeting, or asks to call later. NEVER offer a callback unprompted.
-- `record_client_qualification`: Silently record qualification details (plots, budget, purpose, location, occupation) as they are mentioned.
 """
 
 STRICT_CALLBACK_RESCHEDULE_RULES = """
@@ -222,20 +220,19 @@ CALL FLOW & HOOK:
 """
 
 def get_base_system_prompt(
-    agent_name: str = "Aria",
-    business_name: str = "VedaLifeSpaces",
+    agent_name: str = "Assistant",
+    business_name: str = "",
     custom_prompt: str = "",
     lead_name: str = "there",
-    service_type: str = "The Horizon Bellagio Alibaug",
+    service_type: str = "",
     custom_instructions: str = None,
     instructions: str = ""
 ) -> str:
     """
     Constructs the master prompt enforcing the Global Natural Human Conversation Layer
-    and Outbound Cold Call Sales Blueprint across every agent in the system.
+    and Language Mirroring Layer. Completely prompt-driven and industry-agnostic.
     """
     resolved_instructions = instructions or custom_instructions or custom_prompt or ""
-    header = f"You are {agent_name}, Senior Property Consultant & Front-Desk AI representing {business_name}."
     lang_layer = DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
     
     try:
@@ -244,13 +241,6 @@ def get_base_system_prompt(
         )
     except Exception:
         reschedule_rules = BUSY_LEADS_RESCHEDULING_RULES.strip()
-
-    try:
-        outbound_blueprint = OUTBOUND_COLD_CALL_SALES_BLUEPRINT.strip().format(
-            agent_name=agent_name, business_name=business_name, lead_name=lead_name, service_type=service_type
-        )
-    except Exception:
-        outbound_blueprint = OUTBOUND_COLD_CALL_SALES_BLUEPRINT.strip()
 
     if resolved_instructions and resolved_instructions.strip():
         clean_instructions = resolved_instructions.strip()
@@ -265,7 +255,7 @@ def get_base_system_prompt(
             pass
 
         # Pure custom prompt mode: wrap core instructions ONLY with global conversation
-        # and language mirroring layers. Do NOT append outbound sales blueprint or real estate defaults.
+        # and language mirroring layers. Never inject client-specific hardcoded text.
         prompt_parts = [clean_instructions]
         if "=== NATURAL HUMAN CONVERSATION & PROFESSIONAL PERSUASION LAYER ===" not in clean_instructions:
             prompt_parts.append(GLOBAL_NATURAL_CONVERSATION_LAYER.strip())
@@ -274,59 +264,29 @@ def get_base_system_prompt(
 
         return "\n\n".join(prompt_parts) + "\n"
     else:
-        is_veda = (
-            "veda" in (business_name or "").lower() or
-            "bellagio" in (service_type or "").lower() or
-            "alibaug" in (service_type or "").lower() or
-            "horizon" in (service_type or "").lower() or
-            (agent_name or "").lower() == "aria" or
-            business_name != "Kaamdhenu Real Estate"
-        )
-        if is_veda:
-            try:
-                veda_flow = VEDA_LIFESPACES_SYSTEM_PROMPT.strip().format(
-                    lead_name=lead_name,
-                    business_name=business_name,
-                    service_type=service_type,
-                    agent_name=agent_name
-                )
-            except Exception:
-                veda_flow = VEDA_LIFESPACES_SYSTEM_PROMPT.strip()
+        # Default prompt when no specific custom prompt is injected
+        name_intro = f"You are {agent_name} representing {business_name}." if business_name else f"You are {agent_name}."
+        default_instructions = f"""=== AGENT INSTRUCTIONS ===
+{name_intro}
+Your role is to assist the customer ({lead_name}), answer their questions clearly and concisely, and assist with their requirements.
+Listen carefully, maintain a professional and courteous tone, and follow conversational turn-taking rules."""
 
-            return (
-                f"{veda_flow}\n\n"
-                f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
-                f"{reschedule_rules}\n\n"
-                f"{lang_layer}\n"
-            )
-        else:
-            try:
-                flow = DEFAULT_QUALIFICATION_FLOW.strip().format(
-                    lead_name=lead_name,
-                    business_name=business_name,
-                    service_type=service_type,
-                    agent_name=agent_name
-                )
-            except Exception:
-                flow = DEFAULT_QUALIFICATION_FLOW.strip()
-                
-            return (
-                f"{header}\n\n"
-                f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
-                f"{outbound_blueprint}\n\n"
-                f"{reschedule_rules}\n\n"
-                f"{lang_layer}\n\n"
-                f"{flow}\n"
-            )
+        prompt_parts = [
+            default_instructions.strip(),
+            GLOBAL_NATURAL_CONVERSATION_LAYER.strip(),
+            reschedule_rules,
+            lang_layer
+        ]
+        return "\n\n".join(prompt_parts) + "\n"
 
 # Aliases to ensure complete backward and forward compatibility
 build_system_prompt = get_base_system_prompt
 
 def build_prompt(
     lead_name: str = "there",
-    business_name: str = "VedaLifeSpaces",
-    service_type: str = "The Horizon Bellagio Alibaug",
-    agent_name: str = "Aria",
+    business_name: str = "",
+    service_type: str = "",
+    agent_name: str = "Assistant",
     custom_prompt: str = None,
     instructions: str = ""
 ) -> str:
