@@ -485,19 +485,19 @@ class RealEstateTools(llm.ToolContext):
 
     @llm.function_tool
     async def send_project_brochure(self, phone_number: str = "") -> str:
-        """Send the official project brochure and floor plans PDF directly to the lead's WhatsApp using Meta WhatsApp Cloud API. Call whenever the client requests brochure, photos, pricing, or floor plans."""
+        """Send WhatsApp message/brochure details ONLY after the customer explicitly asks for details or verbally agrees ('Yes', 'Haan', 'Sure') when asked. NEVER call this tool proactively, never call it during the greeting, and never call it if the customer says No."""
         phone = phone_number or self.phone_number
         self.whatsapp_status = "✅ Sent Auto"
 
         camp = await get_campaign(self.campaign_id) if self.campaign_id else None
-        p_name = self.project_name or (camp.get("project_name") if camp else None) or "Kaamdhenu Premium Residences"
+        p_name = self.project_name or (camp.get("project_name") if camp else None) or "The Horizon Bellagio Alibaug"
         brochure_url = self.brochure_url or (camp.get("brochure_url") if camp else None) or ""
 
         lead_disp_name = self.client_name or self.lead_name or "there"
 
         # 1. If PDF brochure is configured, send document
         if brochure_url:
-            caption = f"Namaste {lead_disp_name}! Here is the official brochure & floor plans for {p_name}."
+            caption = f"Hello {lead_disp_name}! Here is the official overview for {p_name}."
             filename = f"{p_name.replace(' ', '_')}_Brochure.pdf"
             await send_document_message(
                 to_phone=phone,
@@ -509,15 +509,27 @@ class RealEstateTools(llm.ToolContext):
             )
         else:
             # Send rich text summary if brochure PDF not yet uploaded
-            text_summary = (
-                f"Namaste {lead_disp_name}! 🏡\n"
-                f"Thank you for your interest in *{p_name}*.\n"
-                f"• Configurations: Premium 2BHK & 3BHK Air-Conditioned Homes\n"
-                f"• Location: Prime Metro Corridor, Near City Center\n"
-                f"• Amenities: Clubhouse, Swimming Pool, Landscaped Gardens, Kids Play Area\n"
-                f"• Special Offer: Free cab pickup & drop available for site visits!\n\n"
-                f"Would you like to visit this Saturday or Sunday to see the sample flat?"
-            )
+            is_veda = any(k in (p_name or "").lower() for k in ["veda", "bellagio", "alibaug", "horizon"])
+            if is_veda:
+                text_summary = (
+                    f"Hello {lead_disp_name}! 🌊\n"
+                    f"Thank you for connecting with *VedaLifeSpaces* regarding *The Horizon Bellagio Alibaug*.\n\n"
+                    f"• An exclusive 4-acre private plotted gated community in Alibaug, just 20 minutes from the Gateway of India.\n"
+                    f"• 42 exclusive villa land plots (1,800 to 5,000 sq. ft.) with generous up to 2.2 FSI & 6 international designer facade styles.\n"
+                    f"• Curated site visits and sea transit begin exclusively from the Gateway of India in Mumbai.\n\n"
+                    f"Our official architectural brochure is currently being finalized and will be shared with you here as soon as it is released.\n"
+                    f"— *Aria, VedaLifeSpaces Luxury Advisory*"
+                )
+            else:
+                text_summary = (
+                    f"Namaste {lead_disp_name}! 🏡\n"
+                    f"Thank you for your interest in *{p_name}*.\n"
+                    f"• Configurations: Premium 2BHK & 3BHK Air-Conditioned Homes\n"
+                    f"• Location: Prime Metro Corridor, Near City Center\n"
+                    f"• Amenities: Clubhouse, Swimming Pool, Landscaped Gardens, Kids Play Area\n"
+                    f"• Special Offer: Free cab pickup & drop available for site visits!\n\n"
+                    f"Would you like to visit this Saturday or Sunday to see the sample flat?"
+                )
             await send_text_message(
                 to_phone=phone,
                 text=text_summary,
@@ -525,12 +537,14 @@ class RealEstateTools(llm.ToolContext):
                 call_id=self.call_id
             )
 
-        await push_unified_log("WhatsApp", "info", f"Brochure delivered to {phone} for {p_name}", call_id=self.call_id)
+        await push_unified_log("WhatsApp", "info", f"Brochure request recorded for {phone} ({p_name})", call_id=self.call_id)
+        if any(k in (p_name or "").lower() for k in ["veda", "bellagio", "alibaug", "horizon"]):
+            return "Our official architectural brochure is currently being finalized. I have noted your request, and our team will share it with you on WhatsApp as soon as it is released."
         return "Maine WhatsApp par brochure aur floor plans bhej diye hain. Bas 15-20 seconds mein aapko receive ho jayega."
 
     @llm.function_tool
     async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
-        """Send property brochure, floor plans, and site location to lead via WhatsApp. Call when client agrees to receive details."""
+        """Send WhatsApp message/brochure details ONLY after the customer explicitly asks for details or verbally agrees ('Yes', 'Haan', 'Sure') when asked. NEVER call this tool proactively, never call it during the greeting, and never call it if the customer says No."""
         return await self.send_project_brochure(phone_number=phone_number)
 
     @llm.function_tool

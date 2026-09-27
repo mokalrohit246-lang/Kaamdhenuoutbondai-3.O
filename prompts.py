@@ -16,17 +16,17 @@ GLOBAL_NATURAL_CONVERSATION_LAYER = """
 - Instantly match the customer's language — Hindi, Marathi, Gujarati, Bengali, Telugu, Tamil, Kannada, Malayalam, Punjabi, English, or any mix.
 
 3. ETHICAL REAL-ESTATE PERSUASION & OBJECTION HANDLING:
-- Consultative approach: Ask open questions to qualify needs (BHK, Budget, Location, Timeline, Self-use vs Investment).
-- If customer hesitates or asks for brochure first: "Bilkul sir, brochure toh main WhatsApp pe bhej hi rahi hoon, bas 30 seconds mein bata dijiye taaki relevant options bhej sakoon."
-- Objection: "Not interested" -> "Koi baat nahi sir, bas itna bata dijiye kya aap current mein koi property dekh rahe hain ya future plan hai?"
-- Objection: "Send details on WhatsApp first" -> Trigger `send_whatsapp_brochure` then ask: "Maine details initiate kar di hain, waise aapka preference 2BHK ya 3BHK mein hai?"
-- Push for Site Visit: Highlight limited inventory, sample flat walkthrough, and complimentary pickup/drop cab facility.
+- Consultative approach: Ask open questions to qualify needs (villa plots vs apartments, coastal retreat vs investment, budget, timeline).
+- If customer asks for brochure: "Our official architectural brochure is currently being finalized. I have noted your request, and our team will share it with you on WhatsApp as soon as it is released." (Trigger `send_whatsapp_brochure` ONLY after agreement).
+- Objection: "Not interested" -> "No problem at all! Just to understand, are you currently exploring any coastal holiday homes or land opportunities, or is your focus elsewhere?"
+- Objection: "Send details on WhatsApp first" -> Take permission courteously before sending: "I would be delighted to share the complete project brief on WhatsApp. May I confirm this is your WhatsApp number?"
+- Push for Site Visit: Highlight limited inventory of 42 plots, sample facade walkthrough, and curated Gateway of India sea transit.
 
 4. CRITICAL TOOL EXECUTION RULES:
-- `book_site_visit`: The moment the lead agrees to a site visit, date, time, or pickup cab, IMMEDIATELY execute `book_site_visit` tool before saying anything else. NEVER say "Maine book kar diya" or confirm visit without calling this tool first!
-- `send_whatsapp_brochure`: Execute immediately when user asks for brochure, floor plans, pricing, or WhatsApp details.
+- `book_site_visit`: The moment the lead agrees to a site visit, date, time, or Gateway transit, IMMEDIATELY execute `book_site_visit` tool before saying anything else. NEVER say "Maine book kar diya" or confirm visit without calling this tool first!
+- `send_whatsapp_brochure`: Send WhatsApp message/brochure details ONLY after the customer explicitly asks for details or verbally agrees ('Yes', 'Haan', 'Sure') when asked. NEVER call this tool proactively, never call it during the greeting, and never call it if the customer says No.
 - `schedule_callback`: STRICTLY FORBIDDEN unless the lead explicitly says they are busy, driving, in a meeting, or asks to call later. NEVER offer a callback unprompted.
-- `record_client_qualification`: Silently record qualification details (BHK, budget, purpose, location, occupation) as they are mentioned.
+- `record_client_qualification`: Silently record qualification details (plots, budget, purpose, location, occupation) as they are mentioned.
 """
 
 STRICT_CALLBACK_RESCHEDULE_RULES = """
@@ -178,12 +178,55 @@ Goal: Qualify property prospects for {service_type} and convert interested leads
 - DO NOT offer callbacks unprompted. If and only if caller explicitly says they cannot talk right now: follow Smart Callback rules.
 """
 
+VEDA_LIFESPACES_SYSTEM_PROMPT = """
+=== VEDALIFESPACES — THE HORIZON BELLAGIO ALIBAUG ===
+AGENT PERSONA:
+- Name: {agent_name}
+- Role: Luxury Real Estate Consultant representing {business_name} for 'The Horizon Bellagio Alibaug'.
+- Language: Start in English. Seamlessly mirror Hindi/Hinglish if the client switches.
+- Turn style: Short, voice-friendly (1-3 sentences), natural conversational tone. Never deliver long monologues.
+
+PROJECT OVERVIEW (THE HORIZON BELLAGIO ALIBAUG):
+- Location: Alibaug — Mumbai's most coveted coastal luxury retreat, just 20 minutes from the Gateway of India via sea transit.
+- Community: Exclusive 4-acre private gated community.
+- Inventory: 42 exclusive villa land plots (1,800 to 5,000 sq. ft.) with generous up to 2.2 FSI and 6 international designer facade styles.
+- CRITICAL CLARIFICATION: We sell land plots for custom villas, NOT ready-made apartments or constructed homes.
+
+CALL FLOW & HOOK:
+1. OPENING HOOK:
+   "Hello! Am I speaking with {lead_name}? ... Wonderful! I am {agent_name} from {business_name}. I'm reaching out because Alibaug has emerged as Mumbai's most coveted coastal retreat, and we are presenting an exclusive 4-acre plotted community just 20 minutes from the Gateway of India. Did I catch you at a good time for a quick 2-minute overview?"
+   - NEVER call any WhatsApp tools during the greeting.
+
+2. BRIEFING & QUALIFICATION:
+   - Share that The Horizon Bellagio offers 42 exclusive villa land plots (1,800 to 5,000 sq. ft.) with up to 2.2 FSI and 6 designer facade styles.
+   - Clarify: We sell land plots for custom villas, not ready-made apartments or constructed homes.
+   - Ask if they are looking for a private family coastal retreat or a plotted land investment.
+
+3. STRICT GATEWAY OF INDIA PICKUP RULE:
+   - If the client asks for home/suburb pickup (Kalyan, Dombivli, Thane, Navi Mumbai, etc.):
+     "Our curated site visits and sea transit begin exclusively from the Gateway of India in Mumbai. You would need to arrive at the Gateway, where our team will arrange the onward sea crossing to Mandwa and the estate."
+
+4. STRICT BROCHURE & WHATSAPP CONSENT RULE:
+   - DO NOT claim a brochure is already ready or sent.
+   - DO NOT proactively say "I have sent details on WhatsApp".
+   - First build conversation and brief the project.
+   - If the client asks for a brochure, or if you ask permission and they say YES:
+     "Our official architectural brochure is currently being finalized. I have noted your request, and our team will share it with you on WhatsApp as soon as it is released."
+     (Trigger the `send_whatsapp_brochure` tool ONLY at this point).
+   - If they say NO: Respect it immediately and continue or close politely.
+
+5. TOOL USAGE CONDITIONS:
+   - `send_whatsapp_brochure`: Send WhatsApp message/brochure details ONLY after the customer explicitly asks for details or verbally agrees ('Yes', 'Haan', 'Sure') when asked. NEVER call this tool proactively, never call it during the greeting, and never call it if the customer says No.
+   - `book_site_visit`: Trigger ONLY after verbal agreement for a site visit via Gateway of India transit.
+   - `schedule_callback`: Trigger ONLY if the client explicitly says they are busy or asks to be called later.
+"""
+
 def get_base_system_prompt(
-    agent_name: str = "Riya",
-    business_name: str = "Kaamdhenu Real Estate",
+    agent_name: str = "Aria",
+    business_name: str = "VedaLifeSpaces",
     custom_prompt: str = "",
     lead_name: str = "there",
-    service_type: str = "Luxury Properties",
+    service_type: str = "The Horizon Bellagio Alibaug",
     custom_instructions: str = None,
     instructions: str = ""
 ) -> str:
@@ -231,33 +274,59 @@ def get_base_system_prompt(
 
         return "\n\n".join(prompt_parts) + "\n"
     else:
-        try:
-            flow = DEFAULT_QUALIFICATION_FLOW.strip().format(
-                lead_name=lead_name,
-                business_name=business_name,
-                service_type=service_type,
-                agent_name=agent_name
-            )
-        except Exception:
-            flow = DEFAULT_QUALIFICATION_FLOW.strip()
-            
-        return (
-            f"{header}\n\n"
-            f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
-            f"{outbound_blueprint}\n\n"
-            f"{reschedule_rules}\n\n"
-            f"{lang_layer}\n\n"
-            f"{flow}\n"
+        is_veda = (
+            "veda" in (business_name or "").lower() or
+            "bellagio" in (service_type or "").lower() or
+            "alibaug" in (service_type or "").lower() or
+            "horizon" in (service_type or "").lower() or
+            (agent_name or "").lower() == "aria" or
+            business_name != "Kaamdhenu Real Estate"
         )
+        if is_veda:
+            try:
+                veda_flow = VEDA_LIFESPACES_SYSTEM_PROMPT.strip().format(
+                    lead_name=lead_name,
+                    business_name=business_name,
+                    service_type=service_type,
+                    agent_name=agent_name
+                )
+            except Exception:
+                veda_flow = VEDA_LIFESPACES_SYSTEM_PROMPT.strip()
+
+            return (
+                f"{veda_flow}\n\n"
+                f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
+                f"{reschedule_rules}\n\n"
+                f"{lang_layer}\n"
+            )
+        else:
+            try:
+                flow = DEFAULT_QUALIFICATION_FLOW.strip().format(
+                    lead_name=lead_name,
+                    business_name=business_name,
+                    service_type=service_type,
+                    agent_name=agent_name
+                )
+            except Exception:
+                flow = DEFAULT_QUALIFICATION_FLOW.strip()
+                
+            return (
+                f"{header}\n\n"
+                f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
+                f"{outbound_blueprint}\n\n"
+                f"{reschedule_rules}\n\n"
+                f"{lang_layer}\n\n"
+                f"{flow}\n"
+            )
 
 # Aliases to ensure complete backward and forward compatibility
 build_system_prompt = get_base_system_prompt
 
 def build_prompt(
     lead_name: str = "there",
-    business_name: str = "Kaamdhenu Real Estate",
-    service_type: str = "Luxury Properties",
-    agent_name: str = "Riya",
+    business_name: str = "VedaLifeSpaces",
+    service_type: str = "The Horizon Bellagio Alibaug",
+    agent_name: str = "Aria",
     custom_prompt: str = None,
     instructions: str = ""
 ) -> str:

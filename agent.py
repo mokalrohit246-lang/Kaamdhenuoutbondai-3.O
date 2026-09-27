@@ -355,9 +355,9 @@ async def entrypoint(ctx: agents.JobContext):
     direction = "outbound"
     phone_number = ""
     lead_name = "there"
-    business_name = "Kaamdhenu Real Estate"
-    service_type = "Luxury Properties"
-    agent_name = "Riya"
+    business_name = "VedaLifeSpaces"
+    service_type = "The Horizon Bellagio Alibaug"
+    agent_name = "Aria"
     agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
     campaign_id = None
     broker_phone = None
@@ -370,7 +370,7 @@ async def entrypoint(ctx: agents.JobContext):
     lead_notes = ""
     lead_bhk = ""
     lead_budget = ""
-    project_name = ""
+    project_name = "The Horizon Bellagio Alibaug"
     brochure_url = ""
     site_address = ""
     pickup_drop_notes = ""
@@ -674,6 +674,14 @@ async def entrypoint(ctx: agents.JobContext):
         # Re-evaluate valid_lead_name since Phase 3 may have updated lead_name from CRM
         valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
 
+        is_veda_project = (
+            "veda" in (business_name or "").lower() or
+            "bellagio" in (project_name or "").lower() or
+            "alibaug" in (project_name or "").lower() or
+            "horizon" in (project_name or "").lower() or
+            (agent_name or "").lower() == "aria"
+        )
+
         if direction == "inbound" and inbound_prior_project and valid_lead_name:
             # RETURNING CALLER — acknowledge prior outreach with project context
             greeting_text = (
@@ -689,9 +697,12 @@ async def entrypoint(ctx: agents.JobContext):
                 f"Bataiye, main aapki kaise madad kar sakti hoon?"
             )
         elif direction == "inbound":
-            greeting_text = f"Namaste! Thank you for calling {business_name}. I am {agent_name}. How can I help you today?"
+            greeting_text = f"Hello! Thank you for calling {business_name}. I am {agent_name}. How can I assist you today?"
         elif is_callback_call:
-            greeting_text = f"Namaste {lead_name} ji, {agent_name} baat kar rahi hoon {business_name} se. Aapne call karne ko kaha tha."
+            greeting_text = f"Hello {lead_name}! I am {agent_name} from {business_name}, calling back as requested. How can I assist you today?"
+        elif is_veda_project:
+            client_target = lead_name if valid_lead_name else "Sir"
+            greeting_text = f"Hello! Am I speaking with {client_target}? ... Wonderful! I am {agent_name} from {business_name}. I'm reaching out because Alibaug has emerged as Mumbai's most coveted coastal retreat, and we are presenting an exclusive 4-acre plotted community just 20 minutes from the Gateway of India. Did I catch you at a good time for a quick 2-minute overview?"
         elif valid_lead_name:
             greeting_text = f"Namaste {lead_name} ji, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
         else:
@@ -701,7 +712,27 @@ async def entrypoint(ctx: agents.JobContext):
             active_project = project_name.strip() if project_name and project_name.strip() and project_name.strip() != business_name else ""
             project_pitch = f"{business_name} ke {active_project} project" if active_project else f"{business_name}"
 
-            if direction == "inbound" and inbound_prior_project:
+            if is_veda_project and not is_callback_call and direction != "inbound":
+                greeting_instruction = (
+                    f"Speak this exact opening line naturally in English: '{greeting_text}'. "
+                    f"CRITICAL: NEVER call any WhatsApp tools during the greeting or without explicit agreement. "
+                    f"After delivering the opening line, PAUSE and listen to the client's reply. "
+                    f"Language: Start in English. If the client speaks or switches to Hindi or Hinglish, seamlessly mirror their language without announcing the switch. "
+                    f"Turn style: Short, voice-friendly (1-3 sentences), natural conversational tone. "
+                    f"If they say YES or are open to talk: "
+                    f"Share that The Horizon Bellagio offers 42 exclusive villa land plots (1,800 to 5,000 sq. ft.) with up to 2.2 FSI and 6 designer facade styles. "
+                    f"CLARIFY STRICTLY: 'We sell curated land plots for custom villas, not ready-made apartments or constructed homes.' "
+                    f"Ask if they are looking for a private family coastal retreat or a plotted land investment. "
+                    f"STRICT GATEWAY OF INDIA PICKUP RULE: If the client asks for home/suburb pickup (Kalyan, Dombivli, Thane, Navi Mumbai, etc.): "
+                    f"'Our curated site visits and sea transit begin exclusively from the Gateway of India in Mumbai. You would need to arrive at the Gateway, where our team will arrange the onward sea crossing to Mandwa and the estate.' "
+                    f"STRICT BROCHURE & WHATSAPP CONSENT RULE: DO NOT claim a brochure is already ready or sent. DO NOT proactively say 'I have sent details on WhatsApp'. "
+                    f"First build conversation and brief the project. "
+                    f"If the client asks for a brochure, or if you ask permission and they verbally say YES ('Yes', 'Haan', 'Sure'): "
+                    f"'Our official architectural brochure is currently being finalized. I have noted your request, and our team will share it with you on WhatsApp as soon as it is released.' "
+                    f"Trigger the send_whatsapp_brochure tool ONLY at this specific point! "
+                    f"If they say NO: Respect it immediately without pushiness, and continue or close politely."
+                )
+            elif direction == "inbound" and inbound_prior_project:
                 # RETURNING INBOUND CALLER — acknowledge prior outreach, don't pitch from scratch
                 greeting_instruction = (
                     f"Speak this opening line naturally: '{greeting_text}'. "
@@ -728,7 +759,7 @@ async def entrypoint(ctx: agents.JobContext):
                     f"If they say NO or BUSY: Respectfully handle callback scheduling without pitching. "
                     f"Seamlessly mirror whatever language the user speaks on their reply without announcing or commenting on language changes."
                 )
-            if valid_lead_name:
+            if valid_lead_name and not is_veda_project:
                 greeting_instruction += f" IMPORTANT: You already know the customer's name is {lead_name}. Do NOT ask for their name."
             await session.generate_reply(instructions=greeting_instruction)
             await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
