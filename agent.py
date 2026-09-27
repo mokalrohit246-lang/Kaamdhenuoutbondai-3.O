@@ -399,7 +399,7 @@ async def entrypoint(ctx: agents.JobContext):
                 broker_email = m.get("broker_email")
                 calcom_api_key = m.get("calcom_api_key")
                 calcom_event_type_id = m.get("calcom_event_type_id")
-                custom_prompt = m.get("system_prompt")
+                custom_prompt = m.get("custom_prompt") or m.get("instructions") or m.get("system_prompt")
                 lead_notes = m.get("notes") or m.get("context") or m.get("additional_info") or ""
                 lead_bhk = m.get("bhk") or m.get("bhk_requirement") or ""
                 lead_budget = m.get("budget") or ""
@@ -491,6 +491,14 @@ async def entrypoint(ctx: agents.JobContext):
         # ===================================================================
         # PHASE 4: BUILD SYSTEM PROMPT
         # ===================================================================
+        # Determine if a custom prompt was supplied vs falling back to default real estate blueprint
+        has_custom_prompt = bool(
+            custom_prompt
+            and custom_prompt.strip()
+            and "=== CONVERSATION OBJECTIVES & QUALIFICATION ===" not in custom_prompt
+            and "[OUTBOUND COLD CALL SALES BLUEPRINT - CRITICAL RULES]" not in custom_prompt
+        )
+
         if custom_prompt and custom_prompt.strip():
             system_prompt = custom_prompt.strip()
         else:
@@ -506,15 +514,16 @@ async def entrypoint(ctx: agents.JobContext):
         if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
             system_prompt = system_prompt + "\n\n" + DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
 
-        # Append strict real estate rules to prevent lead-name-as-project confusion
-        strict_rules = f"""
+        # Append strict real estate rules ONLY if NO custom prompt was supplied (default real estate flow)
+        if not has_custom_prompt:
+            strict_rules = f"""
 [STRICT REAL ESTATE RULES]
 - THE CALLER'S NAME IS NEVER A PROPERTY OR PROJECT NAME.
 - If the user's name is {lead_name}, NEVER say "{lead_name} project" or "{lead_name} property".
 - You represent {business_name} projects. If no specific project was previously chosen, ask open-endedly: "Aap kis location ya project ke baare mein jaankari lena chahte hain?"
 - NEVER confuse the person's identity with the property name.
 """
-        system_prompt = system_prompt + "\n" + strict_rules
+            system_prompt = system_prompt + "\n" + strict_rules
 
         # === HUMAN BACKCHANNEL & FILLER BEHAVIOR FOR NATURAL CONVERSATION ===
         conversational_speed_rules = """

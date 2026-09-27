@@ -221,19 +221,15 @@ def get_base_system_prompt(
         except Exception:
             pass
 
-        # If instructions already contain conversation layers, return clean composition
-        if "=== NATURAL HUMAN CONVERSATION & PROFESSIONAL PERSUASION LAYER ===" in clean_instructions:
-            return f"{clean_instructions}\n\n{lang_layer}\n\n{reschedule_rules}\n"
-            
-        return (
-            f"{header}\n\n"
-            f"=== AGENT PERSONA & PROJECT INSTRUCTIONS ===\n"
-            f"{clean_instructions}\n\n"
-            f"{GLOBAL_NATURAL_CONVERSATION_LAYER.strip()}\n\n"
-            f"{outbound_blueprint}\n\n"
-            f"{reschedule_rules}\n\n"
-            f"{lang_layer}\n"
-        )
+        # Pure custom prompt mode: wrap core instructions ONLY with global conversation
+        # and language mirroring layers. Do NOT append outbound sales blueprint or real estate defaults.
+        prompt_parts = [clean_instructions]
+        if "=== NATURAL HUMAN CONVERSATION & PROFESSIONAL PERSUASION LAYER ===" not in clean_instructions:
+            prompt_parts.append(GLOBAL_NATURAL_CONVERSATION_LAYER.strip())
+        if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in clean_instructions:
+            prompt_parts.append(lang_layer)
+
+        return "\n\n".join(prompt_parts) + "\n"
     else:
         try:
             flow = DEFAULT_QUALIFICATION_FLOW.strip().format(
