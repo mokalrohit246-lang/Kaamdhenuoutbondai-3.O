@@ -1,6 +1,11 @@
 import logging
 import os
 import uuid
+import json
+import asyncio
+import urllib.request
+import urllib.error
+import urllib.parse
 try:
     import httpx
 except ImportError:
@@ -9,7 +14,7 @@ import sqlite3
 import re
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Tuple, Any
 
 logger = logging.getLogger("kaamdhenu-db")
 
@@ -19,6 +24,59 @@ def normalize_phone(phone: str) -> str:
         return ""
     digits = re.sub(r'\D', '', str(phone))
     return digits[-10:] if len(digits) >= 10 else digits
+
+def _sync_supabase_rest(method: str, endpoint: str, json_data: Optional[Union[dict, list]] = None, extra_headers: Optional[dict] = None) -> Tuple[int, Any]:
+    url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    key = os.getenv("SUPABASE_SERVICE_KEY", "")
+    if not (url and key):
+        return 400, {}
+    full_url = f"{url}/rest/v1/{endpoint.lstrip('/')}"
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    data_bytes = json.dumps(json_data).encode("utf-8") if json_data is not None else None
+    try:
+        req = urllib.request.Request(full_url, data=data_bytes, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            code = resp.getcode()
+            body = resp.read().decode("utf-8")
+            return code, json.loads(body) if body else {}
+    except urllib.error.HTTPError as he:
+        body = he.read().decode("utf-8", errors="replace")
+        try:
+            return he.code, json.loads(body)
+        except Exception:
+            return he.code, {"error": body}
+    except Exception as e:
+        return 500, {"error": str(e)}
+
+async def _rest_supabase(method: str, endpoint: str, json_data: Optional[Union[dict, list]] = None, extra_headers: Optional[dict] = None) -> Tuple[int, Any]:
+    if httpx is not None:
+        url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        key = os.getenv("SUPABASE_SERVICE_KEY", "")
+        if not (url and key):
+            return 400, {}
+        full_url = f"{url}/rest/v1/{endpoint.lstrip('/')}"
+        headers = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.request(method, full_url, headers=headers, json=json_data)
+                return res.status_code, res.json() if res.text else {}
+        except Exception:
+            pass
+    return await asyncio.to_thread(_sync_supabase_rest, method, endpoint, json_data, extra_headers)
 
 def _adb():
     from supabase._async.client import create_client
@@ -405,76 +463,77 @@ async def log_call(
     cab_required: str = "", main_objection: str = "",
     **kwargs
 ):
+    loc = location_preference or current_location or "-"
+    job = job_profile or occupation or "-"
+    bhk_val = bhk_preference or bhk_requirement or "-"
+    bud = budget_range or budget or "-"
+    tl = timeline or possession_timeline or "-"
+    fund = funding_type or "-"
+    
+    # Strict lead scoring: calls < 30s or incomplete calls must NOT default to Warm
+    dur_sec = int(duration_seconds)
+    if lead_score:
+        score = lead_score
+    elif dur_sec < 15:
+        score = "Dropped"
+    elif dur_sec < 30:
+        score = "Cold"
+    else:
+        score = "Cold"
+
+    cab = cab_required if cab_required else ("Yes" if pickup_required else "No")
+    cab_bool = True if str(cab).lower() in ("true", "yes", "1") or pickup_required else False
+    obj = main_objection or objection or ""
+    sv_interest = site_visit_interest or (f"Yes ({site_visit_date})" if site_visit_date else "No")
+
+    row = {
+        "id": call_id or str(uuid.uuid4()),
+        "phone_number": phone_number,
+        "called_to": called_to,
+        "lead_name": lead_name,
+        "direction": direction,
+        "outcome": outcome,
+        "lead_score": score,
+        "summary": summary,
+        "duration_seconds": int(duration_seconds),
+        "cost_inr": float(cost_inr),
+        "timestamp": datetime.utcnow().isoformat(),
+        "client_name": client_name or lead_name,
+        # Legacy column mappings
+        "current_location": loc,
+        "occupation": job,
+        "bhk_requirement": bhk_val,
+        "budget": bud,
+        "purpose": purpose,
+        "possession_timeline": tl,
+        "funding_type": fund,
+        "commitment_risk": commitment_risk,
+        "site_visit_date": site_visit_date,
+        "pickup_required": cab_bool,
+        "pickup_location": pickup_location,
+        "next_callback": next_callback,
+        "objection": obj,
+        "whatsapp_status": whatsapp_status,
+        "callback_dispatched": callback_dispatched,
+        # Structured CRM column mappings
+        "location_preference": loc,
+        "job_profile": job,
+        "bhk_preference": bhk_val,
+        "budget_range": bud,
+        "timeline": tl,
+        "site_visit_interest": sv_interest,
+        "cab_required": cab,
+        "main_objection": obj
+    }
+    for k, v in kwargs.items():
+        row[k] = v
+    if campaign_id:
+        row["campaign_id"] = campaign_id
+    if recording_url and str(recording_url).strip() not in ("", "None", "null", "-"):
+        row["recording_url"] = str(recording_url).strip()
+
     try:
         db = await _adb()
-        loc = location_preference or current_location or "-"
-        job = job_profile or occupation or "-"
-        bhk_val = bhk_preference or bhk_requirement or "-"
-        bud = budget_range or budget or "-"
-        tl = timeline or possession_timeline or "-"
-        fund = funding_type or "-"
-        
-        # Strict lead scoring: calls < 30s or incomplete calls must NOT default to Warm
-        dur_sec = int(duration_seconds)
-        if lead_score:
-            score = lead_score
-        elif dur_sec < 15:
-            score = "Dropped"
-        elif dur_sec < 30:
-            score = "Cold"
-        else:
-            score = "Cold"
-
-        cab = cab_required if cab_required else ("Yes" if pickup_required else "No")
-        cab_bool = True if str(cab).lower() in ("true", "yes", "1") or pickup_required else False
-        obj = main_objection or objection or ""
-        sv_interest = site_visit_interest or (f"Yes ({site_visit_date})" if site_visit_date else "No")
-
-        row = {
-            "id": call_id or str(uuid.uuid4()),
-            "phone_number": phone_number,
-            "called_to": called_to,
-            "lead_name": lead_name,
-            "direction": direction,
-            "outcome": outcome,
-            "lead_score": score,
-            "summary": summary,
-            "duration_seconds": int(duration_seconds),
-            "cost_inr": float(cost_inr),
-            "timestamp": datetime.utcnow().isoformat(),
-            "client_name": client_name or lead_name,
-            # Legacy column mappings
-            "current_location": loc,
-            "occupation": job,
-            "bhk_requirement": bhk_val,
-            "budget": bud,
-            "purpose": purpose,
-            "possession_timeline": tl,
-            "funding_type": fund,
-            "commitment_risk": commitment_risk,
-            "site_visit_date": site_visit_date,
-            "pickup_required": cab_bool,
-            "pickup_location": pickup_location,
-            "next_callback": next_callback,
-            "objection": obj,
-            "whatsapp_status": whatsapp_status,
-            "callback_dispatched": callback_dispatched,
-            # Structured CRM column mappings
-            "location_preference": loc,
-            "job_profile": job,
-            "bhk_preference": bhk_val,
-            "budget_range": bud,
-            "timeline": tl,
-            "site_visit_interest": sv_interest,
-            "cab_required": cab,
-            "main_objection": obj
-        }
-        for k, v in kwargs.items():
-            row[k] = v
-        if campaign_id:
-            row["campaign_id"] = campaign_id
-        if recording_url and str(recording_url).strip() not in ("", "None", "null", "-"):
-            row["recording_url"] = str(recording_url).strip()
 
         # Resilient upsert: gracefully strip any column not defined in schema cache
         while True:
@@ -494,10 +553,241 @@ async def log_call(
                     continue
                 raise up_err
     except Exception as e:
-        logger.error(f"Error executing log_call upsert: {e}")
+        logger.warning(f"Error executing log_call upsert (SDK): {e} — trying REST fallback...")
+        try:
+            VALID_CALL_LOG_COLS = {
+                "id", "phone_number", "called_to", "lead_name", "direction", "outcome", "lead_score",
+                "summary", "duration_seconds", "cost_inr", "timestamp", "client_name", "current_location",
+                "occupation", "bhk_requirement", "budget", "purpose", "possession_timeline", "funding_type",
+                "commitment_risk", "site_visit_date", "pickup_required", "pickup_location", "next_callback",
+                "objection", "whatsapp_status", "callback_dispatched", "campaign_id", "recording_url",
+                "notes", "lead_status", "property_type", "location", "transcript", "call_cost",
+                "call_direction", "log_category", "reason"
+            }
+            rest_row = {k: v for k, v in row.items() if k in VALID_CALL_LOG_COLS}
+            status_code, body = await _rest_supabase(
+                "POST", "call_logs?on_conflict=id", rest_row,
+                extra_headers={"Prefer": "resolution=merge-duplicates,return=representation"}
+            )
+            if status_code not in (200, 201):
+                logger.error(f"REST fallback log_call upsert error: status {status_code} body: {body}")
+        except Exception as rest_err:
+            logger.error(f"Error executing log_call upsert (REST): {rest_err}")
 
 # Forward and backward compatible alias
 save_call_log = log_call
+
+async def update_call_recording_url(call_id: str, recording_url: str) -> bool:
+    """Update only the recording_url for a call record in Supabase and local SQLite."""
+    if not call_id or not recording_url:
+        return False
+    clean_url = str(recording_url).strip()
+    updated = False
+    try:
+        db = await _adb()
+        await db.table("call_logs").update({"recording_url": clean_url}).eq("id", call_id).execute()
+        updated = True
+    except Exception as e:
+        logger.warning(f"update_call_recording_url SDK fallback to REST: {e}")
+        try:
+            code, _ = await _rest_supabase("PATCH", f"call_logs?id=eq.{call_id}", {"recording_url": clean_url})
+            if code in (200, 201, 204):
+                updated = True
+        except Exception as rest_e:
+            logger.warning(f"update_call_recording_url REST error: {rest_e}")
+
+    try:
+        _init_local_sqlite()
+        conn = sqlite3.connect(LOCAL_DB_FILE)
+        c = conn.cursor()
+        c.execute("UPDATE call_logs SET recording_url = ? WHERE id = ?", (clean_url, call_id))
+        conn.commit()
+        conn.close()
+        updated = True
+    except Exception:
+        pass
+    return updated
+
+async def update_call_telephony_details(
+    call_id: Optional[str] = None,
+    phone_number: Optional[str] = None,
+    duration_seconds: Optional[int] = None,
+    vobiz_cost: Optional[float] = None,
+    recording_url: Optional[str] = None,
+    call_uuid: Optional[str] = None
+) -> dict:
+    """
+    Update exact post-call telephony metrics from Vobiz webhook:
+    1. Locates existing call_log by call_id, call_uuid, or normalized phone number.
+    2. Calculates comprehensive total cost:
+       - Telecom Cost = float(vobiz_cost)
+       - AI & Infra Cost = round((billed_duration / 60.0) * 0.80, 2)
+       - WhatsApp Cost = 1.00 if WhatsApp was dispatched / consented for this call, else 0.00
+       - Total Cost INR = round(telecom_cost + ai_infra_cost + whatsapp_cost, 2)
+    3. Updates duration_seconds, cost_inr, and recording_url in Supabase call_logs.
+       Strictly preserves AI qualification data, summaries, BHK/budget preferences, and lead scores.
+    """
+    try:
+        target_row = None
+        db = None
+        try:
+            db = await _adb()
+        except Exception:
+            db = None
+
+        # 1. Try finding by call_id
+        if call_id and str(call_id).strip():
+            cid_clean = str(call_id).strip()
+            if db is not None:
+                try:
+                    res = await db.table("call_logs").select("*").eq("id", cid_clean).limit(1).execute()
+                    if res.data and len(res.data) > 0:
+                        target_row = res.data[0]
+                except Exception:
+                    pass
+            if not target_row:
+                code, data = await _rest_supabase("GET", f"call_logs?id=eq.{cid_clean}&select=*&limit=1")
+                if code == 200 and isinstance(data, list) and len(data) > 0:
+                    target_row = data[0]
+
+        # 2. Try finding by call_uuid
+        if not target_row and call_uuid and str(call_uuid).strip():
+            uuid_clean = str(call_uuid).strip()
+            if db is not None:
+                try:
+                    res = await db.table("call_logs").select("*").eq("id", uuid_clean).limit(1).execute()
+                    if res.data and len(res.data) > 0:
+                        target_row = res.data[0]
+                except Exception:
+                    pass
+            if not target_row:
+                code, data = await _rest_supabase("GET", f"call_logs?id=eq.{uuid_clean}&select=*&limit=1")
+                if code == 200 and isinstance(data, list) and len(data) > 0:
+                    target_row = data[0]
+
+        # 3. Try matching by phone number
+        clean_10 = normalize_phone(phone_number) if phone_number else ""
+        if not target_row and clean_10:
+            if db is not None:
+                try:
+                    res = await db.table("call_logs").select("*").ilike("phone_number", f"%{clean_10}%").order("timestamp", desc=True).limit(5).execute()
+                    if res.data and len(res.data) > 0:
+                        target_row = res.data[0]
+                except Exception:
+                    pass
+            if not target_row:
+                enc_p = urllib.parse.quote(f"%{clean_10}%")
+                code, data = await _rest_supabase("GET", f"call_logs?phone_number=ilike.{enc_p}&order=timestamp.desc&limit=5&select=*")
+                if code == 200 and isinstance(data, list) and len(data) > 0:
+                    target_row = data[0]
+
+        if not target_row:
+            logger.warning(f"update_call_telephony_details: No call_log record found matching call_id={call_id}, uuid={call_uuid}, phone={phone_number}")
+            return {"success": False, "reason": "call_not_found"}
+
+        resolved_id = target_row.get("id")
+
+        # Duration resolution
+        raw_dur = duration_seconds if duration_seconds is not None else target_row.get("duration_seconds")
+        try:
+            billed_dur = max(0, int(float(raw_dur or 0)))
+        except (ValueError, TypeError):
+            billed_dur = 0
+
+        # Telecom Cost resolution (use vobiz_cost if provided, else fallback to standard 1.22 INR/min)
+        try:
+            telecom_cost = float(vobiz_cost) if vobiz_cost is not None else round((billed_dur / 60.0) * 1.22, 2)
+        except (ValueError, TypeError):
+            telecom_cost = round((billed_dur / 60.0) * 1.22, 2)
+
+        # AI & Infrastructure Cost = round((billed_duration / 60.0) * 0.80, 2)
+        ai_infra_cost = round((billed_dur / 60.0) * 0.80, 2)
+
+        # WhatsApp Cost calculation:
+        # Check if this call dispatched a WhatsApp message or if lead consented
+        has_whatsapp = False
+        wa_status_val = str(target_row.get("whatsapp_status") or "").lower()
+        if any(term in wa_status_val for term in ["consent", "sent", "auto", "✅", "yes"]):
+            has_whatsapp = True
+        else:
+            # Check whatsapp_logs for this call_id
+            if db is not None:
+                try:
+                    wa_res = await db.table("whatsapp_logs").select("id").eq("call_id", resolved_id).limit(1).execute()
+                    if wa_res.data and len(wa_res.data) > 0:
+                        has_whatsapp = True
+                except Exception:
+                    pass
+            if not has_whatsapp:
+                code, wdata = await _rest_supabase("GET", f"whatsapp_logs?call_id=eq.{resolved_id}&select=id&limit=1")
+                if code == 200 and isinstance(wdata, list) and len(wdata) > 0:
+                    has_whatsapp = True
+                elif clean_10:
+                    enc_wp = urllib.parse.quote(f"%{clean_10}%")
+                    code2, wdata2 = await _rest_supabase("GET", f"whatsapp_logs?phone_number=ilike.{enc_wp}&order=created_at.desc&limit=1&select=id")
+                    if code2 == 200 and isinstance(wdata2, list) and len(wdata2) > 0:
+                        has_whatsapp = True
+
+        whatsapp_cost = 1.00 if has_whatsapp else 0.00
+        total_cost_inr = round(telecom_cost + ai_infra_cost + whatsapp_cost, 2)
+
+        # Build update dictionary (strictly NOT touching AI qualification data)
+        update_payload = {
+            "duration_seconds": billed_dur,
+            "cost_inr": total_cost_inr
+        }
+        clean_rec = str(recording_url).strip() if recording_url else ""
+        if clean_rec and clean_rec not in ("None", "null", "-", ""):
+            update_payload["recording_url"] = clean_rec
+
+        # Update in Supabase via SDK or REST
+        updated_in_supa = False
+        if db is not None:
+            try:
+                await db.table("call_logs").update(update_payload).eq("id", resolved_id).execute()
+                updated_in_supa = True
+            except Exception as up_e:
+                logger.warning(f"Supabase SDK update error: {up_e}")
+
+        if not updated_in_supa:
+            code, _ = await _rest_supabase("PATCH", f"call_logs?id=eq.{resolved_id}", update_payload)
+            if code in (200, 201, 204):
+                updated_in_supa = True
+
+        # Update local SQLite fallback
+        try:
+            _init_local_sqlite()
+            conn = sqlite3.connect(LOCAL_DB_FILE)
+            c = conn.cursor()
+            if clean_rec and clean_rec not in ("None", "null", "-", ""):
+                c.execute("UPDATE call_logs SET duration_seconds = ?, cost_inr = ?, recording_url = ? WHERE id = ?", (billed_dur, total_cost_inr, clean_rec, resolved_id))
+            else:
+                c.execute("UPDATE call_logs SET duration_seconds = ?, cost_inr = ? WHERE id = ?", (billed_dur, total_cost_inr, resolved_id))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
+        await push_unified_log(
+            "Vobiz", "info",
+            f"Vobiz CDR processed for {resolved_id}: {billed_dur}s, telecom=₹{telecom_cost}, AI=₹{ai_infra_cost}, WA=₹{whatsapp_cost} -> Total=₹{total_cost_inr}"
+            + (f" | Rec: {clean_rec}" if clean_rec else ""),
+            call_id=resolved_id
+        )
+
+        return {
+            "success": True,
+            "call_id": resolved_id,
+            "duration_seconds": billed_dur,
+            "telecom_cost": telecom_cost,
+            "ai_infra_cost": ai_infra_cost,
+            "whatsapp_cost": whatsapp_cost,
+            "total_cost_inr": total_cost_inr,
+            "recording_url": clean_rec
+        }
+    except Exception as e:
+        logger.error(f"Error in update_call_telephony_details: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
 
 async def get_pending_callbacks() -> list:
     """Fetch call logs where next_callback is set and not yet dispatched."""

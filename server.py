@@ -10,27 +10,31 @@ import ssl
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 try:
     import httpx
 except ImportError:
     httpx = None
-import certifi
+try:
+    import certifi
+    _orig_ssl = ssl.create_default_context
+    def _certifi_ssl(purpose=ssl.Purpose.SERVER_AUTH, **kwargs):
+        if not kwargs.get("cafile") and not kwargs.get("capath") and not kwargs.get("cadata"):
+            kwargs["cafile"] = certifi.where()
+        return _orig_ssl(purpose, **kwargs)
+    ssl.create_default_context = _certifi_ssl
+except ImportError:
+    certifi = None
+
 import aiohttp
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
-_orig_ssl = ssl.create_default_context
-def _certifi_ssl(purpose=ssl.Purpose.SERVER_AUTH, **kwargs):
-    if not kwargs.get("cafile") and not kwargs.get("capath") and not kwargs.get("cadata"):
-        kwargs["cafile"] = certifi.where()
-    return _orig_ssl(purpose, **kwargs)
-ssl.create_default_context = _certifi_ssl
 
 from db import (
     push_unified_log, get_unified_logs, clear_unified_logs,
@@ -42,7 +46,8 @@ from db import (
     get_pending_callbacks, mark_callback_dispatched, get_pending_callbacks_due, mark_callback_completed,
     get_and_claim_due_callbacks, emergency_cleanup_pending_callbacks,
     get_due_callbacks_epoch, claim_due_callback, normalize_phone,
-    get_campaign, update_campaign, list_whatsapp_logs, insert_whatsapp_log, find_recent_outbound_context
+    get_campaign, update_campaign, list_whatsapp_logs, insert_whatsapp_log, find_recent_outbound_context,
+    update_call_telephony_details, update_call_recording_url
 )
 from whatsapp_service import (
     send_text_message, send_document_message, send_appointment_confirmation,
@@ -1505,3 +1510,292 @@ async def whatsapp_webhook_inbound(request: Request):
                     )
 
     return {"status": "ok"}
+
+
+# ============================================================
+# VOBIZ TELEPHONY WEBHOOK & CALL RECORDING ARCHIVAL
+# ============================================================
+
+async def archive_recording_task(call_id: str, recording_url: str):
+    """
+    Non-blocking background archival task:
+    1. Downloads audio stream from Vobiz recording URL.
+    2. Mirrors locally to RECORDINGS_DIR and STATIC_RECORDINGS_DIR for instant high-speed access.
+    3. Uploads to Supabase Storage bucket 'call-recordings' for permanent cloud archival.
+    4. Updates call_logs.recording_url to the permanent Supabase public URL if uploaded.
+    """
+    if not recording_url or not call_id:
+        return
+    try:
+        parsed = urllib.parse.urlparse(recording_url)
+        path = parsed.path
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".mp3", ".wav", ".mp4", ".ogg", ".webm"):
+            ext = ".mp3"
+        filename = f"{call_id}{ext}"
+
+        audio_bytes = None
+        if httpx is not None:
+            try:
+                async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                    resp = await client.get(recording_url)
+                    if resp.status_code == 200:
+                        audio_bytes = resp.content
+            except Exception as dl_err:
+                logger.warning(f"archive_recording_task httpx download error: {dl_err}")
+
+        if not audio_bytes:
+            def _urllib_dl():
+                req = urllib.request.Request(recording_url, headers={"User-Agent": "Mozilla/5.0 (KaamdhenuAI/3.0)"})
+                with urllib.request.urlopen(req, timeout=30.0) as r:
+                    return r.read()
+            try:
+                audio_bytes = await asyncio.to_thread(_urllib_dl)
+            except Exception as u_err:
+                logger.warning(f"archive_recording_task urllib download error: {u_err}")
+
+        if not audio_bytes:
+            logger.warning(f"archive_recording_task: unable to fetch audio from {recording_url}")
+            return
+
+        # 1. Mirror locally to recordings/ and static/recordings/
+        try:
+            (RECORDINGS_DIR / filename).write_bytes(audio_bytes)
+            (STATIC_RECORDINGS_DIR / filename).write_bytes(audio_bytes)
+            logger.info(f"Mirrored recording locally for {call_id} ({len(audio_bytes)} bytes)")
+        except Exception as file_err:
+            logger.warning(f"Local recording mirror write error: {file_err}")
+
+        # 2. Upload to Supabase Storage bucket 'call-recordings'
+        supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        supabase_key = os.getenv("SUPABASE_SERVICE_KEY", "")
+        bucket_name = os.getenv("S3_BUCKET", "call-recordings")
+
+        if supabase_url and supabase_key:
+            content_type = "audio/mpeg" if ext == ".mp3" else ("audio/wav" if ext == ".wav" else "application/octet-stream")
+            upload_url = f"{supabase_url}/storage/v1/object/{bucket_name}/{filename}"
+            headers = {
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": content_type,
+                "x-upsert": "true"
+            }
+            uploaded = False
+            if httpx is not None:
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        up_res = await client.post(upload_url, headers=headers, content=audio_bytes)
+                        if up_res.status_code in (200, 201):
+                            uploaded = True
+                except Exception as up_e:
+                    logger.warning(f"Supabase archival upload error (httpx): {up_e}")
+
+            if not uploaded:
+                def _supa_dl():
+                    req = urllib.request.Request(upload_url, data=audio_bytes, headers=headers, method="POST")
+                    with urllib.request.urlopen(req, timeout=30.0) as resp:
+                        return resp.getcode()
+                try:
+                    code = await asyncio.to_thread(_supa_dl)
+                    if code in (200, 201):
+                        uploaded = True
+                except Exception as up_ue:
+                    logger.warning(f"Supabase archival upload error (urllib): {up_ue}")
+
+            if uploaded:
+                perm_url = f"{supabase_url}/storage/v1/object/public/{bucket_name}/{filename}"
+                logger.info(f"Audio permanently archived in Supabase Storage: {perm_url}")
+                await update_call_recording_url(call_id, perm_url)
+                await push_unified_log("Archival", "info", f"Recording archived to Supabase Storage: {perm_url}", call_id=call_id)
+            else:
+                await push_unified_log("Archival", "info", f"Recording mirrored locally at /recordings/{filename}", call_id=call_id)
+    except Exception as e:
+        logger.warning(f"archive_recording_task unhandled exception for {call_id}: {e}")
+
+
+@app.get("/api/vobiz/webhook")
+@app.get("/api/telephony/webhook")
+async def vobiz_webhook_verify_endpoint():
+    """Health check & verification endpoint for Vobiz telephony webhook."""
+    return {"status": "ok", "service": "Vobiz Telephony Webhook"}
+
+
+@app.post("/api/vobiz/webhook")
+@app.post("/api/telephony/webhook")
+async def vobiz_webhook_inbound(request: Request, background_tasks: BackgroundTasks):
+    """
+    Handle post-call CDR / completion event from Vobiz:
+    1. Extracts call identifiers (call_uuid, call_id, phone), duration, telecom cost, recording_url.
+    2. Updates call record with exact multi-vendor cost calculation and direct recording URL.
+    3. Triggers non-blocking background archival to Supabase Storage and local mirror.
+    """
+    body_data = {}
+    content_type = request.headers.get("content-type", "").lower()
+
+    if "application/json" in content_type:
+        try:
+            body_data = await request.json()
+        except Exception:
+            body_data = {}
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        try:
+            form = await request.form()
+            body_data = dict(form)
+        except Exception:
+            body_data = {}
+    else:
+        try:
+            body_data = await request.json()
+        except Exception:
+            try:
+                form = await request.form()
+                body_data = dict(form)
+            except Exception:
+                body_data = {}
+
+    query_params = dict(request.query_params)
+
+    # Normalize records: support single record dict or list of records
+    records = []
+    if isinstance(body_data, list):
+        records = body_data
+    elif isinstance(body_data, dict):
+        if isinstance(body_data.get("data"), list):
+            records = body_data["data"]
+        elif isinstance(body_data.get("records"), list):
+            records = body_data["records"]
+        else:
+            records = [{**query_params, **body_data}]
+    else:
+        records = [query_params]
+
+    results = []
+
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+
+        # Extract Call ID / UUID
+        call_id = (
+            item.get("call_id")
+            or item.get("callId")
+            or item.get("CallId")
+            or item.get("room_name")
+            or item.get("RoomName")
+            or item.get("custom_id")
+            or item.get("id")
+            or ""
+        )
+        call_uuid = (
+            item.get("call_uuid")
+            or item.get("CallUUID")
+            or item.get("callUuid")
+            or item.get("uuid")
+            or item.get("CallSid")
+            or item.get("sip_call_id")
+            or ""
+        )
+
+        # Extract Recipient Phone Number
+        phone = (
+            item.get("to")
+            or item.get("To")
+            or item.get("recipient")
+            or item.get("phone_number")
+            or item.get("phone")
+            or item.get("destination")
+            or item.get("Called")
+            or item.get("from")
+            or item.get("From")
+            or ""
+        )
+
+        # Extract Duration (seconds)
+        raw_dur = (
+            item.get("billed_duration")
+            or item.get("billsec")
+            or item.get("BillDuration")
+            or item.get("duration")
+            or item.get("Duration")
+            or item.get("call_duration")
+        )
+        duration_seconds = None
+        if raw_dur is not None:
+            try:
+                duration_seconds = max(0, int(float(raw_dur)))
+            except (ValueError, TypeError):
+                duration_seconds = None
+
+        # Extract Telecom Cost
+        raw_cost = (
+            item.get("vobiz_cost")
+            or item.get("total_cost")
+            or item.get("TotalCost")
+            or item.get("cost")
+            or item.get("Cost")
+            or item.get("call_cost")
+            or item.get("rate")
+            or item.get("amount")
+        )
+        vobiz_cost = None
+        if raw_cost is not None:
+            try:
+                vobiz_cost = max(0.0, float(raw_cost))
+            except (ValueError, TypeError):
+                vobiz_cost = None
+
+        # Extract Recording URL
+        rec_val = item.get("recording")
+        rec_from_obj = rec_val.get("url") if isinstance(rec_val, dict) else None
+        recording_url = (
+            item.get("recording_url")
+            or item.get("RecordingUrl")
+            or item.get("record_url")
+            or item.get("RecordUrl")
+            or rec_from_obj
+            or (rec_val if isinstance(rec_val, str) else None)
+            or item.get("audio_url")
+            or item.get("media_url")
+            or ""
+        )
+        if recording_url:
+            recording_url = str(recording_url).strip()
+
+        # Update Supabase call_logs with exact costs and recording URL
+        update_res = await update_call_telephony_details(
+            call_id=str(call_id).strip() if call_id else None,
+            phone_number=str(phone).strip() if phone else None,
+            duration_seconds=duration_seconds,
+            vobiz_cost=vobiz_cost,
+            recording_url=recording_url,
+            call_uuid=str(call_uuid).strip() if call_uuid else None
+        )
+
+        # Handle race condition: If call record isn't in DB yet, retry once after 2 seconds
+        if not update_res.get("success") and update_res.get("reason") == "call_not_found":
+            await asyncio.sleep(2.0)
+            update_res = await update_call_telephony_details(
+                call_id=str(call_id).strip() if call_id else None,
+                phone_number=str(phone).strip() if phone else None,
+                duration_seconds=duration_seconds,
+                vobiz_cost=vobiz_cost,
+                recording_url=recording_url,
+                call_uuid=str(call_uuid).strip() if call_uuid else None
+            )
+
+        if update_res.get("success"):
+            resolved_id = update_res.get("call_id")
+            if recording_url and resolved_id:
+                # Dispatch non-blocking background archival task
+                background_tasks.add_task(archive_recording_task, resolved_id, recording_url)
+
+        results.append(update_res)
+
+    all_success = any(r.get("success") for r in results) if results else False
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "success" if all_success else "processed",
+            "count": len(results),
+            "results": results
+        }
+    )
