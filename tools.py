@@ -495,7 +495,10 @@ class RealEstateTools(llm.ToolContext):
 
         lead_disp_name = self.client_name or self.lead_name or "there"
 
-        # 1. If document URL is configured, send document
+        # 1. If document URL is configured, send document via approved Meta template
+        if not brochure_url:
+            brochure_url = os.getenv("DEFAULT_BROCHURE_URL", "")
+
         if brochure_url:
             caption = f"Hello {lead_disp_name}! Here are the requested details for {p_name}."
             filename = f"{p_name.replace(' ', '_')}_Details.pdf"
@@ -508,15 +511,14 @@ class RealEstateTools(llm.ToolContext):
                 call_id=self.call_id
             )
         else:
-            # Send text summary if document URL not yet uploaded
-            text_summary = (
-                f"Hello {lead_disp_name}!\n"
-                f"Thank you for connecting regarding *{p_name}*.\n"
-                f"Our team will share the complete information and updates with you here shortly."
-            )
-            await send_text_message(
+            # When brochure URL is not yet uploaded, deliver details using approved Meta Utility template
+            # (site_visit_confirmation) instead of plain text, ensuring guaranteed delivery to cold numbers
+            await send_site_visit_confirmation(
                 to_phone=phone,
-                text=text_summary,
+                customer_name=lead_disp_name,
+                project_name=p_name,
+                visit_time="Information & Site Visit Request",
+                cab_details="Brochure & Project Details Requested",
                 campaign_id=self.campaign_id,
                 call_id=self.call_id
             )

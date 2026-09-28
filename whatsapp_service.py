@@ -715,13 +715,17 @@ async def send_appointment_confirmation(
         call_id=call_id
     )
 
-    # If template fails (e.g. not approved yet), fallback to plain text within 24h window
+    # If template fails, suppress plain text fallback on cold numbers outside 24h window.
+    # Meta strictly drops plain text to cold numbers (Error #131047). We report the template issue clearly.
     if not res.get("success") and not res.get("simulated"):
-        logger.warning(f"Site visit template failed, falling back to plain text: {res.get('error')}")
-        res = await send_text_message(
-            to_phone=clean_to,
-            text=msg_body,
-            campaign_id=campaign_id,
+        err_msg = res.get("error", "Unknown template error")
+        logger.error(
+            f"Site visit confirmation template delivery failed: {err_msg}. "
+            f"Raw text fallback suppressed to avoid Meta 24-hour customer window drop (Error 131047) on cold number {clean_to}."
+        )
+        await push_unified_log(
+            "WhatsApp", "error",
+            f"❌ Site visit confirmation could not be delivered to {clean_to}: {err_msg}. Plain text suppressed for cold number.",
             call_id=call_id
         )
 

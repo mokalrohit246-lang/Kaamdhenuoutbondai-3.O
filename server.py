@@ -1394,6 +1394,35 @@ async def whatsapp_webhook_inbound(request: Request):
             messages = val.get("messages", [])
             contacts = val.get("contacts", [])
 
+            # Process Meta message delivery status callbacks (sent, delivered, read, failed)
+            statuses = val.get("statuses", [])
+            for st in statuses:
+                st_id = st.get("id", "")
+                st_status = st.get("status", "")
+                recipient_id = st.get("recipient_id", "")
+                st_errors = st.get("errors", [])
+
+                if st_status == "failed" or st_errors:
+                    err_info = ""
+                    for err_item in st_errors:
+                        code = err_item.get("code")
+                        title = err_item.get("title", "")
+                        details = err_item.get("message", "") or err_item.get("error_data", {}).get("details", "")
+                        err_info += f"[{code}] {title}: {details} "
+                    err_str = err_info.strip() or f"Delivery failed with status: {st_status}"
+                    logger.error(f"Meta WhatsApp Webhook Delivery Failure: ID={st_id} to={recipient_id} - {err_str}")
+                    await push_unified_log("WhatsApp", "error", f"❌ Meta delivery failed for {st_id} to {recipient_id}: {err_str}")
+                    await insert_whatsapp_log(
+                        phone_number=recipient_id,
+                        message=f"[Status Webhook: FAILED] {err_str}",
+                        status=f"failed: {err_str}",
+                        direction="outbound",
+                        message_type="status_update"
+                    )
+                elif st_status in ("delivered", "read"):
+                    logger.info(f"Meta WhatsApp Message {st_status}: ID={st_id} to={recipient_id}")
+                    await push_unified_log("WhatsApp", "info", f"📬 Message {st_status} by {recipient_id} (ID: {st_id})")
+
             for msg in messages:
                 from_wa = msg.get("from", "")
                 msg_type = msg.get("type", "")
