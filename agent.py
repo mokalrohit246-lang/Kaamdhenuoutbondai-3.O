@@ -63,14 +63,14 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # ULTRA-FAST PURE GEMINI REALTIME — aggressive endpointing for sub-second latency
+    # ULTRA-FAST PURE GEMINI REALTIME — tuned endpointing for natural conversation & telephony jitter tolerance
     if use_realtime and _google_realtime is not None:
         try:
             from google.genai import types as _gt
             input_cfg = _gt.RealtimeInputConfig(
                 automatic_activity_detection=_gt.AutomaticActivityDetection(
-                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_HIGH,
-                    silence_duration_ms=250,
+                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
+                    silence_duration_ms=1200,
                     prefix_padding_ms=100
                 )
             )
@@ -89,7 +89,7 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
                 tools=tools
             )
 
-    # PIPELINE FALLBACK — tuned Silero VAD for aggressive turn detection
+    # PIPELINE FALLBACK — tuned Silero VAD for stable turn detection
     stt = _deepgram_stt(model=os.getenv("STT_MODEL", "nova-3"), language="multi") if _deepgram_stt and os.getenv("DEEPGRAM_API_KEY") else None
     tts = _google_tts(voice_name=gemini_voice) if _google_tts else None
     return AgentSession(
@@ -97,15 +97,15 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
         llm=_google_llm(model="gemini-2.0-flash") if _google_llm else None,
         tts=tts,
         vad=silero.VAD.load(
-            min_silence_duration=0.25,
+            min_silence_duration=0.8,
             prefix_padding_duration=0.1
         ),
         tools=tools
     )
 
 class KaamdhenuAssistant(Agent):
-    def __init__(self, instructions: str):
-        super().__init__(instructions=instructions)
+    def __init__(self, instructions: str, tools: list = None):
+        super().__init__(instructions=instructions, tools=tools or [])
 
 def extract_site_visit_details_from_transcript(transcript: str, client_location: str = "") -> tuple:
     """
@@ -585,7 +585,8 @@ async def entrypoint(ctx: agents.JobContext):
         if lead_budget:
             tool_ctx.budget = lead_budget
 
-        session = _build_session(tools=tool_ctx.get_all_tools(), system_prompt=system_prompt, voice=agent_voice)
+        active_tools = tool_ctx.get_all_tools()
+        session = _build_session(tools=active_tools, system_prompt=system_prompt, voice=agent_voice)
 
         transcript_entries = []
         def _record_speech(speaker: str, text: str):
@@ -597,12 +598,13 @@ async def entrypoint(ctx: agents.JobContext):
         # ringing / SIP 183 early media from being streamed into Gemini.
         # wait_until_answered=True ensures we gate on 200 OK (call answered).
         # ===================================================================
+        sip_participant = None
         if direction == "outbound" and phone_number:
             trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
             if trunk_id:
                 try:
                     await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
-                    await ctx.api.sip.create_sip_participant(
+                    sip_participant = await ctx.api.sip.create_sip_participant(
                         api.CreateSIPParticipantRequest(
                             room_name=ctx.room.name,
                             sip_trunk_id=trunk_id,
@@ -624,12 +626,6 @@ async def entrypoint(ctx: agents.JobContext):
         # PHASE 5b: START GEMINI SESSION — now that the call is answered and
         # audio is clean (no ringing artifacts feeding into the model).
         # ===================================================================
-        session_start_task = asyncio.create_task(session.start(
-            room=ctx.room,
-            agent=KaamdhenuAssistant(instructions=system_prompt),
-            room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
-        ))
-
         try:
             @session.on("user_speech_committed")
             def _on_user_speech(msg):
@@ -637,6 +633,10 @@ async def entrypoint(ctx: agents.JobContext):
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
                 _record_speech("Client", str(content))
+                if content:
+                    asyncio.create_task(
+                        push_unified_log("STT", "info", f"User: {str(content)[:120]}", call_id=call_id)
+                    )
 
             @session.on("agent_speech_committed")
             def _on_agent_speech(msg):
@@ -644,11 +644,65 @@ async def entrypoint(ctx: agents.JobContext):
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
                 _record_speech("Agent", str(content))
+
+            @session.on("error")
+            def _on_session_error(error):
+                err_msg = str(error)
+                logger.error(f"Gemini Session error for {call_id}: {err_msg}")
+                asyncio.create_task(
+                    push_unified_log("Gemini", "error", f"Session error: {err_msg}", call_id=call_id)
+                )
         except Exception:
             pass
 
-        await session_start_task
+        await session.start(
+            room=ctx.room,
+            agent=KaamdhenuAssistant(instructions=system_prompt, tools=active_tools),
+            room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
+        )
         await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
+
+        # Explicitly bind the caller's audio track to RoomIO
+        try:
+            if hasattr(session, "room_io") and session.room_io:
+                target_p = None
+                target_identity = getattr(sip_participant, "identity", None) or (f"sip_{phone_number}" if phone_number else None)
+
+                if target_identity and target_identity in ctx.room.remote_participants:
+                    target_p = ctx.room.remote_participants[target_identity]
+                elif ctx.room.remote_participants:
+                    # Pick first remote participant (the caller)
+                    target_p = next(iter(ctx.room.remote_participants.values()))
+
+                bound_identity = None
+                if target_p:
+                    bound_identity = target_p.identity
+                    try:
+                        session.room_io.set_participant(target_p.identity)
+                    except Exception:
+                        session.room_io.set_participant(target_p)
+                elif target_identity:
+                    bound_identity = target_identity
+                    session.room_io.set_participant(target_identity)
+
+                if bound_identity:
+                    logger.info(f"RoomIO audio track explicitly bound to: {bound_identity}")
+                    await push_unified_log("Audio", "info", f"RoomIO bound to caller: {bound_identity}", call_id=call_id)
+        except Exception as rio_err:
+            logger.warning(f"RoomIO set_participant notice: {rio_err}")
+
+        # Also dynamically bind if participant connects or reconnects
+        @ctx.room.on("participant_connected")
+        def _on_participant_connected(p: rtc.RemoteParticipant):
+            if hasattr(session, "room_io") and session.room_io:
+                try:
+                    session.room_io.set_participant(p.identity)
+                    logger.info(f"RoomIO dynamically bound to connected participant: {p.identity}")
+                except Exception:
+                    try:
+                        session.room_io.set_participant(p)
+                    except Exception:
+                        pass
 
         # Opening greeting - dynamic time-based greeting & permission check for outbound calls
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
@@ -711,8 +765,9 @@ async def entrypoint(ctx: agents.JobContext):
 
         done_event = asyncio.Event()
         def _on_part_disconnected(p: rtc.RemoteParticipant):
-            if p.identity.startswith("sip_"):
-                done_event.set()
+            if ctx.room.local_participant and p.identity == ctx.room.local_participant.identity:
+                return
+            done_event.set()
         ctx.room.on("participant_disconnected", _on_part_disconnected)
         ctx.room.on("disconnected", lambda: done_event.set())
 

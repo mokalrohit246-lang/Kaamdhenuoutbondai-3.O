@@ -80,7 +80,7 @@ class RealEstateTools(llm.ToolContext):
         self.objection = ""
         self.whatsapp_status = "— Not Requested"
         self.lead_score = "Warm"
-        super().__init__(tools=[])
+        super().__init__(tools=self.get_all_tools())
 
     def get_all_tools(self):
         return [
