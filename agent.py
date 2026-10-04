@@ -67,36 +67,26 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
             seen_names.add(name)
             unique_tools.append(t)
 
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
+    if gemini_model in ("gemini-2.0-flash-exp", ""):
+        gemini_model = "gemini-2.5-flash-native-audio-preview-12-2025"
     gemini_voice = voice or os.getenv("GEMINI_TTS_VOICE", "Aoede")
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # ULTRA-FAST PURE GEMINI REALTIME — tuned endpointing for natural conversation & telephony jitter tolerance
+    # ULTRA-FAST PURE GEMINI REALTIME — stable default plugin config
     if use_realtime and _google_realtime is not None:
         try:
-            from google.genai import types as _gt
-            input_cfg = _gt.RealtimeInputConfig(
-                automatic_activity_detection=_gt.AutomaticActivityDetection(
-                    end_of_speech_sensitivity=_gt.EndSensitivity.END_SENSITIVITY_LOW,
-                    silence_duration_ms=1200,
-                    prefix_padding_ms=100
-                )
-            )
             return AgentSession(
                 llm=_google_realtime(
                     model=gemini_model,
                     voice=gemini_voice,
                     instructions=system_prompt,
-                    realtime_input_config=input_cfg
                 ),
                 tools=unique_tools
             )
-        except Exception:
-            return AgentSession(
-                llm=_google_realtime(model=gemini_model, voice=gemini_voice, instructions=system_prompt),
-                tools=unique_tools
-            )
+        except Exception as e:
+            logger.warning(f"Error initializing Google Realtime: {e}")
 
     # PIPELINE FALLBACK — tuned Silero VAD for stable turn detection
     stt = _deepgram_stt(model=os.getenv("STT_MODEL", "nova-3"), language="multi") if _deepgram_stt and os.getenv("DEEPGRAM_API_KEY") else None

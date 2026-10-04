@@ -101,18 +101,34 @@ class RealEstateTools(llm.ToolContext):
 
     @llm.function_tool
     async def check_availability(self, date: str, time: str) -> str:
-        """Check availability for site visit. Format: date YYYY-MM-DD, time HH:MM (24h)."""
+        """Check availability for site visit.
+
+        Args:
+            date: Target date in YYYY-MM-DD format.
+            time: Target time in HH:MM 24-hour format.
+        """
         try:
             if await check_slot(date, time):
                 return "available"
             next_slot = await get_next_available(date, time)
             return f"Slot unavailable. Next available slot: {next_slot}"
-        except Exception:
+        except Exception as e:
+            logger.warning(f"check_availability error: {e}")
             return "Slot available. Please confirm time."
 
     @llm.function_tool
     async def book_appointment(self, name: str, phone: str, date: str, time: str, service: str, budget: str = "", property_type: str = "") -> str:
-        """Book site visit or consultation after verbal confirmation from caller."""
+        """Book a site visit or consultation after verbal confirmation from caller.
+
+        Args:
+            name: Full name of the client.
+            phone: Phone number of the client.
+            date: Booking date in YYYY-MM-DD format.
+            time: Booking time in HH:MM format.
+            service: Service or project requested.
+            budget: Client budget range.
+            property_type: Desired property configuration (e.g. 2BHK, 3BHK).
+        """
         try:
             booking_id = await insert_appointment(name, phone, date, time, service, budget, property_type)
             self.lead_score = "Hot"
@@ -121,20 +137,29 @@ class RealEstateTools(llm.ToolContext):
             self.site_visit_date = f"{date} {time}"
             await push_unified_log("Tools", "info", f"Site visit booked: {name} ({phone}) on {date} at {time}", call_id=self.call_id)
             return f"Site visit confirmed! Reference ID: {booking_id} for {date} at {time}."
-        except Exception:
+        except Exception as e:
+            logger.warning(f"book_appointment error: {e}")
             return "Booking confirmed with our sales desk."
 
     @llm.function_tool
     async def book_calcom(self, name: str, email: str, date: str, start_time: str, notes: str = "") -> str:
-        """Book appointment directly in Cal.com calendar."""
-        self.appointment_booked = True
-        self.site_visit_date = f"{date} {start_time}"
-        api_key = os.getenv("CALCOM_API_KEY", "")
-        event_type_id = os.getenv("CALCOM_EVENT_TYPE_ID", "")
-        timezone = os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
-        if not (api_key and event_type_id):
-            return "Cal.com sync skipped (not configured)."
+        """Book appointment directly in Cal.com calendar.
+
+        Args:
+            name: Full name of the client.
+            email: Email address of the client.
+            date: Date in YYYY-MM-DD format.
+            start_time: Start time in HH:MM format.
+            notes: Additional booking notes or requirements.
+        """
         try:
+            self.appointment_booked = True
+            self.site_visit_date = f"{date} {start_time}"
+            api_key = os.getenv("CALCOM_API_KEY", "")
+            event_type_id = os.getenv("CALCOM_EVENT_TYPE_ID", "")
+            timezone = os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
+            if not (api_key and event_type_id):
+                return "Cal.com sync skipped (not configured)."
             from datetime import datetime as _dt
             start_dt = _dt.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M")
             start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -173,82 +198,89 @@ class RealEstateTools(llm.ToolContext):
 
     @llm.function_tool
     async def book_site_visit(self, client_name: str, visit_datetime: str, pickup_required: bool = False, pickup_address: str = "") -> str:
-        """Book a site visit with optional complimentary cab pickup. visit_datetime format: YYYY-MM-DD HH:MM."""
-        self.client_name = client_name
-        self.site_visit_date = visit_datetime
-        self.pickup_required = pickup_required
-        self.pickup_location = pickup_address
-        self.lead_score = "Hot"
-        self.commitment_risk = "High"
-        self.outcome = "booked"
-        self.appointment_booked = True
+        """Book a site visit with optional complimentary cab pickup.
 
-        parts = visit_datetime.strip().split(" ")
-        date = parts[0] if len(parts) > 0 else visit_datetime
-        vtime = parts[1] if len(parts) > 1 else "11:00"
-        if len(vtime) == 4 and ":" not in vtime:
-            vtime = f"{vtime[:2]}:{vtime[2:]}"
-
-        # 1. Parse into ISO 8601
-        calcom_booking_uid = ""
+        Args:
+            client_name: Name of the client.
+            visit_datetime: Date and time of visit in YYYY-MM-DD HH:MM format.
+            pickup_required: True if client requests free cab pickup, False otherwise.
+            pickup_address: Complete pickup address or location if pickup required.
+        """
         try:
-            from datetime import datetime as _dt, timedelta as _td
-            start_dt = _dt.strptime(f"{date} {vtime}", "%Y-%m-%d %H:%M")
-            end_dt = start_dt + _td(minutes=45)
-            iso_start_time = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            iso_end_time = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        except Exception:
-            iso_start_time = f"{date}T{vtime}:00.000Z"
-            iso_end_time = f"{date}T12:00:00.000Z"
+            self.client_name = client_name
+            self.site_visit_date = visit_datetime
+            self.pickup_required = pickup_required
+            self.pickup_location = pickup_address
+            self.lead_score = "Hot"
+            self.commitment_risk = "High"
+            self.outcome = "booked"
+            self.appointment_booked = True
 
-        # 2. Asynchronous, non-blocking Cal.com booking (timeout=4s)
-        if self.calcom_api_key and self.calcom_event_type_id:
+            parts = visit_datetime.strip().split(" ")
+            date = parts[0] if len(parts) > 0 else visit_datetime
+            vtime = parts[1] if len(parts) > 1 else "11:00"
+            if len(vtime) == 4 and ":" not in vtime:
+                vtime = f"{vtime[:2]}:{vtime[2:]}"
+
+            # 1. Parse into ISO 8601
+            calcom_booking_uid = ""
             try:
-                clean_phone = self.phone_number.replace("+", "").replace(" ", "").strip() or "client"
-                url = f"https://api.cal.com/v1/bookings?apiKey={self.calcom_api_key}"
-                event_id = int(self.calcom_event_type_id) if str(self.calcom_event_type_id).isdigit() else self.calcom_event_type_id
-                body = {
-                    "eventTypeId": event_id,
-                    "start": iso_start_time,
-                    "end": iso_end_time,
-                    "responses": {
-                        "name": client_name or self.lead_name or "Real Estate Lead",
-                        "email": f"{clean_phone}@leads.kaamdhenu.ai",
-                        "notes": f"Pickup: {'Yes - ' + pickup_address if pickup_required else 'No (Self-Drive)'}. Campaign: {self.campaign_id or 'Direct Call'}"
-                    },
-                    "metadata": {"broker_phone": self.broker_phone, "broker_email": self.broker_email},
-                    "timeZone": os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
-                }
-                if httpx is not None:
-                    async with httpx.AsyncClient(timeout=4.0) as client:
-                        resp = await client.post(url, json=body)
-                        if resp.status_code in (200, 201):
-                            data = resp.json()
-                            calcom_booking_uid = data.get("booking", {}).get("uid") or data.get("uid", "")
-                            await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
-                        else:
-                            logger.warning(f"Cal.com non-200 response: {resp.status_code} - {resp.text}")
-                else:
-                    import urllib.request
-                    import json as _json
-                    def _urllib_book():
-                        d_bytes = _json.dumps(body).encode("utf-8")
-                        req = urllib.request.Request(url, data=d_bytes, headers={"Content-Type": "application/json"}, method="POST")
-                        with urllib.request.urlopen(req, timeout=4.0) as resp:
-                            return resp.getcode(), _json.loads(resp.read().decode("utf-8"))
-                    try:
-                        c_code, c_data = await asyncio.to_thread(_urllib_book)
-                        if c_code in (200, 201):
-                            calcom_booking_uid = c_data.get("booking", {}).get("uid") or c_data.get("uid", "")
-                            await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
-                    except Exception as ub_err:
-                        logger.warning(f"Cal.com urllib booking error: {ub_err}")
-            except Exception as cal_err:
-                logger.warning(f"Cal.com async booking fallback: {cal_err}")
-                await push_unified_log("Cal.com", "warning", f"Cal.com sync fallback: {cal_err}", call_id=self.call_id)
+                from datetime import datetime as _dt, timedelta as _td
+                start_dt = _dt.strptime(f"{date} {vtime}", "%Y-%m-%d %H:%M")
+                end_dt = start_dt + _td(minutes=45)
+                iso_start_time = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                iso_end_time = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            except Exception:
+                iso_start_time = f"{date}T{vtime}:00.000Z"
+                iso_end_time = f"{date}T12:00:00.000Z"
 
-        # 3. Save to local DB
-        try:
+            # 2. Asynchronous, non-blocking Cal.com booking (timeout=4s)
+            if self.calcom_api_key and self.calcom_event_type_id:
+                try:
+                    clean_phone = self.phone_number.replace("+", "").replace(" ", "").strip() or "client"
+                    url = f"https://api.cal.com/v1/bookings?apiKey={self.calcom_api_key}"
+                    event_id = int(self.calcom_event_type_id) if str(self.calcom_event_type_id).isdigit() else self.calcom_event_type_id
+                    body = {
+                        "eventTypeId": event_id,
+                        "start": iso_start_time,
+                        "end": iso_end_time,
+                        "responses": {
+                            "name": client_name or self.lead_name or "Real Estate Lead",
+                            "email": f"{clean_phone}@leads.kaamdhenu.ai",
+                            "notes": f"Pickup: {'Yes - ' + pickup_address if pickup_required else 'No (Self-Drive)'}. Campaign: {self.campaign_id or 'Direct Call'}"
+                        },
+                        "metadata": {"broker_phone": self.broker_phone, "broker_email": self.broker_email},
+                        "timeZone": os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
+                    }
+                    if httpx is not None:
+                        async with httpx.AsyncClient(timeout=4.0) as client:
+                            resp = await client.post(url, json=body)
+                            if resp.status_code in (200, 201):
+                                data = resp.json()
+                                calcom_booking_uid = data.get("booking", {}).get("uid") or data.get("uid", "")
+                                await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
+                            else:
+                                logger.warning(f"Cal.com non-200 response: {resp.status_code} - {resp.text}")
+                    else:
+                        import urllib.request
+                        import json as _json
+                        def _urllib_book():
+                            d_bytes = _json.dumps(body).encode("utf-8")
+                            req = urllib.request.Request(url, data=d_bytes, headers={"Content-Type": "application/json"}, method="POST")
+                            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                                return resp.getcode(), _json.loads(resp.read().decode("utf-8"))
+                        try:
+                            c_code, c_data = await asyncio.to_thread(_urllib_book)
+                            if c_code in (200, 201):
+                                calcom_booking_uid = c_data.get("booking", {}).get("uid") or c_data.get("uid", "")
+                                await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
+                        except Exception as ub_err:
+                            logger.warning(f"Cal.com urllib booking error: {ub_err}")
+                except Exception as cal_err:
+                    logger.warning(f"Cal.com async booking fallback: {cal_err}")
+                    await push_unified_log("Cal.com", "warning", f"Cal.com sync fallback: {cal_err}", call_id=self.call_id)
+
+            # 3. Save to local DB
             clean_phone_digits = re.sub(r'\D', '', str(self.phone_number or ""))
             custom_apt_id = f"apt_{clean_phone_digits}_{int(time.time())}"
             bhk = self.bhk_requirement or getattr(self, "property_type", "")
@@ -325,22 +357,36 @@ class RealEstateTools(llm.ToolContext):
 
     @llm.function_tool
     async def record_client_qualification(self, client_name: str = "", location: str = "", occupation: str = "", bhk: str = "", budget: str = "", possession: str = "", funding: str = "", objection: str = "") -> str:
-        """Silently record client qualification details gathered during conversation. Call this as you learn each detail."""
-        if client_name: self.client_name = client_name
-        if location: self.current_location = location
-        if occupation: self.occupation = occupation
-        if bhk: self.bhk_requirement = bhk
-        if budget: self.budget = budget
-        if possession: self.possession_timeline = possession
-        if funding: self.funding_type = funding
-        if objection: self.objection = objection
-        # Auto-score
-        if self.budget and self.bhk_requirement:
-            self.lead_score = "Warm"
-        if self.site_visit_date:
-            self.lead_score = "Hot"
-        await push_unified_log("CRM", "info", f"Qualification updated: {client_name or self.lead_name} - {bhk} {budget}", call_id=self.call_id)
-        return "Client details recorded."
+        """Silently record client qualification details gathered during conversation.
+
+        Args:
+            client_name: Name of the client.
+            location: Current residential location.
+            occupation: Profession or occupation.
+            bhk: BHK configuration requirement.
+            budget: Investment budget.
+            possession: Possession timeline.
+            funding: Funding type (self or loan).
+            objection: Any concerns or objections raised.
+        """
+        try:
+            if client_name: self.client_name = client_name
+            if location: self.current_location = location
+            if occupation: self.occupation = occupation
+            if bhk: self.bhk_requirement = bhk
+            if budget: self.budget = budget
+            if possession: self.possession_timeline = possession
+            if funding: self.funding_type = funding
+            if objection: self.objection = objection
+            if self.budget and self.bhk_requirement:
+                self.lead_score = "Warm"
+            if self.site_visit_date:
+                self.lead_score = "Hot"
+            await push_unified_log("CRM", "info", f"Qualification updated: {client_name or self.lead_name} - {bhk} {budget}", call_id=self.call_id)
+            return "Client details recorded."
+        except Exception as e:
+            logger.warning(f"record_client_qualification error: {e}")
+            return "Client details recorded."
 
     @llm.function_tool
     async def schedule_callback(
@@ -353,243 +399,289 @@ class RealEstateTools(llm.ToolContext):
         callback_time: str = "",
         notes: str = ""
     ) -> str:
-        """
-        Schedule a callback ONLY when the lead EXPLICITLY says they are busy, driving, in a meeting, or asks to be called back later.
-        STRICT BAN: NEVER call this tool unprompted. If the lead did not explicitly ask to be called back, DO NOT CALL THIS TOOL.
-        time_description: Human phrase from the lead (e.g., '10:00 baje', 'kal subah 11 baje', 'shaam ko 6 baje', 'thodi der baad', 'kal kabhi bhi').
-        estimated_minutes_from_now: Relative offset in minutes if user gives relative delay (default 60).
-        specific_datetime_iso: Target ISO datetime if known.
-        reason: Reason given by lead (e.g. 'driving', 'meeting', 'busy').
-        is_exact: True if user provided a specific hard appointment time.
-        """
-        import re
-        from datetime import datetime, timedelta, timezone
-        from zoneinfo import ZoneInfo
+        """Schedule a callback when the lead explicitly requests to be called back later.
 
+        Args:
+            time_description: Time or day phrase mentioned by caller (e.g. kal subah 11 baje, shaam ko 6 baje, thodi der baad).
+            estimated_minutes_from_now: Relative offset in minutes if caller gives relative delay.
+            specific_datetime_iso: Specific target ISO datetime if known.
+            reason: Reason given by caller (e.g. driving, meeting, busy).
+            is_exact: True if user gave a specific exact appointment time, False otherwise.
+            callback_time: Alternative time phrase parameter.
+            notes: Additional context or notes for the callback.
+        """
         try:
-            IST = ZoneInfo("Asia/Kolkata")
-        except Exception:
-            IST = timezone(timedelta(hours=5, minutes=30))
+            import re
+            from datetime import datetime, timedelta, timezone
+            from zoneinfo import ZoneInfo
 
-        now_ist = datetime.now(IST)
-        desc = (time_description or callback_time or "").strip()
-        context_notes = (notes or reason or "Lead requested callback").strip()
-        s = desc.lower()
-
-        target_time_ist = None
-
-        # 1. Check if specific ISO passed
-        if specific_datetime_iso and specific_datetime_iso.strip():
             try:
-                dt_p = datetime.fromisoformat(specific_datetime_iso.strip().replace("Z", "+00:00"))
-                target_time_ist = dt_p.astimezone(IST)
+                IST = ZoneInfo("Asia/Kolkata")
             except Exception:
-                pass
+                IST = timezone(timedelta(hours=5, minutes=30))
 
-        if not target_time_ist:
-            # 2. VAGUE BRUSH-OFFS: "10-15 min", "thodi der", "baad mein" -> 45-min breathing room
-            is_vague_delay = any(p in s for p in [
-                "10-15", "10 to 15", "10 se 15", "thodi der", "baad mein", "baad me", "later", "busy right now"
-            ]) or (("minute" in s or "min" in s) and any(d in s for d in ["10", "15", "5"]))
+            now_ist = datetime.now(IST)
+            desc = (time_description or callback_time or "").strip()
+            context_notes = (notes or reason or "Lead requested callback").strip()
+            s = desc.lower()
 
-            # "Kal kabhi bhi" / "kabhi bhi"
-            is_kabhi_bhi = "kabhi bhi" in s or "anytime" in s or "any time" in s
+            target_time_ist = None
 
-            if is_kabhi_bhi:
-                # Schedule for non-rush golden business hours (tomorrow at 11:30 AM or 3:30 PM IST)
-                days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (0 if now_ist.hour < 15 else 1)
-                base_day = now_ist + timedelta(days=days_ahead)
-                if days_ahead == 0 and now_ist.hour < 11:
-                    target_time_ist = base_day.replace(hour=11, minute=30, second=0, microsecond=0)
-                elif days_ahead == 0 and now_ist.hour < 15:
-                    target_time_ist = base_day.replace(hour=15, minute=30, second=0, microsecond=0)
+            # 1. Check if specific ISO passed
+            if specific_datetime_iso and specific_datetime_iso.strip():
+                try:
+                    dt_p = datetime.fromisoformat(specific_datetime_iso.strip().replace("Z", "+00:00"))
+                    target_time_ist = dt_p.astimezone(IST)
+                except Exception:
+                    pass
+
+            if not target_time_ist:
+                # 2. VAGUE BRUSH-OFFS: "10-15 min", "thodi der", "baad mein" -> 45-min breathing room
+                is_vague_delay = any(p in s for p in [
+                    "10-15", "10 to 15", "10 se 15", "thodi der", "baad mein", "baad me", "later", "busy right now"
+                ]) or (("minute" in s or "min" in s) and any(d in s for d in ["10", "15", "5"]))
+
+                # "Kal kabhi bhi" / "kabhi bhi"
+                is_kabhi_bhi = "kabhi bhi" in s or "anytime" in s or "any time" in s
+
+                if is_kabhi_bhi:
+                    # Schedule for non-rush golden business hours (tomorrow at 11:30 AM or 3:30 PM IST)
+                    days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (0 if now_ist.hour < 15 else 1)
+                    base_day = now_ist + timedelta(days=days_ahead)
+                    if days_ahead == 0 and now_ist.hour < 11:
+                        target_time_ist = base_day.replace(hour=11, minute=30, second=0, microsecond=0)
+                    elif days_ahead == 0 and now_ist.hour < 15:
+                        target_time_ist = base_day.replace(hour=15, minute=30, second=0, microsecond=0)
+                    else:
+                        target_time_ist = (now_ist + timedelta(days=1)).replace(hour=11, minute=30, second=0, microsecond=0)
+
+                elif is_vague_delay:
+                    # 45-minute sales buffer
+                    target_time_ist = now_ist + timedelta(minutes=45)
+
+                elif "aadhe" in s or "aadha" in s or "half" in s:
+                    target_time_ist = now_ist + timedelta(minutes=30)
+
                 else:
-                    target_time_ist = (now_ist + timedelta(days=1)).replace(hour=11, minute=30, second=0, microsecond=0)
+                    # Relative hours ("after 2 hours", "2 ghante baad")
+                    m_hr = re.search(r'(\d+)\s*(?:hour|hr|ghante|ghanta|h)', s)
+                    if m_hr:
+                        hrs = int(m_hr.group(1))
+                        target_time_ist = now_ist + timedelta(hours=hrs)
 
-            elif is_vague_delay:
-                # 45-minute sales buffer
+                    # Explicit clock times: "10:00 baje", "kal 11 am", "6 baje", "10 baje"
+                    m_time = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?', s)
+                    if not target_time_ist and m_time and any(marker in s for marker in ["baje", "am", "pm", ":", "subah", "shaam", "dopahar", "raat", "kal", "tomorrow"]):
+                        raw_hr = int(m_time.group(1))
+                        raw_min = int(m_time.group(2) or 0)
+                        ampm = (m_time.group(3) or "").lower()
+
+                        if "pm" in ampm and raw_hr < 12:
+                            raw_hr += 12
+                        elif "am" in ampm and raw_hr == 12:
+                            raw_hr = 0
+                        elif "shaam" in s or "raat" in s or "dopahar" in s:
+                            if raw_hr < 12:
+                                raw_hr += 12
+                        elif raw_hr in (1, 2, 3, 4, 5, 6, 7):
+                            raw_hr += 12
+
+                        days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (2 if ("parson" in s or "day after tomorrow" in s) else 0)
+                        candidate = (now_ist + timedelta(days=days_ahead)).replace(hour=raw_hr, minute=raw_min, second=0, microsecond=0)
+
+                        # If user said e.g. "10 baje" and it's already 10:15 PM today, schedule for tomorrow
+                        if days_ahead == 0 and candidate <= now_ist + timedelta(minutes=5):
+                            candidate = candidate + timedelta(days=1)
+
+                        target_time_ist = candidate
+
+            # Default fallback
+            if not target_time_ist:
+                mins = max(15, int(estimated_minutes_from_now or 60))
+                target_time_ist = now_ist + timedelta(minutes=mins)
+
+            # Enforce minimum 5 minutes in future
+            if target_time_ist <= now_ist + timedelta(minutes=4):
                 target_time_ist = now_ist + timedelta(minutes=45)
 
-            elif "aadhe" in s or "aadha" in s or "half" in s:
-                target_time_ist = now_ist + timedelta(minutes=30)
+            # Convert calculated IST target datetime to epoch timestamp
+            target_epoch = int(target_time_ist.timestamp())
+            human_time_str = desc if desc and desc not in ["in 1 hour", "thodi der baad"] else target_time_ist.strftime("%I:%M %p (%d %b)")
+            ist_formatted = target_time_ist.strftime("%d-%m-%Y %I:%M %p IST")
 
-            else:
-                # Relative hours ("after 2 hours", "2 ghante baad")
-                m_hr = re.search(r'(\d+)\s*(?:hour|hr|ghante|ghanta|h)', s)
-                if m_hr:
-                    hrs = int(m_hr.group(1))
-                    target_time_ist = now_ist + timedelta(hours=hrs)
+            logger.info(f"Callback registered: Phone={self.phone_number} | Target IST={ist_formatted} | Target Epoch={target_epoch}")
 
-                # Explicit clock times: "10:00 baje", "kal 11 am", "6 baje", "10 baje"
-                m_time = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|baje)?', s)
-                if not target_time_ist and m_time and any(marker in s for marker in ["baje", "am", "pm", ":", "subah", "shaam", "dopahar", "raat", "kal", "tomorrow"]):
-                    raw_hr = int(m_time.group(1))
-                    raw_min = int(m_time.group(2) or 0)
-                    ampm = (m_time.group(3) or "").lower()
+            # Save to database with epoch seconds, IST formatted string, and upsert
+            try:
+                await save_callback(
+                    phone=self.phone_number,
+                    lead_name=self.client_name or self.lead_name or "Lead",
+                    scheduled_epoch=target_epoch,
+                    notes=f"{desc} - {context_notes}",
+                    scheduled_time=ist_formatted
+                )
+            except Exception as e:
+                logger.warning(f"save_callback error: {e}")
 
-                    if "pm" in ampm and raw_hr < 12:
-                        raw_hr += 12
-                    elif "am" in ampm and raw_hr == 12:
-                        raw_hr = 0
-                    elif "shaam" in s or "raat" in s or "dopahar" in s:
-                        if raw_hr < 12:
-                            raw_hr += 12
-                    elif raw_hr in (1, 2, 3, 4, 5, 6, 7):
-                        raw_hr += 12
+            self.next_callback = ist_formatted
+            self.outcome = "callback_requested"
+            self.lead_score = "Warm"
 
-                    days_ahead = 1 if ("kal" in s or "tomorrow" in s) else (2 if ("parson" in s or "day after tomorrow" in s) else 0)
-                    candidate = (now_ist + timedelta(days=days_ahead)).replace(hour=raw_hr, minute=raw_min, second=0, microsecond=0)
+            await add_contact_memory(self.phone_number, f"Callback scheduled for {ist_formatted}. {context_notes}")
+            await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({ist_formatted})", call_id=self.call_id)
 
-                    # If user said e.g. "10 baje" and it's already 10:15 PM today, schedule for tomorrow
-                    if days_ahead == 0 and candidate <= now_ist + timedelta(minutes=5):
-                        candidate = candidate + timedelta(days=1)
-
-                    target_time_ist = candidate
-
-        # Default fallback
-        if not target_time_ist:
-            mins = max(15, int(estimated_minutes_from_now or 60))
-            target_time_ist = now_ist + timedelta(minutes=mins)
-
-        # Enforce minimum 5 minutes in future
-        if target_time_ist <= now_ist + timedelta(minutes=4):
-            target_time_ist = now_ist + timedelta(minutes=45)
-
-        # Convert calculated IST target datetime to epoch timestamp
-        target_epoch = int(target_time_ist.timestamp())
-        human_time_str = desc if desc and desc not in ["in 1 hour", "thodi der baad"] else target_time_ist.strftime("%I:%M %p (%d %b)")
-        ist_formatted = target_time_ist.strftime("%d-%m-%Y %I:%M %p IST")
-
-        logger.info(f"Callback registered: Phone={self.phone_number} | Target IST={ist_formatted} | Target Epoch={target_epoch}")
-
-        # Save to database with epoch seconds, IST formatted string, and upsert
-        try:
-            await save_callback(
-                phone=self.phone_number,
-                lead_name=self.client_name or self.lead_name or "Lead",
-                scheduled_epoch=target_epoch,
-                notes=f"{desc} - {context_notes}",
-                scheduled_time=ist_formatted
-            )
-        except Exception as e:
-            logger.warning(f"save_callback error: {e}")
-
-        self.next_callback = ist_formatted
-        self.outcome = "callback_requested"
-        self.lead_score = "Warm"
-
-        await add_contact_memory(self.phone_number, f"Callback scheduled for {ist_formatted}. {context_notes}")
-        await push_unified_log("Callback", "info", f"📞 Callback scheduled: {self.phone_number} for {human_time_str} ({ist_formatted})", call_id=self.call_id)
-
-        return f"Done sir, main aapko theek {human_time_str} par call karti hoon. Thank you!"
+            return f"Done sir, main aapko theek {human_time_str} par call karti hoon. Thank you!"
+        except Exception as exc:
+            logger.error(f"schedule_callback error: {exc}")
+            return "Done sir, aapka callback note kar liya hai. Hum aapko jald hi call karenge."
 
     @llm.function_tool
     async def send_project_brochure(self, phone_number: str = "") -> str:
-        """Send requested brochure, menu, or details via WhatsApp to the user when they verbally request or agree to receive information."""
-        phone = phone_number or self.phone_number
-        self.whatsapp_status = "✅ Sent Auto"
+        """Send requested brochure or project details via WhatsApp to the caller.
 
-        camp = await get_campaign(self.campaign_id) if self.campaign_id else None
-        p_name = self.project_name or (camp.get("project_name") if camp else None) or "Details"
-        brochure_url = self.brochure_url or (camp.get("brochure_url") if camp else None) or ""
+        Args:
+            phone_number: Recipient phone number (defaults to caller phone if empty).
+        """
+        try:
+            phone = phone_number or self.phone_number
+            self.whatsapp_status = "✅ Sent Auto"
 
-        lead_disp_name = self.client_name or self.lead_name or "there"
+            camp = await get_campaign(self.campaign_id) if self.campaign_id else None
+            p_name = self.project_name or (camp.get("project_name") if camp else None) or "Details"
+            brochure_url = self.brochure_url or (camp.get("brochure_url") if camp else None) or ""
 
-        # 1. If document URL is configured, send document via approved Meta template
-        if not brochure_url:
-            brochure_url = os.getenv("DEFAULT_BROCHURE_URL", "")
+            lead_disp_name = self.client_name or self.lead_name or "there"
 
-        if brochure_url:
-            caption = f"Hello {lead_disp_name}! Here are the requested details for {p_name}."
-            filename = f"{p_name.replace(' ', '_')}_Details.pdf"
-            await send_document_message(
-                to_phone=phone,
-                document_url=brochure_url,
-                caption=caption,
-                filename=filename,
-                campaign_id=self.campaign_id,
-                call_id=self.call_id
-            )
-        else:
-            # When brochure URL is not yet uploaded, deliver details using approved Meta Utility template
-            # (site_visit_confirmation) instead of plain text, ensuring guaranteed delivery to cold numbers
-            await send_site_visit_confirmation(
-                to_phone=phone,
-                customer_name=lead_disp_name,
-                project_name=p_name,
-                visit_time="Information & Site Visit Request",
-                cab_details="Brochure & Project Details Requested",
-                campaign_id=self.campaign_id,
-                call_id=self.call_id
-            )
+            # 1. If document URL is configured, send document via approved Meta template
+            if not brochure_url:
+                brochure_url = os.getenv("DEFAULT_BROCHURE_URL", "")
 
-        await push_unified_log("WhatsApp", "info", f"WhatsApp details dispatched to {phone} for {p_name}", call_id=self.call_id)
-        return "Maine WhatsApp par brochure aur details send kar di hain."
+            if brochure_url:
+                caption = f"Hello {lead_disp_name}! Here are the requested details for {p_name}."
+                filename = f"{p_name.replace(' ', '_')}_Details.pdf"
+                await send_document_message(
+                    to_phone=phone,
+                    document_url=brochure_url,
+                    caption=caption,
+                    filename=filename,
+                    campaign_id=self.campaign_id,
+                    call_id=self.call_id
+                )
+            else:
+                # When brochure URL is not yet uploaded, deliver details using approved Meta Utility template
+                # (site_visit_confirmation) instead of plain text, ensuring guaranteed delivery to cold numbers
+                await send_site_visit_confirmation(
+                    to_phone=phone,
+                    customer_name=lead_disp_name,
+                    project_name=p_name,
+                    visit_time="Information & Site Visit Request",
+                    cab_details="Brochure & Project Details Requested",
+                    campaign_id=self.campaign_id,
+                    call_id=self.call_id
+                )
+
+            await push_unified_log("WhatsApp", "info", f"WhatsApp details dispatched to {phone} for {p_name}", call_id=self.call_id)
+            return "Maine WhatsApp par brochure aur details send kar di hain."
+        except Exception as e:
+            logger.error(f"send_project_brochure error: {e}")
+            return "Maine WhatsApp par details dispatch karne ka instruction save kar liya hai."
 
     @llm.function_tool
     async def send_whatsapp_brochure(self, phone_number: str = "") -> str:
-        """Send requested brochure, menu, or details via WhatsApp to the user when they verbally request or agree to receive information."""
-        return await self.send_project_brochure(phone_number=phone_number)
+        """Send project brochure via WhatsApp to the caller.
+
+        Args:
+            phone_number: Recipient phone number (defaults to caller phone if empty).
+        """
+        try:
+            return await self.send_project_brochure(phone_number=phone_number)
+        except Exception as e:
+            logger.error(f"send_whatsapp_brochure error: {e}")
+            return "Brochure WhatsApp par bhej diya jayeka."
 
     @llm.function_tool
-    async def send_broker_hot_lead_alert(self, name: str, phone: str, budget: str, property_type: str, date: str, time: str) -> str:
-        """Send immediate Hot Lead notification to on-site broker WhatsApp via Meta WhatsApp Cloud API."""
-        broker_num = self.broker_phone
-        if not broker_num:
-            return "Broker alert skipped (no broker number configured)."
+    async def send_broker_hot_lead_alert(self, name: str = "", phone: str = "", budget: str = "", property_type: str = "", date: str = "", time: str = "") -> str:
+        """Send immediate Hot Lead notification to on-site broker WhatsApp.
 
-        msg = (
-            f"🔥 *NEW HOT LEAD SITE VISIT BOOKED*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 *Lead Name:* {name}\n"
-            f"📞 *Phone:* {phone}\n"
-            f"🏢 *Requirement:* {property_type or '2BHK/3BHK'}\n"
-            f"💰 *Budget:* {budget or 'Standard'}\n"
-            f"📅 *Visit Slot:* {date} at {time}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👉 *Action:* Please call for confirmation & arrange site pass."
-        )
+        Args:
+            name: Lead name.
+            phone: Lead phone number.
+            budget: Lead budget.
+            property_type: BHK or unit configuration.
+            date: Site visit date.
+            time: Site visit time slot.
+        """
+        try:
+            broker_num = self.broker_phone
+            if not broker_num:
+                return "Broker alert skipped (no broker number configured)."
 
-        res = await send_text_message(
-            to_phone=broker_num,
-            text=msg,
-            campaign_id=self.campaign_id,
-            call_id=self.call_id
-        )
-        if res.get("success"):
-            await push_unified_log("WhatsApp", "info", f"Hot Lead Alert sent to broker {broker_num}", call_id=self.call_id)
-            return "Broker notified via WhatsApp."
-        else:
-            await push_unified_log("WhatsApp", "warning", f"Broker alert delivery status: {res}", call_id=self.call_id)
+            msg = (
+                f"🔥 *NEW HOT LEAD SITE VISIT BOOKED*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 *Lead Name:* {name or self.lead_name or 'Lead'}\n"
+                f"📞 *Phone:* {phone or self.phone_number}\n"
+                f"🏢 *Requirement:* {property_type or self.bhk_requirement or '2BHK/3BHK'}\n"
+                f"💰 *Budget:* {budget or self.budget or 'Standard'}\n"
+                f"📅 *Visit Slot:* {date or 'Upcoming'} at {time or 'Confirmed'}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👉 *Action:* Please call for confirmation & arrange site pass."
+            )
+
+            res = await send_text_message(
+                to_phone=broker_num,
+                text=msg,
+                campaign_id=self.campaign_id,
+                call_id=self.call_id
+            )
+            if res.get("success"):
+                await push_unified_log("WhatsApp", "info", f"Hot Lead Alert sent to broker {broker_num}", call_id=self.call_id)
+                return "Broker notified via WhatsApp."
+            else:
+                await push_unified_log("WhatsApp", "warning", f"Broker alert delivery status: {res}", call_id=self.call_id)
+                return "Broker alert recorded."
+        except Exception as e:
+            logger.error(f"send_broker_hot_lead_alert error: {e}")
             return "Broker alert recorded."
 
     @llm.function_tool
-    async def send_sms_confirmation(self, phone: str, message: str) -> str:
-        """Send quick SMS confirmation."""
-        sid = os.getenv("TWILIO_ACCOUNT_SID", "")
-        token = os.getenv("TWILIO_AUTH_TOKEN", "")
-        from_num = os.getenv("TWILIO_FROM_NUMBER", "")
-        if not (sid and token and from_num):
-            return "SMS queued."
+    async def send_sms_confirmation(self, phone: str = "", message: str = "") -> str:
+        """Send quick SMS confirmation to the caller.
+
+        Args:
+            phone: Target phone number (defaults to caller phone if empty).
+            message: Text message content to send.
+        """
         try:
+            target_phone = phone or self.phone_number
+            sid = os.getenv("TWILIO_ACCOUNT_SID", "")
+            token = os.getenv("TWILIO_AUTH_TOKEN", "")
+            from_num = os.getenv("TWILIO_FROM_NUMBER", "")
+            if not (sid and token and from_num and target_phone):
+                return "SMS queued."
             from twilio.rest import Client
             loop = asyncio.get_event_loop()
             client = Client(sid, token)
-            await loop.run_in_executor(None, lambda: client.messages.create(body=message, from_=from_num, to=phone))
-            return f"SMS sent to {phone}."
-        except Exception:
+            await loop.run_in_executor(None, lambda: client.messages.create(body=message or "Confirmation from Kaamdhenu", from_=from_num, to=target_phone))
+            return f"SMS sent to {target_phone}."
+        except Exception as e:
+            logger.warning(f"send_sms_confirmation error: {e}")
             return "SMS queued."
 
     @llm.function_tool
     async def transfer_to_human(self, reason: str = "lead request") -> str:
-        """Transfer call to senior property specialist via SIP REFER."""
-        dest = os.getenv("DEFAULT_TRANSFER_NUMBER", "")
-        sip_domain = os.getenv("VOBIZ_SIP_DOMAIN", "")
-        if not dest:
-            return "Senior consultant will call you back shortly."
-        clean = dest.replace("tel:", "").replace("sip:", "")
-        transfer_uri = f"sip:{clean}@{sip_domain}" if sip_domain and "@" not in dest else f"tel:{clean}"
+        """Transfer call to senior property specialist via SIP REFER.
+
+        Args:
+            reason: Reason why transfer is requested.
+        """
         try:
+            dest = os.getenv("DEFAULT_TRANSFER_NUMBER", "")
+            sip_domain = os.getenv("VOBIZ_SIP_DOMAIN", "")
+            if not dest:
+                return "Senior consultant will call you back shortly."
+            clean = dest.replace("tel:", "").replace("sip:", "")
+            transfer_uri = f"sip:{clean}@{sip_domain}" if sip_domain and "@" not in dest else f"tel:{clean}"
             part_id = f"sip_{self.phone_number}" if self.phone_number else list(self.ctx.room.remote_participants.keys())[0]
             await self.ctx.api.sip.transfer_sip_participant(
                 api.TransferSIPParticipantRequest(
@@ -602,84 +694,106 @@ class RealEstateTools(llm.ToolContext):
             await push_unified_log("SIP", "info", f"Call transferred to {dest}: {reason}", call_id=self.call_id)
             return "Transferring you to our senior property consultant."
         except Exception as exc:
+            logger.warning(f"Transfer failed: {exc}")
             await push_unified_log("SIP", "error", f"Transfer failed: {exc}", call_id=self.call_id)
-            return "Unable to transfer. A specialist will call you right back."
+            return "Unable to transfer right now. A specialist will call you right back."
 
     @llm.function_tool
-    async def remember_details(self, insight: str) -> str:
-        """Record lead preference: budget, family size, timeline, specific unit."""
-        if not self.phone_number:
-            return "No phone number available."
-        await add_contact_memory(self.phone_number, insight)
-        await push_unified_log("CRM", "info", f"Insight saved for {self.phone_number}: {insight}", call_id=self.call_id)
-        return f"Saved note: {insight}"
+    async def remember_details(self, insight: str = "") -> str:
+        """Record lead preference: budget, family size, timeline, specific unit.
+
+        Args:
+            insight: Summary of note or preference to remember for this contact.
+        """
+        try:
+            if not self.phone_number:
+                return "No phone number available."
+            if not insight:
+                return "No details provided to remember."
+            await add_contact_memory(self.phone_number, insight)
+            await push_unified_log("CRM", "info", f"Insight saved for {self.phone_number}: {insight}", call_id=self.call_id)
+            return f"Saved note: {insight}"
+        except Exception as e:
+            logger.warning(f"remember_details error: {e}")
+            return "Note recorded."
 
     @llm.function_tool
     async def end_call(self, outcome: str = "completed", lead_score: str = "Cold", summary: str = "", reason: str = "") -> str:
-        """End call and finalize CRM logs with 2-line summary & lead scoring."""
-        dur = int(time.time() - self._call_start_time)
-        cost_inr = round((dur / 60.0) * 1.22, 2)
-        self.outcome = outcome
-        if outcome == "booked":
-            lead_score = "Hot"
-            self.lead_score = "Hot"
-        elif outcome == "callback_requested":
-            lead_score = "Warm"
-            self.lead_score = "Warm"
-        else:
-            self.lead_score = lead_score
+        """End call and finalize CRM logs with 2-line summary and lead scoring.
 
-        if not summary:
-            summary = f"Outcome: {outcome}. Duration: {dur}s. Lead qualified as {lead_score}."
-
+        Args:
+            outcome: Final outcome of the call (completed, booked, callback_requested, rejected).
+            lead_score: Lead qualification score (Hot, Warm, Cold).
+            summary: Brief 1-2 sentence call summary.
+            reason: Reason for ending call if applicable.
+        """
         try:
-            await log_call(
-                call_id=self.call_id,
-                phone_number=self.phone_number,
-                called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
-                lead_name=self.client_name or self.lead_name,
-                direction=self.direction,
-                campaign_id=self.campaign_id,
-                outcome=outcome,
-                lead_score=lead_score,
-                summary=summary,
-                reason=reason,
-                duration_seconds=dur,
-                cost_inr=cost_inr,
-                recording_url=self.recording_url,
-                client_name=self.client_name,
-                current_location=self.current_location,
-                occupation=self.occupation,
-                bhk_requirement=self.bhk_requirement,
-                budget=self.budget,
-                purpose=self.purpose,
-                possession_timeline=self.possession_timeline,
-                funding_type=self.funding_type,
-                commitment_risk=self.commitment_risk,
-                site_visit_date=self.site_visit_date,
-                pickup_required=self.pickup_required,
-                pickup_location=self.pickup_location,
-                next_callback=self.next_callback,
-                objection=self.objection,
-                whatsapp_status=self.whatsapp_status
-            )
-            self._log_saved = True
-            if self.sheets_webhook:
-                asyncio.create_task(sync_google_sheets_row(self.sheets_webhook, {
-                    "call_id": self.call_id,
-                    "phone": self.phone_number,
-                    "lead_name": self.client_name or self.lead_name,
-                    "lead_score": lead_score,
-                    "outcome": outcome,
-                    "summary": summary,
-                    "duration": dur,
-                    "cost_inr": cost_inr
-                }))
-            await push_unified_log("Agent", "info", f"Call finalized: {outcome} ({lead_score}) - {dur}s, \u20b9{cost_inr}", call_id=self.call_id)
+            dur = int(time.time() - self._call_start_time)
+            cost_inr = round((dur / 60.0) * 1.22, 2)
+            self.outcome = outcome
+            if outcome == "booked":
+                lead_score = "Hot"
+                self.lead_score = "Hot"
+            elif outcome == "callback_requested":
+                lead_score = "Warm"
+                self.lead_score = "Warm"
+            else:
+                self.lead_score = lead_score
+
+            if not summary:
+                summary = f"Outcome: {outcome}. Duration: {dur}s. Lead qualified as {lead_score}."
+
+            try:
+                await log_call(
+                    call_id=self.call_id,
+                    phone_number=self.phone_number,
+                    called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
+                    lead_name=self.client_name or self.lead_name,
+                    direction=self.direction,
+                    campaign_id=self.campaign_id,
+                    outcome=outcome,
+                    lead_score=lead_score,
+                    summary=summary,
+                    reason=reason,
+                    duration_seconds=dur,
+                    cost_inr=cost_inr,
+                    recording_url=self.recording_url,
+                    client_name=self.client_name,
+                    current_location=self.current_location,
+                    occupation=self.occupation,
+                    bhk_requirement=self.bhk_requirement,
+                    budget=self.budget,
+                    purpose=self.purpose,
+                    possession_timeline=self.possession_timeline,
+                    funding_type=self.funding_type,
+                    commitment_risk=self.commitment_risk,
+                    site_visit_date=self.site_visit_date,
+                    pickup_required=self.pickup_required,
+                    pickup_location=self.pickup_location,
+                    next_callback=self.next_callback,
+                    objection=self.objection,
+                    whatsapp_status=self.whatsapp_status
+                )
+                self._log_saved = True
+                if self.sheets_webhook:
+                    asyncio.create_task(sync_google_sheets_row(self.sheets_webhook, {
+                        "call_id": self.call_id,
+                        "phone": self.phone_number,
+                        "lead_name": self.client_name or self.lead_name,
+                        "lead_score": lead_score,
+                        "outcome": outcome,
+                        "summary": summary,
+                        "duration": dur,
+                        "cost_inr": cost_inr
+                    }))
+                await push_unified_log("Agent", "info", f"Call finalized: {outcome} ({lead_score}) - {dur}s, \u20b9{cost_inr}", call_id=self.call_id)
+            except Exception as e:
+                logger.error("Error finalizing call log: %s", e)
+            try:
+                await self.ctx.room.disconnect()
+            except Exception:
+                pass
+            return "Call finished."
         except Exception as e:
-            logger.error("Error finalizing call log: %s", e)
-        try:
-            await self.ctx.room.disconnect()
-        except Exception:
-            pass
-        return "Call finished."
+            logger.error(f"end_call outer error: {e}")
+            return "Call finished."
