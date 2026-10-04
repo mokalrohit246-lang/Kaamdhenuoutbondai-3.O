@@ -58,6 +58,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("kaamdhenu-agent")
 
 def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSession:
+    # Deduplicate tools by name
+    seen_names = set()
+    unique_tools = []
+    for t in tools or []:
+        name = getattr(t, "name", None) or getattr(t, "__name__", None) or str(t)
+        if name not in seen_names:
+            seen_names.add(name)
+            unique_tools.append(t)
+
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
     gemini_voice = voice or os.getenv("GEMINI_TTS_VOICE", "Aoede")
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
@@ -81,12 +90,12 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
                     instructions=system_prompt,
                     realtime_input_config=input_cfg
                 ),
-                tools=tools
+                tools=unique_tools
             )
         except Exception:
             return AgentSession(
                 llm=_google_realtime(model=gemini_model, voice=gemini_voice, instructions=system_prompt),
-                tools=tools
+                tools=unique_tools
             )
 
     # PIPELINE FALLBACK — tuned Silero VAD for stable turn detection
@@ -100,12 +109,15 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
             min_silence_duration=0.8,
             prefix_padding_duration=0.1
         ),
-        tools=tools
+        tools=unique_tools
     )
 
 class KaamdhenuAssistant(Agent):
     def __init__(self, instructions: str, tools: list = None):
-        super().__init__(instructions=instructions, tools=tools or [])
+        if tools:
+            super().__init__(instructions=instructions, tools=tools)
+        else:
+            super().__init__(instructions=instructions)
 
 def extract_site_visit_details_from_transcript(transcript: str, client_location: str = "") -> tuple:
     """
@@ -585,8 +597,16 @@ async def entrypoint(ctx: agents.JobContext):
         if lead_budget:
             tool_ctx.budget = lead_budget
 
-        active_tools = tool_ctx.get_all_tools()
-        session = _build_session(tools=active_tools, system_prompt=system_prompt, voice=agent_voice)
+        # Deduplicate tools by name
+        seen_names = set()
+        unique_tools = []
+        for t in tool_ctx.get_all_tools():
+            name = getattr(t, "name", None) or getattr(t, "__name__", None) or str(t)
+            if name not in seen_names:
+                seen_names.add(name)
+                unique_tools.append(t)
+
+        session = _build_session(tools=unique_tools, system_prompt=system_prompt, voice=agent_voice)
 
         transcript_entries = []
         def _record_speech(speaker: str, text: str):
@@ -657,7 +677,7 @@ async def entrypoint(ctx: agents.JobContext):
 
         await session.start(
             room=ctx.room,
-            agent=KaamdhenuAssistant(instructions=system_prompt, tools=active_tools),
+            agent=KaamdhenuAssistant(instructions=system_prompt),
             room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
         )
         await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
