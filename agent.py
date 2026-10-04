@@ -604,37 +604,9 @@ async def entrypoint(ctx: agents.JobContext):
                 transcript_entries.append(f"{speaker}: {str(text).strip()}")
 
         # ===================================================================
-        # PHASE 5a: OUTBOUND SIP DIAL — BEFORE session start to prevent
-        # ringing / SIP 183 early media from being streamed into Gemini.
-        # wait_until_answered=True ensures we gate on 200 OK (call answered).
-        # ===================================================================
-        sip_participant = None
-        if direction == "outbound" and phone_number:
-            trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
-            if trunk_id:
-                try:
-                    await push_unified_log("SIP", "info", f"Pre-warmed dialing to {phone_number}...", call_id=call_id)
-                    sip_participant = await ctx.api.sip.create_sip_participant(
-                        api.CreateSIPParticipantRequest(
-                            room_name=ctx.room.name,
-                            sip_trunk_id=trunk_id,
-                            sip_call_to=phone_number,
-                            participant_identity=f"sip_{phone_number}",
-                            wait_until_answered=True
-                        )
-                    )
-                    await push_unified_log("SIP", "info", f"Call answered by {phone_number} (200 OK)", call_id=call_id)
-                    # 500ms audio drain buffer: flush residual ringing/early-media
-                    # artifacts from the audio track before Gemini starts listening
-                    await asyncio.sleep(0.5)
-                except Exception as dial_err:
-                    await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
-                    ctx.shutdown()
-                    return
-
-        # ===================================================================
-        # PHASE 5b: START GEMINI SESSION — now that the call is answered and
-        # audio is clean (no ringing artifacts feeding into the model).
+        # PHASE 5: PARALLEL GEMINI PRE-WARMING & OUTBOUND DIALING
+        # Parallelize Gemini WebSocket handshake during phone ringing to
+        # eliminate dead-air latency upon call answer.
         # ===================================================================
         try:
             @session.on("user_speech_committed")
@@ -665,19 +637,52 @@ async def entrypoint(ctx: agents.JobContext):
         except Exception:
             pass
 
-        await session.start(
-            room=ctx.room,
-            agent=KaamdhenuAssistant(instructions=system_prompt),
-            room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
-        )
-        await push_unified_log("Gemini", "info", f"Gemini Live Realtime session active for {agent_name}", call_id=call_id)
+        # Start Gemini Live Realtime session concurrently while dialing
+        async def _prewarm_session():
+            await session.start(
+                room=ctx.room,
+                agent=KaamdhenuAssistant(instructions=system_prompt),
+                room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
+            )
+            await push_unified_log("Gemini", "info", f"Gemini Live session pre-warmed & ready for {agent_name}", call_id=call_id)
 
-        # Explicitly bind the caller's audio track to RoomIO
+        session_start_task = asyncio.create_task(_prewarm_session())
+
+        sip_participant = None
+        if direction == "outbound" and phone_number:
+            trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
+            if trunk_id:
+                try:
+                    await push_unified_log("SIP", "info", f"Dialing to {phone_number} (Gemini pre-warming in parallel)...", call_id=call_id)
+                    dial_task = asyncio.create_task(
+                        ctx.api.sip.create_sip_participant(
+                            api.CreateSIPParticipantRequest(
+                                room_name=ctx.room.name,
+                                sip_trunk_id=trunk_id,
+                                sip_call_to=phone_number,
+                                participant_identity=f"sip_{phone_number}",
+                                wait_until_answered=True
+                            )
+                        )
+                    )
+                    # Await dialing answer and session pre-warming concurrently
+                    sip_participant, _ = await asyncio.gather(dial_task, session_start_task)
+                    await push_unified_log("SIP", "info", f"Call answered by {phone_number} (200 OK)", call_id=call_id)
+                except Exception as dial_err:
+                    await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
+                    ctx.shutdown()
+                    return
+            else:
+                await session_start_task
+        else:
+            # Inbound call: await pre-warm task directly
+            await session_start_task
+
+        # Immediately bind the caller's audio track to RoomIO upon answer (zero artificial sleep)
+        target_identity = getattr(sip_participant, "identity", None) or (f"sip_{phone_number}" if phone_number else None)
         try:
             if hasattr(session, "room_io") and session.room_io:
                 target_p = None
-                target_identity = getattr(sip_participant, "identity", None) or (f"sip_{phone_number}" if phone_number else None)
-
                 if target_identity and target_identity in ctx.room.remote_participants:
                     target_p = ctx.room.remote_participants[target_identity]
                 elif ctx.room.remote_participants:
@@ -696,7 +701,7 @@ async def entrypoint(ctx: agents.JobContext):
                     session.room_io.set_participant(target_identity)
 
                 if bound_identity:
-                    logger.info(f"RoomIO audio track explicitly bound to: {bound_identity}")
+                    logger.info(f"RoomIO audio track immediately bound to: {bound_identity}")
                     await push_unified_log("Audio", "info", f"RoomIO bound to caller: {bound_identity}", call_id=call_id)
         except Exception as rio_err:
             logger.warning(f"RoomIO set_participant notice: {rio_err}")
@@ -714,7 +719,7 @@ async def entrypoint(ctx: agents.JobContext):
                     except Exception:
                         pass
 
-        # Opening greeting - dynamic time-based greeting & permission check for outbound calls
+        # Instant Greeting Trigger: Direct pre-defined opening line to achieve <800ms latency
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
         ist_hour = ist_now.hour
         if 5 <= ist_hour < 12:
@@ -730,43 +735,23 @@ async def entrypoint(ctx: agents.JobContext):
             "scheduled callback" in (lead_notes or "").lower()
         )
 
-        # Re-evaluate valid_lead_name since Phase 3 may have updated lead_name from CRM
         valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
 
         try:
             if direction == "inbound":
                 if inbound_prior_project:
-                    greeting_instruction = (
-                        f"This is a returning inbound caller who previously engaged regarding '{inbound_prior_project}'. "
-                        "Acknowledge the previous interaction courteously, and ask how you can assist them further today. "
-                        "Follow the persona, product details, and style defined in your system prompt. "
-                        "Keep your opening short (1-2 sentences) and let the caller speak. "
-                        "CRITICAL: Do NOT execute any tools during the opening greeting."
-                    )
+                    opening_line = f"Namaste {lead_name if valid_lead_name else ''}! {business_name} mein aapka swagat hai. Main {agent_name}. Aapne pehle {inbound_prior_project} ke baare mein baat ki thi, batayein main aaj aapki kya madad kar sakti hoon?"
                 else:
-                    greeting_instruction = (
-                        "Deliver your opening inbound welcome greeting strictly following your system prompt instructions and persona. "
-                        "Welcome the caller and ask how you can assist them today. Keep it short, warm, and natural (1-2 sentences). "
-                        "CRITICAL: Do NOT execute any tools during the opening greeting."
-                    )
+                    opening_line = f"Namaste! {business_name} mein aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
+                greeting_instruction = f'Say: "{opening_line}" Speak warmly and pause to listen. Do not call any tools.'
             elif is_callback_call:
-                customer_ref = f"{lead_name}" if valid_lead_name else "the customer"
-                greeting_instruction = (
-                    f"Greet {customer_ref} courteously following your system prompt instructions and persona. "
-                    "Mention you are calling back as requested, and ask how you can help them. "
-                    "Pause immediately to let them speak. "
-                    "CRITICAL: Do NOT execute any tools during the opening greeting."
-                )
+                customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
+                opening_line = f"{customer_salutation}, main {agent_name} baat kar rahi hoon {business_name} se. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?"
+                greeting_instruction = f'Say: "{opening_line}" Speak naturally and pause to listen. Do not call any tools.'
             else:
-                customer_ref = f"to {lead_name}" if valid_lead_name else ""
-                greeting_instruction = (
-                    f"Initiate this outbound call {customer_ref} strictly following the opening hook, persona, and rules defined in your system prompt. "
-                    "Deliver the opening line/hook naturally and concisely (1-2 sentences), then pause to listen to the customer's response. "
-                    "CRITICAL: Do NOT execute any tools during the initial greeting."
-                )
-
-            if valid_lead_name:
-                greeting_instruction += f" Note: You already know the customer's name is {lead_name}."
+                customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
+                opening_line = f"{customer_salutation}, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
+                greeting_instruction = f'Say: "{opening_line}" Speak naturally and pause immediately to let the customer respond. Do not call any tools.'
 
             await session.generate_reply(instructions=greeting_instruction)
             await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
