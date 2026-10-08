@@ -40,7 +40,8 @@ class RealEstateTools(llm.ToolContext):
         project_name: Optional[str] = None,
         site_address: Optional[str] = None,
         pickup_drop_notes: Optional[str] = None,
-        project_highlights: Optional[str] = None
+        project_highlights: Optional[str] = None,
+        done_event: Optional[asyncio.Event] = None
     ):
         self.ctx = ctx
         self.phone_number = phone_number
@@ -58,10 +59,22 @@ class RealEstateTools(llm.ToolContext):
         self.site_address = site_address or ""
         self.pickup_drop_notes = pickup_drop_notes or ""
         self.project_highlights = project_highlights or ""
+        self.done_event = done_event
         self._call_start_time = time.time()
         self.recording_url: Optional[str] = None
         self._log_saved = False
         self.outcome = "completed"
+
+    async def _delayed_disconnect(self, delay: float = 2.5, reason: str = ""):
+        """Wait for TTS goodbye buffer to finish playing to caller before disconnecting room."""
+        try:
+            await asyncio.sleep(delay)
+            if hasattr(self, "ctx") and self.ctx and hasattr(self.ctx, "room"):
+                await self.ctx.room.disconnect()
+            if hasattr(self, "done_event") and self.done_event:
+                self.done_event.set()
+        except Exception as e:
+            logger.warning(f"Error disconnecting room in delayed disconnect: {e}")
         # Qualification state
         self.client_name = ""
         self.current_location = ""
@@ -718,14 +731,14 @@ class RealEstateTools(llm.ToolContext):
             return "Note recorded."
 
     @llm.function_tool
-    async def end_call(self, outcome: str = "completed", lead_score: str = "Cold", summary: str = "", reason: str = "") -> str:
-        """End call and finalize CRM logs with 2-line summary and lead scoring.
+    async def end_call(self, reason: str = "conversation_completed", outcome: str = "completed", lead_score: str = "Cold", summary: str = "") -> str:
+        """End call and finalize CRM logs with 2-line summary and lead scoring when conversation concludes.
 
         Args:
+            reason: Reason for ending call (e.g. conversation_completed, user_hung_up, callback_scheduled).
             outcome: Final outcome of the call (completed, booked, callback_requested, rejected).
             lead_score: Lead qualification score (Hot, Warm, Cold).
             summary: Brief 1-2 sentence call summary.
-            reason: Reason for ending call if applicable.
         """
         try:
             dur = int(time.time() - self._call_start_time)
@@ -786,14 +799,14 @@ class RealEstateTools(llm.ToolContext):
                         "duration": dur,
                         "cost_inr": cost_inr
                     }))
-                await push_unified_log("Agent", "info", f"Call finalized: {outcome} ({lead_score}) - {dur}s, \u20b9{cost_inr}", call_id=self.call_id)
+                await push_unified_log("Agent", "info", f"Autonomous end_call triggered: {reason}", call_id=self.call_id)
             except Exception as e:
                 logger.error("Error finalizing call log: %s", e)
-            try:
-                await self.ctx.room.disconnect()
-            except Exception:
-                pass
-            return "Call finished."
+
+            # Schedule delayed disconnect so TTS goodbye buffer finishes playing to the caller
+            asyncio.create_task(self._delayed_disconnect(2.5, reason=reason))
+            return "Call ended gracefully. Thank you and have a great day!"
         except Exception as e:
             logger.error(f"end_call outer error: {e}")
-            return "Call finished."
+            asyncio.create_task(self._delayed_disconnect(2.5, reason=reason))
+            return "Call ended."

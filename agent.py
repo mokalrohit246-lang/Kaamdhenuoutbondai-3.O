@@ -562,6 +562,22 @@ async def entrypoint(ctx: agents.JobContext):
             system_prompt = system_prompt + "\n" + dynamic_lead_instruction
             await push_unified_log("Agent", "info", f"Dynamic lead context injected for {lead_name} ({phone_number})", call_id=call_id)
 
+        # === CRITICAL CALL TERMINATION RULE ===
+        call_termination_rules = """
+[CRITICAL CALL TERMINATION RULE]
+- Whenever the conversation concludes (e.g., user says 'theek hai', 'bye', 'thank you', 'baad mein baat karte hain', or a site visit/callback is scheduled and acknowledged), speak a polite, concise closing line (e.g., 'Dhanyawad, aapse baat karke accha laga. Have a great day!') and IMMEDIATELY invoke the `end_call` tool.
+- Never remain silent without calling `end_call` at wrap-up.
+"""
+        system_prompt = system_prompt + "\n" + call_termination_rules
+
+        done_event = asyncio.Event()
+        def _on_part_disconnected(p: rtc.RemoteParticipant):
+            if ctx.room.local_participant and p.identity == ctx.room.local_participant.identity:
+                return
+            done_event.set()
+        ctx.room.on("participant_disconnected", _on_part_disconnected)
+        ctx.room.on("disconnected", lambda: done_event.set())
+
         tool_ctx = RealEstateTools(
             ctx,
             phone_number=phone_number,
@@ -577,7 +593,8 @@ async def entrypoint(ctx: agents.JobContext):
             project_name=project_name,
             site_address=site_address,
             pickup_drop_notes=pickup_drop_notes,
-            project_highlights=project_highlights
+            project_highlights=project_highlights,
+            done_event=done_event
         )
         # Pre-populate qualification data from metadata so agent has context from the start
         if valid_lead_name:
@@ -608,9 +625,20 @@ async def entrypoint(ctx: agents.JobContext):
         # Parallelize Gemini WebSocket handshake during phone ringing to
         # eliminate dead-air latency upon call answer.
         # ===================================================================
+        # Silence & dead-air watchdog tracking
+        last_audio_activity = asyncio.get_event_loop().time()
+        greeting_delivered = False
+        user_turns = 0
+        prompted_for_silence = False
+        prompt_timestamp = 0.0
+
         try:
             @session.on("user_speech_committed")
             def _on_user_speech(msg):
+                nonlocal last_audio_activity, user_turns, prompted_for_silence
+                last_audio_activity = asyncio.get_event_loop().time()
+                user_turns += 1
+                prompted_for_silence = False
                 content = getattr(msg, "content", "") or getattr(msg, "text", "")
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
@@ -622,6 +650,8 @@ async def entrypoint(ctx: agents.JobContext):
 
             @session.on("agent_speech_committed")
             def _on_agent_speech(msg):
+                nonlocal last_audio_activity
+                last_audio_activity = asyncio.get_event_loop().time()
                 content = getattr(msg, "content", "") or getattr(msg, "text", "")
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
@@ -754,22 +784,86 @@ async def entrypoint(ctx: agents.JobContext):
                 greeting_instruction = f'Say: "{opening_line}" Speak naturally and pause immediately to let the customer respond. Do not call any tools.'
 
             await session.generate_reply(instructions=greeting_instruction)
+            greeting_delivered = True
+            last_audio_activity = asyncio.get_event_loop().time()
             await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
         except Exception as ge:
             logger.warning(f"Greeting error: {ge}")
+            greeting_delivered = True
+            last_audio_activity = asyncio.get_event_loop().time()
 
-        done_event = asyncio.Event()
-        def _on_part_disconnected(p: rtc.RemoteParticipant):
-            if ctx.room.local_participant and p.identity == ctx.room.local_participant.identity:
-                return
-            done_event.set()
-        ctx.room.on("participant_disconnected", _on_part_disconnected)
-        ctx.room.on("disconnected", lambda: done_event.set())
+        # Dead-air & silence watchdog coroutine
+        async def _silence_watchdog():
+            nonlocal last_audio_activity, prompted_for_silence, prompt_timestamp, user_turns
+            try:
+                # Wait until initial greeting has been delivered
+                while not done_event.is_set() and not greeting_delivered:
+                    await asyncio.sleep(0.5)
+
+                last_audio_activity = asyncio.get_event_loop().time()
+
+                while not done_event.is_set():
+                    await asyncio.sleep(0.5)
+
+                    # If agent or user is actively speaking, reset activity timer
+                    if hasattr(session, "agent_state") and session.agent_state == "speaking":
+                        last_audio_activity = asyncio.get_event_loop().time()
+                        continue
+                    if hasattr(session, "user_state") and session.user_state == "speaking":
+                        last_audio_activity = asyncio.get_event_loop().time()
+                        continue
+
+                    now = asyncio.get_event_loop().time()
+                    silence_duration = now - last_audio_activity
+
+                    # If we already prompted for silence, check if 4.0s has elapsed without user response
+                    if prompted_for_silence:
+                        if now - prompt_timestamp >= 4.0:
+                            await push_unified_log("Watchdog", "info", f"Dead-air silence watchdog: zero response 4s after prompt ({silence_duration:.1f}s total silence) - disconnecting", call_id=call_id)
+                            logger.info(f"Silence watchdog disconnecting call {call_id}: caller unresponsive after prompt")
+                            try:
+                                await ctx.room.disconnect()
+                            except Exception as de:
+                                logger.warning(f"Error disconnecting room in watchdog: {de}")
+                            done_event.set()
+                            break
+                        continue
+
+                    # Mid-conversation silence (6-7s) -> prompt once
+                    if silence_duration >= 6.5:
+                        prompted_for_silence = True
+                        prompt_timestamp = asyncio.get_event_loop().time()
+                        await push_unified_log("Watchdog", "info", f"Silence detected ({silence_duration:.1f}s) - prompting caller", call_id=call_id)
+                        try:
+                            await session.generate_reply(
+                                instructions='The caller has been silent. Prompt gently: "Kya aap sun pa rahe hain?" Do not execute any tools.'
+                            )
+                        except Exception as pe:
+                            logger.warning(f"Error generating silence prompt: {pe}")
+
+                    # If total continuous silence exceeds 10.0s and agent has already exchanged at least one turn
+                    elif silence_duration >= 10.0 and user_turns >= 1:
+                        await push_unified_log("Watchdog", "info", f"Continuous silence exceeded 10.0s ({silence_duration:.1f}s, turns: {user_turns}) - disconnecting", call_id=call_id)
+                        try:
+                            await ctx.room.disconnect()
+                        except Exception as de:
+                            logger.warning(f"Error disconnecting room in watchdog: {de}")
+                        done_event.set()
+                        break
+            except asyncio.CancelledError:
+                pass
+            except Exception as we:
+                logger.warning(f"Silence watchdog error: {we}")
+
+        watchdog_task = asyncio.create_task(_silence_watchdog())
 
         try:
             await asyncio.wait_for(done_event.wait(), timeout=1800)
         except asyncio.TimeoutError:
             pass
+        finally:
+            if not watchdog_task.done():
+                watchdog_task.cancel()
 
     except Exception as general_err:
         await push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id)

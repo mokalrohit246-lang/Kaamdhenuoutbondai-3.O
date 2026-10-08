@@ -25,6 +25,10 @@ GLOBAL_NATURAL_CONVERSATION_LAYER = """
 - `send_whatsapp_brochure` / `send_project_brochure`: Send requested brochure, menu, or details via WhatsApp to the user when they verbally request or agree to receive information. NEVER call this tool proactively, never call it during the greeting, and never call it if the customer says No.
 - `book_site_visit` / `book_appointment`: Call when the customer explicitly agrees to a scheduled meeting, visit, or appointment.
 - `schedule_callback`: STRICTLY FORBIDDEN unless the lead explicitly says they are busy, driving, in a meeting, or asks to call later. NEVER offer a callback unprompted.
+- `end_call`: CRITICAL CALL TERMINATION RULE: Whenever the conversation concludes (e.g., user says 'theek hai', 'bye', 'thank you', 'baad mein baat karte hain', or a site visit/callback is scheduled and acknowledged), speak a polite, concise closing line (e.g., 'Dhanyawad, aapse baat karke accha laga. Have a great day!') and IMMEDIATELY invoke the `end_call` tool. Never remain silent without calling `end_call` at wrap-up.
+
+5. AUTONOMOUS CALL TERMINATION & WRAP-UP:
+- CRITICAL CALL TERMINATION RULE: Whenever the conversation concludes (e.g., user says 'theek hai', 'bye', 'thank you', 'baad mein baat karte hain', or a site visit/callback is scheduled and acknowledged), speak a polite, concise closing line (e.g., 'Dhanyawad, aapse baat karke accha laga. Have a great day!') and IMMEDIATELY invoke the `end_call` tool. Never remain silent without calling `end_call` at wrap-up.
 """
 
 STRICT_CALLBACK_RESCHEDULE_RULES = """
@@ -174,6 +178,9 @@ Goal: Qualify property prospects for {service_type} and convert interested leads
 
 3. CALLBACKS (ONLY IF USER EXPLICITLY ASKS):
 - DO NOT offer callbacks unprompted. If and only if caller explicitly says they cannot talk right now: follow Smart Callback rules.
+
+4. CALL TERMINATION & WRAP-UP:
+- CRITICAL CALL TERMINATION RULE: Whenever the conversation concludes (e.g., user says 'theek hai', 'bye', 'thank you', 'baad mein baat karte hain', or a site visit/callback is scheduled and acknowledged), speak a polite, concise closing line (e.g., 'Dhanyawad, aapse baat karke accha laga. Have a great day!') and IMMEDIATELY invoke the `end_call` tool. Never remain silent without calling `end_call` at wrap-up.
 """
 
 VEDA_LIFESPACES_SYSTEM_PROMPT = """
