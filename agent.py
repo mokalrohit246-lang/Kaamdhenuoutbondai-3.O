@@ -9,11 +9,18 @@ from datetime import datetime, timezone, timedelta
 import certifi
 import urllib.request
 import urllib.error
+import numpy as np
 try:
     import httpx
 except ImportError:
     httpx = None
 from dotenv import load_dotenv
+
+# Google GenAI types for RealtimeInputConfig
+try:
+    from google.genai import types as _gt
+except ImportError:
+    _gt = None
 
 _orig_ssl = ssl.create_default_context
 def _certifi_ssl(purpose=ssl.Purpose.SERVER_AUTH, **kwargs):
@@ -77,12 +84,20 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
     # ULTRA-FAST PURE GEMINI REALTIME — stable default plugin config
     if use_realtime and _google_realtime is not None:
         try:
+            rt_kwargs = dict(
+                model=gemini_model,
+                voice=gemini_voice,
+                instructions=system_prompt,
+            )
+            # Optimize turn detection for telephony: 800ms silence = end-of-turn
+            if _gt is not None:
+                rt_kwargs["realtime_input_config"] = _gt.RealtimeInputConfig(
+                    automatic_activity_detection=_gt.AutomaticActivityDetection(
+                        silence_duration_ms=800,
+                    )
+                )
             return AgentSession(
-                llm=_google_realtime(
-                    model=gemini_model,
-                    voice=gemini_voice,
-                    instructions=system_prompt,
-                ),
+                llm=_google_realtime(**rt_kwargs),
                 tools=unique_tools
             )
         except Exception as e:
@@ -657,6 +672,22 @@ async def entrypoint(ctx: agents.JobContext):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
                 _record_speech("Agent", str(content))
 
+            # Keep last_audio_activity alive on ANY session state transition
+            @session.on("user_state_changed")
+            def _on_user_state(ev):
+                nonlocal last_audio_activity
+                last_audio_activity = asyncio.get_event_loop().time()
+
+            @session.on("agent_state_changed")
+            def _on_agent_state(ev):
+                nonlocal last_audio_activity
+                last_audio_activity = asyncio.get_event_loop().time()
+
+            @session.on("conversation_item_added")
+            def _on_conv_item(ev):
+                nonlocal last_audio_activity
+                last_audio_activity = asyncio.get_event_loop().time()
+
             @session.on("error")
             def _on_session_error(error):
                 err_msg = str(error)
@@ -667,6 +698,42 @@ async def entrypoint(ctx: agents.JobContext):
         except Exception:
             pass
 
+        # ---------------------------------------------------------------
+        # Real-time audio frame RMS monitor: detects caller speech energy
+        # even when Gemini does not fire user_speech_committed.
+        # ---------------------------------------------------------------
+        async def _monitor_audio_track(track: rtc.Track):
+            nonlocal last_audio_activity
+            try:
+                audio_stream = rtc.AudioStream(track)
+                async for ev in audio_stream:
+                    frame = ev.frame
+                    if frame and frame.data:
+                        samples = np.frombuffer(frame.data, dtype=np.int16)
+                        if len(samples) > 0:
+                            rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+                            if rms > 450:
+                                last_audio_activity = asyncio.get_event_loop().time()
+            except asyncio.CancelledError:
+                pass
+            except Exception as am_err:
+                logger.debug(f"Audio monitor ended: {am_err}")
+
+        audio_monitor_tasks = []
+
+        def _subscribe_audio_track(track: rtc.Track, pub: rtc.TrackPublication, participant: rtc.RemoteParticipant):
+            if track.kind == rtc.TrackKind.KIND_AUDIO:
+                t = asyncio.create_task(_monitor_audio_track(track))
+                audio_monitor_tasks.append(t)
+
+        ctx.room.on("track_subscribed", _subscribe_audio_track)
+        # Subscribe to already-present remote audio tracks
+        for rp in ctx.room.remote_participants.values():
+            for pub in rp.track_publications.values():
+                if pub.track and pub.kind == rtc.TrackKind.KIND_AUDIO:
+                    t = asyncio.create_task(_monitor_audio_track(pub.track))
+                    audio_monitor_tasks.append(t)
+
         # Start Gemini Live Realtime session concurrently while dialing
         async def _prewarm_session():
             await session.start(
@@ -674,7 +741,7 @@ async def entrypoint(ctx: agents.JobContext):
                 agent=KaamdhenuAssistant(instructions=system_prompt),
                 room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
             )
-            await push_unified_log("Gemini", "info", f"Gemini Live session pre-warmed & ready for {agent_name}", call_id=call_id)
+            asyncio.create_task(push_unified_log("Gemini", "info", f"Gemini Live session pre-warmed & ready for {agent_name}", call_id=call_id))
 
         session_start_task = asyncio.create_task(_prewarm_session())
 
@@ -683,7 +750,7 @@ async def entrypoint(ctx: agents.JobContext):
             trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
             if trunk_id:
                 try:
-                    await push_unified_log("SIP", "info", f"Dialing to {phone_number} (Gemini pre-warming in parallel)...", call_id=call_id)
+                    asyncio.create_task(push_unified_log("SIP", "info", f"Dialing to {phone_number} (Gemini pre-warming in parallel)...", call_id=call_id))
                     dial_task = asyncio.create_task(
                         ctx.api.sip.create_sip_participant(
                             api.CreateSIPParticipantRequest(
@@ -697,7 +764,7 @@ async def entrypoint(ctx: agents.JobContext):
                     )
                     # Await dialing answer and session pre-warming concurrently
                     sip_participant, _ = await asyncio.gather(dial_task, session_start_task)
-                    await push_unified_log("SIP", "info", f"Call answered by {phone_number} (200 OK)", call_id=call_id)
+                    asyncio.create_task(push_unified_log("SIP", "info", f"Call answered by {phone_number} (200 OK)", call_id=call_id))
                 except Exception as dial_err:
                     await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
                     ctx.shutdown()
@@ -732,7 +799,7 @@ async def entrypoint(ctx: agents.JobContext):
 
                 if bound_identity:
                     logger.info(f"RoomIO audio track immediately bound to: {bound_identity}")
-                    await push_unified_log("Audio", "info", f"RoomIO bound to caller: {bound_identity}", call_id=call_id)
+                    asyncio.create_task(push_unified_log("Audio", "info", f"RoomIO bound to caller: {bound_identity}", call_id=call_id))
         except Exception as rio_err:
             logger.warning(f"RoomIO set_participant notice: {rio_err}")
 
@@ -770,29 +837,35 @@ async def entrypoint(ctx: agents.JobContext):
         try:
             if direction == "inbound":
                 if inbound_prior_project:
-                    opening_line = f"Namaste {lead_name if valid_lead_name else ''}! {business_name} mein aapka swagat hai. Main {agent_name}. Aapne pehle {inbound_prior_project} ke baare mein baat ki thi, batayein main aaj aapki kya madad kar sakti hoon?"
+                    greeting_instruction = f"Namaste {lead_name if valid_lead_name else ''}! {business_name} mein aapka swagat hai. Main {agent_name}. Aapne pehle {inbound_prior_project} ke baare mein baat ki thi, batayein main aaj aapki kya madad kar sakti hoon?"
                 else:
-                    opening_line = f"Namaste! {business_name} mein aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
-                greeting_instruction = f'Say: "{opening_line}" Speak warmly and pause to listen. Do not call any tools.'
+                    greeting_instruction = f"Namaste! {business_name} mein aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
             elif is_callback_call:
                 customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
-                opening_line = f"{customer_salutation}, main {agent_name} baat kar rahi hoon {business_name} se. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?"
-                greeting_instruction = f'Say: "{opening_line}" Speak naturally and pause to listen. Do not call any tools.'
+                greeting_instruction = f"{customer_salutation}, main {agent_name} baat kar rahi hoon {business_name} se. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?"
             else:
                 customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
-                opening_line = f"{customer_salutation}, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
-                greeting_instruction = f'Say: "{opening_line}" Speak naturally and pause immediately to let the customer respond. Do not call any tools.'
+                greeting_instruction = f"{customer_salutation}, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
 
-            await session.generate_reply(instructions=greeting_instruction)
+            # Fire-and-forget: don't await playout (which blocks 3-6s for full TTS)
+            speech_handle = session.generate_reply(instructions=greeting_instruction)
             greeting_delivered = True
             last_audio_activity = asyncio.get_event_loop().time()
-            await push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id)
+
+            # Schedule non-blocking playout-done callback for logging
+            async def _greeting_done():
+                try:
+                    await speech_handle
+                except Exception:
+                    pass
+                asyncio.create_task(push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id))
+            asyncio.create_task(_greeting_done())
         except Exception as ge:
             logger.warning(f"Greeting error: {ge}")
             greeting_delivered = True
             last_audio_activity = asyncio.get_event_loop().time()
 
-        # Dead-air & silence watchdog coroutine
+        # Dead-air & silence watchdog coroutine (relaxed to avoid false disconnects)
         async def _silence_watchdog():
             nonlocal last_audio_activity, prompted_for_silence, prompt_timestamp, user_turns
             try:
@@ -803,23 +876,34 @@ async def entrypoint(ctx: agents.JobContext):
                 last_audio_activity = asyncio.get_event_loop().time()
 
                 while not done_event.is_set():
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.0)
 
                     # If agent or user is actively speaking, reset activity timer
                     if hasattr(session, "agent_state") and session.agent_state == "speaking":
                         last_audio_activity = asyncio.get_event_loop().time()
+                        prompted_for_silence = False
                         continue
                     if hasattr(session, "user_state") and session.user_state == "speaking":
                         last_audio_activity = asyncio.get_event_loop().time()
+                        prompted_for_silence = False
+                        continue
+
+                    # GUARD: Never disconnect within the first 45 seconds of the call
+                    call_elapsed = time.time() - call_start_time
+                    if call_elapsed < 45.0:
                         continue
 
                     now = asyncio.get_event_loop().time()
                     silence_duration = now - last_audio_activity
 
-                    # If we already prompted for silence, check if 4.0s has elapsed without user response
+                    # Only consider silence actions after at least 2 user turns
+                    if user_turns < 2:
+                        continue
+
+                    # If we already prompted for silence, check if 6s has elapsed without response
                     if prompted_for_silence:
-                        if now - prompt_timestamp >= 4.0:
-                            await push_unified_log("Watchdog", "info", f"Dead-air silence watchdog: zero response 4s after prompt ({silence_duration:.1f}s total silence) - disconnecting", call_id=call_id)
+                        if now - prompt_timestamp >= 6.0:
+                            asyncio.create_task(push_unified_log("Watchdog", "info", f"Dead-air silence watchdog: zero response 6s after prompt ({silence_duration:.1f}s total silence) - disconnecting", call_id=call_id))
                             logger.info(f"Silence watchdog disconnecting call {call_id}: caller unresponsive after prompt")
                             try:
                                 await ctx.room.disconnect()
@@ -829,27 +913,18 @@ async def entrypoint(ctx: agents.JobContext):
                             break
                         continue
 
-                    # Mid-conversation silence (6-7s) -> prompt once
-                    if silence_duration >= 6.5:
+                    # 20s of continuous silence -> prompt once
+                    if silence_duration >= 20.0:
                         prompted_for_silence = True
                         prompt_timestamp = asyncio.get_event_loop().time()
-                        await push_unified_log("Watchdog", "info", f"Silence detected ({silence_duration:.1f}s) - prompting caller", call_id=call_id)
+                        asyncio.create_task(push_unified_log("Watchdog", "info", f"Silence detected ({silence_duration:.1f}s) - prompting caller", call_id=call_id))
                         try:
-                            await session.generate_reply(
-                                instructions='The caller has been silent. Prompt gently: "Kya aap sun pa rahe hain?" Do not execute any tools.'
+                            session.generate_reply(
+                                instructions='Hello? Kya aap sun pa rahe hain? Main line pe hoon.'
                             )
                         except Exception as pe:
                             logger.warning(f"Error generating silence prompt: {pe}")
 
-                    # If total continuous silence exceeds 10.0s and agent has already exchanged at least one turn
-                    elif silence_duration >= 10.0 and user_turns >= 1:
-                        await push_unified_log("Watchdog", "info", f"Continuous silence exceeded 10.0s ({silence_duration:.1f}s, turns: {user_turns}) - disconnecting", call_id=call_id)
-                        try:
-                            await ctx.room.disconnect()
-                        except Exception as de:
-                            logger.warning(f"Error disconnecting room in watchdog: {de}")
-                        done_event.set()
-                        break
             except asyncio.CancelledError:
                 pass
             except Exception as we:
@@ -864,6 +939,10 @@ async def entrypoint(ctx: agents.JobContext):
         finally:
             if not watchdog_task.done():
                 watchdog_task.cancel()
+            # Cancel audio monitor tasks
+            for amt in audio_monitor_tasks:
+                if not amt.done():
+                    amt.cancel()
 
     except Exception as general_err:
         await push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id)
