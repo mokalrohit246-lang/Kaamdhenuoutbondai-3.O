@@ -9,7 +9,6 @@ from datetime import datetime, timezone, timedelta
 import certifi
 import urllib.request
 import urllib.error
-import numpy as np
 try:
     import httpx
 except ImportError:
@@ -83,11 +82,9 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
             seen_names.add(name)
             unique_tools.append(t)
 
-    SUPPORTED_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
-    model_name = os.getenv("GEMINI_MODEL", "").strip()
-    # If model is invalid, unsupported, or empty, force the supported model
-    if model_name != SUPPORTED_LIVE_MODEL:
-        model_name = SUPPORTED_LIVE_MODEL
+    model_name = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview").strip()
+    if not model_name:
+        model_name = "gemini-3.1-flash-live-preview"
 
     google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None
     gemini_voice = voice or os.getenv("GEMINI_TTS_VOICE", "Aoede")
@@ -707,51 +704,6 @@ async def entrypoint(ctx: agents.JobContext):
         except Exception:
             pass
 
-        # ---------------------------------------------------------------
-        # Lightweight Audio Activity Monitor: detects caller speech energy
-        # without event loop starvation (no numpy, throttled sampling)
-        # ---------------------------------------------------------------
-        monitored_tracks = set()
-        audio_monitor_tasks = []
-
-        async def _monitor_audio_track(track: rtc.Track):
-            nonlocal last_audio_activity
-            try:
-                audio_stream = rtc.AudioStream(track)
-                last_sample = 0.0
-                async for ev in audio_stream:
-                    now = time.monotonic()
-                    # Downsample: sample at most once every 300ms to keep event loop under 1ms
-                    if now - last_sample < 0.3:
-                        continue
-                    last_sample = now
-
-                    frame = ev.frame
-                    if frame and frame.data:
-                        pcm_bytes = frame.data
-                        # Ultra-fast raw-byte peak amplitude check (no numpy allocations)
-                        # 16-bit PCM: speech amplitude typically exceeds 450
-                        if any(abs(int.from_bytes(pcm_bytes[i:i+2], "little", signed=True)) > 450 for i in range(0, len(pcm_bytes), 16)):
-                            last_audio_activity = asyncio.get_event_loop().time()
-            except asyncio.CancelledError:
-                pass
-            except Exception as am_err:
-                logger.debug(f"Audio monitor ended: {am_err}")
-
-        def _subscribe_audio_track(track: rtc.Track, *args):
-            sid = getattr(track, "sid", None) or id(track)
-            if track.kind == rtc.TrackKind.KIND_AUDIO and sid not in monitored_tracks:
-                monitored_tracks.add(sid)
-                t = asyncio.create_task(_monitor_audio_track(track))
-                audio_monitor_tasks.append(t)
-
-        ctx.room.on("track_subscribed", _subscribe_audio_track)
-        # Subscribe to already-present remote audio tracks (deduplicated)
-        for rp in ctx.room.remote_participants.values():
-            for pub in rp.track_publications.values():
-                if pub.track and pub.kind == rtc.TrackKind.KIND_AUDIO:
-                    _subscribe_audio_track(pub.track)
-
         # Start Gemini Live Realtime session concurrently while dialing
         async def _prewarm_session():
             await session.start(
@@ -956,10 +908,6 @@ async def entrypoint(ctx: agents.JobContext):
         finally:
             if not watchdog_task.done():
                 watchdog_task.cancel()
-            # Cancel audio monitor tasks
-            for amt in audio_monitor_tasks:
-                if not amt.done():
-                    amt.cancel()
 
     except Exception as general_err:
         await push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id)
