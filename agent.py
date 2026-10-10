@@ -30,8 +30,17 @@ def _certifi_ssl(purpose=ssl.Purpose.SERVER_AUTH, **kwargs):
 ssl.create_default_context = _certifi_ssl
 
 from livekit import agents, api, rtc
-from livekit.agents import Agent, AgentSession, RoomInputOptions
-from livekit.plugins import noise_cancellation, silero
+from livekit.agents import Agent, AgentSession
+
+try:
+    from livekit.plugins import silero
+except ImportError:
+    silero = None
+
+try:
+    from livekit.plugins import noise_cancellation
+except ImportError:
+    noise_cancellation = None
 
 _google_realtime = None
 _google_llm = None
@@ -699,47 +708,55 @@ async def entrypoint(ctx: agents.JobContext):
             pass
 
         # ---------------------------------------------------------------
-        # Real-time audio frame RMS monitor: detects caller speech energy
-        # even when Gemini does not fire user_speech_committed.
+        # Lightweight Audio Activity Monitor: detects caller speech energy
+        # without event loop starvation (no numpy, throttled sampling)
         # ---------------------------------------------------------------
+        monitored_tracks = set()
+        audio_monitor_tasks = []
+
         async def _monitor_audio_track(track: rtc.Track):
             nonlocal last_audio_activity
             try:
                 audio_stream = rtc.AudioStream(track)
+                last_sample = 0.0
                 async for ev in audio_stream:
+                    now = time.monotonic()
+                    # Downsample: sample at most once every 300ms to keep event loop under 1ms
+                    if now - last_sample < 0.3:
+                        continue
+                    last_sample = now
+
                     frame = ev.frame
                     if frame and frame.data:
-                        samples = np.frombuffer(frame.data, dtype=np.int16)
-                        if len(samples) > 0:
-                            rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
-                            if rms > 450:
-                                last_audio_activity = asyncio.get_event_loop().time()
+                        pcm_bytes = frame.data
+                        # Ultra-fast raw-byte peak amplitude check (no numpy allocations)
+                        # 16-bit PCM: speech amplitude typically exceeds 450
+                        if any(abs(int.from_bytes(pcm_bytes[i:i+2], "little", signed=True)) > 450 for i in range(0, len(pcm_bytes), 16)):
+                            last_audio_activity = asyncio.get_event_loop().time()
             except asyncio.CancelledError:
                 pass
             except Exception as am_err:
                 logger.debug(f"Audio monitor ended: {am_err}")
 
-        audio_monitor_tasks = []
-
-        def _subscribe_audio_track(track: rtc.Track, pub: rtc.TrackPublication, participant: rtc.RemoteParticipant):
-            if track.kind == rtc.TrackKind.KIND_AUDIO:
+        def _subscribe_audio_track(track: rtc.Track, *args):
+            sid = getattr(track, "sid", None) or id(track)
+            if track.kind == rtc.TrackKind.KIND_AUDIO and sid not in monitored_tracks:
+                monitored_tracks.add(sid)
                 t = asyncio.create_task(_monitor_audio_track(track))
                 audio_monitor_tasks.append(t)
 
         ctx.room.on("track_subscribed", _subscribe_audio_track)
-        # Subscribe to already-present remote audio tracks
+        # Subscribe to already-present remote audio tracks (deduplicated)
         for rp in ctx.room.remote_participants.values():
             for pub in rp.track_publications.values():
                 if pub.track and pub.kind == rtc.TrackKind.KIND_AUDIO:
-                    t = asyncio.create_task(_monitor_audio_track(pub.track))
-                    audio_monitor_tasks.append(t)
+                    _subscribe_audio_track(pub.track)
 
         # Start Gemini Live Realtime session concurrently while dialing
         async def _prewarm_session():
             await session.start(
                 room=ctx.room,
                 agent=KaamdhenuAssistant(instructions=system_prompt),
-                room_input_options=RoomInputOptions(noise_cancellation=noise_cancellation.BVCTelephony())
             )
             asyncio.create_task(push_unified_log("Gemini", "info", f"Gemini Live session pre-warmed & ready for {agent_name}", call_id=call_id))
 
