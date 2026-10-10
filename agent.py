@@ -74,28 +74,28 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
             seen_names.add(name)
             unique_tools.append(t)
 
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
-    if gemini_model in ("gemini-2.0-flash-exp", ""):
-        gemini_model = "gemini-2.5-flash-native-audio-preview-12-2025"
+    SUPPORTED_LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+    model_name = os.getenv("GEMINI_MODEL", "").strip()
+    # If model is invalid, unsupported, or empty, force the supported model
+    if model_name != SUPPORTED_LIVE_MODEL:
+        model_name = SUPPORTED_LIVE_MODEL
+
+    google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or None
     gemini_voice = voice or os.getenv("GEMINI_TTS_VOICE", "Aoede")
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # ULTRA-FAST PURE GEMINI REALTIME — stable default plugin config
+    # ULTRA-FAST PURE GEMINI REALTIME — clean plugin defaults (no custom realtime_input_config to prevent 1011 errors)
     if use_realtime and _google_realtime is not None:
         try:
             rt_kwargs = dict(
-                model=gemini_model,
+                model=model_name,
                 voice=gemini_voice,
                 instructions=system_prompt,
             )
-            # Optimize turn detection for telephony: 800ms silence = end-of-turn
-            if _gt is not None:
-                rt_kwargs["realtime_input_config"] = _gt.RealtimeInputConfig(
-                    automatic_activity_detection=_gt.AutomaticActivityDetection(
-                        silence_duration_ms=800,
-                    )
-                )
+            if google_api_key:
+                rt_kwargs["api_key"] = google_api_key
+
             return AgentSession(
                 llm=_google_realtime(**rt_kwargs),
                 tools=unique_tools
