@@ -63,7 +63,8 @@ except ImportError:
 from db import (
     push_unified_log, log_call, save_call_log, find_recent_outbound_context,
     add_campaign_minutes, find_campaign_by_inbound_number, get_agent_profile,
-    insert_appointment, book_appointment, normalize_phone, save_callback
+    find_agent_profile, insert_appointment, book_appointment, normalize_phone,
+    save_callback
 )
 from prompts import build_prompt, get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER, DYNAMIC_LANGUAGE_MIRRORING_LAYER
 from tools import RealEstateTools
@@ -569,40 +570,81 @@ async def entrypoint(ctx: agents.JobContext):
                     asyncio.create_task(push_unified_log("CRM", "info", f"Fresh inbound caller — falling back to standard default agent ({agent_name})", call_id=call_id))
 
         # ===================================================================
-        # PHASE 4: BUILD SYSTEM PROMPT
+        # PHASE 4: BUILD SYSTEM PROMPT (Dynamic Persona — Zero Hardcoded Pollution)
         # ===================================================================
-        # Determine if a custom prompt was supplied vs falling back to default blueprint
-        has_custom_prompt = bool(
-            custom_prompt
-            and custom_prompt.strip()
-            and "=== CONVERSATION OBJECTIVES & QUALIFICATION ===" not in custom_prompt
-            and "[OUTBOUND COLD CALL SALES BLUEPRINT - CRITICAL RULES]" not in custom_prompt
-        )
+        valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
 
-        if custom_prompt and custom_prompt.strip():
+        if is_inbound_callback and custom_prompt and custom_prompt.strip():
+            # ── RETURNING CALLBACK CALLER ──
+            # Use the exact agent system_prompt fetched from agent_profiles + callback context block.
+            # Do NOT merge, prepend, or append get_base_system_prompt() or any real-estate defaults.
+            system_prompt = custom_prompt.strip()
+            asyncio.create_task(push_unified_log("Agent", "info",
+                f"Inbound callback persona ISOLATED — using agent's own prompt only ({agent_name})",
+                call_id=call_id))
+        elif custom_prompt and custom_prompt.strip():
+            # ── OUTBOUND OR CAMPAIGN WITH EXPLICIT PROMPT ──
             system_prompt = custom_prompt.strip()
         else:
-            system_prompt = get_base_system_prompt(
-                agent_name=agent_name,
-                business_name=business_name,
-                custom_prompt=None,
-                lead_name=lead_name,
-                service_type=service_type
-            )
+            # ── FRESH CALLER — NO PRIOR CONTEXT, NO CAMPAIGN ──
+            # Resolve default agent from Supabase instead of hardcoded real-estate prompts.
+            try:
+                default_profile = await asyncio.wait_for(find_agent_profile(), timeout=1.5)
+                if default_profile and default_profile.get("system_prompt", "").strip():
+                    system_prompt = default_profile["system_prompt"].strip()
+                    # Also adopt the default agent's identity if not already set from metadata
+                    if default_profile.get("agent_name"):
+                        agent_name = default_profile["agent_name"]
+                    if default_profile.get("voice"):
+                        agent_voice = default_profile["voice"]
+                    if default_profile.get("business_name"):
+                        business_name = default_profile["business_name"]
+                    if default_profile.get("service_type"):
+                        service_type = default_profile["service_type"]
+                    if default_profile.get("broker_phone"):
+                        broker_phone = default_profile["broker_phone"]
+                    if default_profile.get("broker_email"):
+                        broker_email = default_profile["broker_email"]
+                    asyncio.create_task(push_unified_log("Agent", "info",
+                        f"Fresh caller — resolved default agent from Supabase: {agent_name} ({business_name})",
+                        call_id=call_id))
+                else:
+                    # Supabase returned an empty prompt — use generic industry-agnostic fallback
+                    system_prompt = get_base_system_prompt(
+                        agent_name=agent_name,
+                        business_name=business_name,
+                        custom_prompt=None,
+                        lead_name=lead_name,
+                        service_type=service_type
+                    )
+                    asyncio.create_task(push_unified_log("Agent", "info",
+                        f"Fresh caller — Supabase default agent has no prompt, using generic fallback",
+                        call_id=call_id))
+            except Exception as default_err:
+                logger.warning(f"Default agent profile lookup failed: {default_err} — using generic fallback")
+                system_prompt = get_base_system_prompt(
+                    agent_name=agent_name,
+                    business_name=business_name,
+                    custom_prompt=None,
+                    lead_name=lead_name,
+                    service_type=service_type
+                )
 
-        # Ensure language mirroring layer is present
+        # ── DOMAIN-AGNOSTIC LAYERS (safe to append to ANY persona) ──
+
+        # Language mirroring
         if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
             system_prompt = system_prompt + "\n\n" + DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
 
-        # Ensure caller name is never confused with an organization or project name
-        if not has_custom_prompt and valid_lead_name:
+        # Caller identity guard (only for non-callback inbound with known name)
+        if direction == "inbound" and not is_inbound_callback and valid_lead_name:
             strict_rules = f"""
 [CALLER IDENTITY RULE]
 - The user's name is {lead_name}. NEVER confuse the caller's name with an organization, project, or product name.
 """
             system_prompt = system_prompt + "\n" + strict_rules
 
-        # === HUMAN BACKCHANNEL & FILLER BEHAVIOR FOR NATURAL CONVERSATION ===
+        # Conversational speed & fillers
         conversational_speed_rules = """
 [CONVERSATIONAL SPEED & HUMAN FILLERS]
 - Respond INSTANTLY without thinking pauses. NEVER leave dead air or awkward silences.
@@ -615,8 +657,7 @@ async def entrypoint(ctx: agents.JobContext):
 """
         system_prompt = system_prompt + "\n" + conversational_speed_rules
 
-        # === DYNAMIC LEAD CONTEXT INJECTION FOR OUTBOUND CALLS ===
-        valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
+        # === DYNAMIC LEAD CONTEXT INJECTION FOR OUTBOUND CALLS ONLY ===
         if direction == "outbound" and valid_lead_name:
             notes_str = lead_notes.strip() if lead_notes else "None"
             bhk_str = lead_bhk.strip() if lead_bhk else ""
@@ -649,6 +690,11 @@ async def entrypoint(ctx: agents.JobContext):
 - Never remain silent without calling `end_call` at wrap-up.
 """
         system_prompt = system_prompt + "\n" + call_termination_rules
+
+        # === PERSONA LOGGING ===
+        asyncio.create_task(push_unified_log("Agent", "info",
+            f"Loaded Persona: {agent_name} ({business_name}) | Direction: {direction} | Callback: {is_inbound_callback} | Prompt Chars: {len(system_prompt)}",
+            call_id=call_id))
 
         done_event = asyncio.Event()
         def _on_part_disconnected(p: rtc.RemoteParticipant):
