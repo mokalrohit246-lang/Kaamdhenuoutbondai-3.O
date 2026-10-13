@@ -67,6 +67,7 @@ from db import (
 )
 from prompts import build_prompt, get_base_system_prompt, GLOBAL_NATURAL_CONVERSATION_LAYER, DYNAMIC_LANGUAGE_MIRRORING_LAYER
 from tools import RealEstateTools
+from crm import lookup_inbound_callback_context, build_inbound_callback_context_block
 
 load_dotenv(".env", override=True)
 logging.basicConfig(level=logging.INFO)
@@ -449,65 +450,123 @@ async def entrypoint(ctx: agents.JobContext):
         await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
 
         # ===================================================================
-        # PHASE 3: ASYNC DB LOOKUPS (only for inbound, run concurrently)
+        # PHASE 3: ASYNC DB LOOKUPS (Dynamic Persona & Callback Memory)
         # ===================================================================
         inbound_prior_project = ""  # Tracks prior project context for returning callers
+        is_inbound_callback = False
+        sip_participant = None
+
         if direction == "inbound":
-            # Run both lookups concurrently to minimize delay
-            camp_task = asyncio.create_task(find_campaign_by_inbound_number(phone_number))
-            ctx_task = asyncio.create_task(find_recent_outbound_context(phone_number))
+            # 1. Extract caller's normalized phone number from sip_participant.identity if present
+            for p in ctx.room.remote_participants.values():
+                if p.identity:
+                    sip_participant = p
+                    break
 
-            camp = await camp_task
-            ctx_info = await ctx_task  # Always resolve — we need this for returning caller memory
+            caller_identity = getattr(sip_participant, "identity", "")
+            if caller_identity:
+                extracted_digits = normalize_phone(caller_identity)
+                if extracted_digits:
+                    phone_number = f"+91{extracted_digits}" if not caller_identity.startswith("+") and len(extracted_digits) == 10 else f"+{re.sub(r'[^0-9]', '', caller_identity)}"
 
-            if camp:
-                campaign_id = camp.get("id")
-                log_category = "dedicated_inbound"
-                ag_id = camp.get("agent_profile_id")
-                if ag_id:
-                    ag_prof = await get_agent_profile(ag_id)
-                    if ag_prof:
-                        agent_name = ag_prof.get("agent_name") or agent_name
-                        agent_voice = ag_prof.get("voice") or agent_voice
-                        business_name = ag_prof.get("business_name") or business_name
-                        service_type = ag_prof.get("service_type") or service_type
-                        broker_phone = ag_prof.get("broker_phone") or broker_phone
-                        broker_email = ag_prof.get("broker_email") or broker_email
-                        custom_prompt = ag_prof.get("system_prompt") or custom_prompt
-                        calcom_event_type_id = ag_prof.get("calcom_event_type_id") or camp.get("calcom_event_type_id") or calcom_event_type_id
-                await push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id)
+            norm_caller_phone = normalize_phone(phone_number)
 
-            # ALWAYS check for returning caller context (even if dedicated campaign matched)
-            if ctx_info.get("found"):
-                prior_lead = ctx_info.get("lead_name", "")
-                # CRITICAL: project_name must NEVER equal the lead's own name
-                prior_proj = ctx_info.get("project_name") or ""
-                if prior_proj and prior_lead and prior_proj.strip().lower() == prior_lead.strip().lower():
-                    prior_proj = ""
-                prior_proj = prior_proj or business_name
+            # 2. Async lookup for last interaction in Supabase with 1.0s timeout guard
+            cb_ctx = None
+            if norm_caller_phone:
+                try:
+                    cb_ctx = await asyncio.wait_for(
+                        lookup_inbound_callback_context(norm_caller_phone),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Inbound callback CRM lookup timed out (1.0s) for {norm_caller_phone} - using defaults")
+                    cb_ctx = {"found": False}
+                except Exception as cb_err:
+                    logger.warning(f"Inbound callback CRM lookup failed for {norm_caller_phone}: {cb_err} - using defaults")
+                    cb_ctx = {"found": False}
 
-                # Update lead_name if we found a real name from CRM
+            # 3. Dynamic Persona & System Prompt Injection if prior interaction exists
+            if cb_ctx and cb_ctx.get("found"):
+                is_inbound_callback = True
+                log_category = "campaign_callback"
+
+                prior_lead = cb_ctx.get("lead_name") or ""
                 if prior_lead and prior_lead.strip().lower() not in ("there", "caller", "unknown", "lead", ""):
                     lead_name = prior_lead
 
-                # Store prior project for greeting injection
+                if cb_ctx.get("agent_name"):
+                    agent_name = cb_ctx.get("agent_name")
+                if cb_ctx.get("agent_voice"):
+                    agent_voice = cb_ctx.get("agent_voice")
+                if cb_ctx.get("business_name"):
+                    business_name = cb_ctx.get("business_name")
+                if cb_ctx.get("service_type"):
+                    service_type = cb_ctx.get("service_type")
+                if cb_ctx.get("campaign_id"):
+                    campaign_id = cb_ctx.get("campaign_id")
+                if cb_ctx.get("broker_phone"):
+                    broker_phone = cb_ctx.get("broker_phone")
+                if cb_ctx.get("broker_email"):
+                    broker_email = cb_ctx.get("broker_email")
+                if cb_ctx.get("calcom_event_type_id"):
+                    calcom_event_type_id = cb_ctx.get("calcom_event_type_id")
+
+                prior_proj = cb_ctx.get("project_name") or cb_ctx.get("service_type") or business_name
+                if prior_proj and prior_lead and prior_proj.strip().lower() == prior_lead.strip().lower():
+                    prior_proj = business_name
                 inbound_prior_project = prior_proj
-                project_name = prior_proj
+                project_name = prior_proj or business_name
 
-                if not campaign_id:
-                    campaign_id = ctx_info.get("campaign_id") or campaign_id
-                log_category = log_category if camp else "campaign_callback"
+                # Overwrite default prompt with specific agent's configured prompt from agents table
+                agent_sys_prompt = cb_ctx.get("system_prompt") or ""
+                if agent_sys_prompt and agent_sys_prompt.strip():
+                    custom_prompt = agent_sys_prompt.strip()
 
-                # Build context-aware system prompt for returning callers
-                custom_prompt = (
-                    f"You are {agent_name} representing {business_name or 'our service'}.\n"
-                    f"CRITICAL CONTEXT: The caller ({lead_name}) was RECENTLY contacted regarding '{prior_proj}'.\n"
-                    f"They are calling BACK — this is NOT a cold call. Acknowledge the prior conversation and ask how you can help further.\n"
-                    f"Speak naturally, instantly mirroring the caller's language without announcing the switch."
+                # Append explicit Callback Context block
+                cb_block = build_inbound_callback_context_block(
+                    campaign_name=cb_ctx.get("campaign_name") or "",
+                    agent_name=agent_name,
+                    last_call_summary=cb_ctx.get("last_call_summary") or "",
+                    lead_name=lead_name,
+                    business_name=business_name
                 )
-                await push_unified_log("CRM", "info", f"Returning caller detected: {lead_name} (prior context: {prior_proj})", call_id=call_id)
-            elif not camp:
-                await push_unified_log("CRM", "info", f"Fresh inbound caller — no prior CRM context found", call_id=call_id)
+                if custom_prompt:
+                    custom_prompt = custom_prompt + "\n\n" + cb_block
+                else:
+                    custom_prompt = cb_block
+
+                asyncio.create_task(push_unified_log(
+                    "CRM", "info",
+                    f"Returning callback caller identified: {lead_name} ({phone_number}) -> Persona: {agent_name} ({business_name})",
+                    call_id=call_id
+                ))
+            else:
+                # Fresh unknown caller -> Check dedicated campaign by inbound DID or fallback to default agent
+                camp = None
+                try:
+                    camp = await asyncio.wait_for(find_campaign_by_inbound_number(phone_number), timeout=1.0)
+                except Exception:
+                    camp = None
+
+                if camp:
+                    campaign_id = camp.get("id")
+                    log_category = "dedicated_inbound"
+                    ag_id = camp.get("agent_profile_id")
+                    if ag_id:
+                        ag_prof = await get_agent_profile(ag_id)
+                        if ag_prof:
+                            agent_name = ag_prof.get("agent_name") or agent_name
+                            agent_voice = ag_prof.get("voice") or agent_voice
+                            business_name = ag_prof.get("business_name") or business_name
+                            service_type = ag_prof.get("service_type") or service_type
+                            broker_phone = ag_prof.get("broker_phone") or broker_phone
+                            broker_email = ag_prof.get("broker_email") or broker_email
+                            custom_prompt = ag_prof.get("system_prompt") or custom_prompt
+                            calcom_event_type_id = ag_prof.get("calcom_event_type_id") or camp.get("calcom_event_type_id") or calcom_event_type_id
+                    asyncio.create_task(push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id))
+                else:
+                    asyncio.create_task(push_unified_log("CRM", "info", f"Fresh inbound caller — falling back to standard default agent ({agent_name})", call_id=call_id))
 
         # ===================================================================
         # PHASE 4: BUILD SYSTEM PROMPT
@@ -714,8 +773,8 @@ async def entrypoint(ctx: agents.JobContext):
 
         session_start_task = asyncio.create_task(_prewarm_session())
 
-        sip_participant = None
         if direction == "outbound" and phone_number:
+            sip_participant = None
             trunk_id = os.getenv("OUTBOUND_TRUNK_ID")
             if trunk_id:
                 try:
@@ -805,10 +864,15 @@ async def entrypoint(ctx: agents.JobContext):
 
         try:
             if direction == "inbound":
-                if inbound_prior_project:
-                    greeting_instruction = f"Namaste {lead_name if valid_lead_name else ''}! {business_name} mein aapka swagat hai. Main {agent_name}. Aapne pehle {inbound_prior_project} ke baare mein baat ki thi, batayein main aaj aapki kya madad kar sakti hoon?"
+                if is_inbound_callback:
+                    customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste"
+                    biz_str = f" {business_name} se" if business_name else ""
+                    if inbound_prior_project and inbound_prior_project != business_name:
+                        greeting_instruction = f"{customer_salutation}! Main{biz_str} {agent_name} baat kar rahi hoon. Aapka callback mila. Aapne pehle {inbound_prior_project} ke baare mein baat ki thi, batayein main aaj aapki kya madad kar sakti hoon?"
+                    else:
+                        greeting_instruction = f"{customer_salutation}! Main{biz_str} {agent_name} baat kar rahi hoon. Aapka callback mila, batayein main aaj aapki kya madad kar sakti hoon?"
                 else:
-                    greeting_instruction = f"Namaste! {business_name} mein aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
+                    greeting_instruction = f"Namaste! {business_name or 'Humaari service'} mein aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
             elif is_callback_call:
                 customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
                 greeting_instruction = f"{customer_salutation}, main {agent_name} baat kar rahi hoon {business_name} se. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?"
