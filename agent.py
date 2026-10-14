@@ -382,8 +382,10 @@ async def entrypoint(ctx: agents.JobContext):
     lead_name = "there"
     business_name = os.getenv("BUSINESS_NAME", "")
     service_type = os.getenv("SERVICE_TYPE", "")
+    agent_id = None
     agent_name = os.getenv("AGENT_NAME", "Assistant")
     agent_voice = os.getenv("GEMINI_TTS_VOICE", "Aoede")
+    active_agent_profile = None
     campaign_id = None
     broker_phone = None
     broker_email = None
@@ -417,6 +419,7 @@ async def entrypoint(ctx: agents.JobContext):
                 lead_name = m.get("lead_name", lead_name)
                 business_name = m.get("business_name", business_name)
                 service_type = m.get("service_type", service_type)
+                agent_id = m.get("agent_id") or m.get("agent_profile_id")
                 agent_name = m.get("agent_name") or m.get("name") or agent_name
                 agent_voice = m.get("voice") or m.get("agent_voice") or agent_voice
                 campaign_id = m.get("campaign_id")
@@ -496,6 +499,8 @@ async def entrypoint(ctx: agents.JobContext):
                 if prior_lead and prior_lead.strip().lower() not in ("there", "caller", "unknown", "lead", ""):
                     lead_name = prior_lead
 
+                if cb_ctx.get("agent_id"):
+                    agent_id = cb_ctx.get("agent_id")
                 if cb_ctx.get("agent_name"):
                     agent_name = cb_ctx.get("agent_name")
                 if cb_ctx.get("agent_voice"):
@@ -512,6 +517,12 @@ async def entrypoint(ctx: agents.JobContext):
                     broker_email = cb_ctx.get("broker_email")
                 if cb_ctx.get("calcom_event_type_id"):
                     calcom_event_type_id = cb_ctx.get("calcom_event_type_id")
+
+                if agent_id:
+                    try:
+                        active_agent_profile = await get_agent_profile(agent_id)
+                    except Exception:
+                        pass
 
                 prior_proj = cb_ctx.get("project_name") or cb_ctx.get("service_type") or business_name
                 if prior_proj and prior_lead and prior_proj.strip().lower() == prior_lead.strip().lower():
@@ -557,6 +568,8 @@ async def entrypoint(ctx: agents.JobContext):
                     if ag_id:
                         ag_prof = await get_agent_profile(ag_id)
                         if ag_prof:
+                            active_agent_profile = ag_prof
+                            agent_id = ag_id
                             agent_name = ag_prof.get("agent_name") or agent_name
                             agent_voice = ag_prof.get("voice") or agent_voice
                             business_name = ag_prof.get("business_name") or business_name
@@ -568,6 +581,24 @@ async def entrypoint(ctx: agents.JobContext):
                     asyncio.create_task(push_unified_log("CRM", "info", f"Dedicated inbound matched campaign: {camp.get('name')}", call_id=call_id))
                 else:
                     asyncio.create_task(push_unified_log("CRM", "info", f"Fresh inbound caller — falling back to standard default agent ({agent_name})", call_id=call_id))
+        else:
+            # Outbound call: resolve profile if agent_id passed
+            if agent_id and not active_agent_profile:
+                try:
+                    active_agent_profile = await get_agent_profile(agent_id)
+                    if active_agent_profile:
+                        if not custom_prompt and active_agent_profile.get("system_prompt"):
+                            custom_prompt = active_agent_profile.get("system_prompt")
+                        if not agent_name or agent_name == "Assistant":
+                            agent_name = active_agent_profile.get("name") or active_agent_profile.get("agent_name") or agent_name
+                        if not agent_voice:
+                            agent_voice = active_agent_profile.get("voice") or agent_voice
+                        if not business_name:
+                            business_name = active_agent_profile.get("business_name") or ""
+                        if not service_type:
+                            service_type = active_agent_profile.get("service_type") or ""
+                except Exception as out_err:
+                    logger.debug(f"Outbound agent profile lookup: {out_err}")
 
         # ===================================================================
         # PHASE 4: BUILD SYSTEM PROMPT (Dynamic Persona — Zero Hardcoded Pollution)
@@ -730,10 +761,34 @@ async def entrypoint(ctx: agents.JobContext):
         if lead_budget:
             tool_ctx.budget = lead_budget
 
+        # Filter tools by active agent's configuration
+        all_available_tools = tool_ctx.get_all_tools()
+        enabled_tools_cfg = None
+        if active_agent_profile and "enabled_tools" in active_agent_profile:
+            raw_tools = active_agent_profile.get("enabled_tools")
+            if isinstance(raw_tools, str):
+                try:
+                    enabled_tools_cfg = json.loads(raw_tools)
+                except Exception:
+                    enabled_tools_cfg = None
+            elif isinstance(raw_tools, list):
+                enabled_tools_cfg = raw_tools
+
+        # Always retain core universal telephony tools
+        core_tool_names = {"schedule_callback", "end_call", "transfer_to_human", "remember_details", "record_client_qualification"}
+        if enabled_tools_cfg is not None:
+            allowed_names = set(enabled_tools_cfg) | core_tool_names
+            filtered_tools = [
+                t for t in all_available_tools
+                if (getattr(t, "name", None) or getattr(t, "__name__", None) or str(t)) in allowed_names
+            ]
+        else:
+            filtered_tools = all_available_tools
+
         # Deduplicate tools by name
         seen_names = set()
         unique_tools = []
-        for t in tool_ctx.get_all_tools():
+        for t in filtered_tools:
             name = getattr(t, "name", None) or getattr(t, "__name__", None) or str(t)
             if name not in seen_names:
                 seen_names.add(name)
@@ -849,47 +904,6 @@ async def entrypoint(ctx: agents.JobContext):
             # Inbound call: await pre-warm task directly
             await session_start_task
 
-        # Immediately bind the caller's audio track to RoomIO upon answer (zero artificial sleep)
-        target_identity = getattr(sip_participant, "identity", None) or (f"sip_{phone_number}" if phone_number else None)
-        try:
-            if hasattr(session, "room_io") and session.room_io:
-                target_p = None
-                if target_identity and target_identity in ctx.room.remote_participants:
-                    target_p = ctx.room.remote_participants[target_identity]
-                elif ctx.room.remote_participants:
-                    # Pick first remote participant (the caller)
-                    target_p = next(iter(ctx.room.remote_participants.values()))
-
-                bound_identity = None
-                if target_p:
-                    bound_identity = target_p.identity
-                    try:
-                        session.room_io.set_participant(target_p.identity)
-                    except Exception:
-                        session.room_io.set_participant(target_p)
-                elif target_identity:
-                    bound_identity = target_identity
-                    session.room_io.set_participant(target_identity)
-
-                if bound_identity:
-                    logger.info(f"RoomIO audio track immediately bound to: {bound_identity}")
-                    asyncio.create_task(push_unified_log("Audio", "info", f"RoomIO bound to caller: {bound_identity}", call_id=call_id))
-        except Exception as rio_err:
-            logger.warning(f"RoomIO set_participant notice: {rio_err}")
-
-        # Also dynamically bind if participant connects or reconnects
-        @ctx.room.on("participant_connected")
-        def _on_participant_connected(p: rtc.RemoteParticipant):
-            if hasattr(session, "room_io") and session.room_io:
-                try:
-                    session.room_io.set_participant(p.identity)
-                    logger.info(f"RoomIO dynamically bound to connected participant: {p.identity}")
-                except Exception:
-                    try:
-                        session.room_io.set_participant(p)
-                    except Exception:
-                        pass
-
         # Instant Greeting Trigger: Direct pre-defined opening line to achieve <800ms latency
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
         ist_hour = ist_now.hour
@@ -909,22 +923,23 @@ async def entrypoint(ctx: agents.JobContext):
         valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
 
         try:
+            biz_str = f" {business_name} se" if business_name else ""
             if direction == "inbound":
                 if is_inbound_callback:
                     customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste"
-                    biz_str = f" {business_name} se" if business_name else ""
                     if inbound_prior_project and inbound_prior_project != business_name:
                         greeting_instruction = f"{customer_salutation}! Main{biz_str} {agent_name} baat kar rahi hoon. Aapka callback mila. Aapne pehle {inbound_prior_project} ke baare mein baat ki thi, batayein main aaj aapki kya madad kar sakti hoon?"
                     else:
                         greeting_instruction = f"{customer_salutation}! Main{biz_str} {agent_name} baat kar rahi hoon. Aapka callback mila, batayein main aaj aapki kya madad kar sakti hoon?"
                 else:
-                    greeting_instruction = f"Namaste! {business_name or 'Humaari service'} mein aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
+                    service_intro = f"{business_name} mein" if business_name else "humaari service mein"
+                    greeting_instruction = f"Namaste! {service_intro} aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
             elif is_callback_call:
                 customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
-                greeting_instruction = f"{customer_salutation}, main {agent_name} baat kar rahi hoon {business_name} se. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?"
+                greeting_instruction = f"{customer_salutation}, main{biz_str} {agent_name} baat kar rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?"
             else:
                 customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
-                greeting_instruction = f"{customer_salutation}, {time_greeting}! Main {agent_name} baat kar rahi hoon {business_name} se. Kya abhi aapse do minute baat ho sakti hai?"
+                greeting_instruction = f"{customer_salutation}, {time_greeting}! Main{biz_str} {agent_name} baat kar rahi hoon. Kya abhi aapse do minute baat ho sakti hai?"
 
             # Fire-and-forget: don't await playout (which blocks 3-6s for full TTS)
             speech_handle = session.generate_reply(instructions=greeting_instruction)
@@ -1219,6 +1234,9 @@ async def entrypoint(ctx: agents.JobContext):
                 lead_name=t_client_name,
                 direction=direction,
                 campaign_id=campaign_id,
+                agent_id=agent_id or "",
+                agent_name=agent_name or "",
+                notes=lead_notes or "",
                 outcome=t_outcome,
                 lead_score=final_score,
                 summary=summary,

@@ -253,26 +253,27 @@ async def dispatch_callback_call(
 
         profile = await find_agent_profile(campaign_id=campaign_id)
         agent_id = profile.get("id") or None
-        agent_name = profile.get("name") or profile.get("agent_name") or "Riya"
+        agent_name = profile.get("name") or profile.get("agent_name") or os.getenv("AGENT_NAME", "Assistant")
         agent_voice = profile.get("voice") or os.getenv("GEMINI_TTS_VOICE", "Aoede")
-        business_name = profile.get("business_name") or "Kaamdhenu Real Estate"
-        service_type = profile.get("service_type") or "Luxury 2BHK/3BHK Apartments"
+        business_name = profile.get("business_name") or os.getenv("BUSINESS_NAME", "")
+        service_type = profile.get("service_type") or os.getenv("SERVICE_TYPE", "")
         broker_phone = profile.get("broker_phone") or profile.get("broker_whatsapp") or os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
         broker_email = profile.get("broker_email") or os.getenv("DEFAULT_BROKER_EMAIL", "")
         calcom_event_type_id = profile.get("calcom_event_type_id") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
 
         room_name = f"callback-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
-        custom_ctx = "Context: This is a scheduled callback requested by the lead earlier.\n"
+        custom_ctx = "Context: This is a scheduled callback requested by the customer earlier.\n"
         if notes:
             custom_ctx += f"Additional Notes: {notes}\n"
+        biz_intro = f" {business_name} se" if business_name else ""
         custom_ctx += (
             f"\n[SCHEDULED CALLBACK BEHAVIOR - STRICT LISTENING MODE]\n"
             f"1. OPENING:\n"
             f"   - Keep it short, crisp, and direct:\n"
-            f"     'Namaste {lead_name} ji, {agent_name} baat kar rahi hoon {business_name} se. Aapne call karne ko kaha tha.'\n"
+            f"     'Namaste {lead_name} ji, main{biz_intro} {agent_name} baat kar rahi hoon. Aapne call karne ko kaha tha.'\n"
             f"   - Immediately pause and LET THE USER SPEAK. Do not pitch immediately.\n"
             f"2. IF USER TALKS NORMALLY:\n"
-            f"   - Answer their questions and continue the property qualification smoothly.\n"
+            f"   - Answer their questions and assist them smoothly based on your instructions.\n"
             f"   - NEVER suggest or ask: 'Main aapko baad mein call karoon kya?' Keep your focus on the conversation.\n"
             f"3. IF USER SAYS THEY ARE STILL BUSY / RESCHEDULES:\n"
             f"   - Only if the USER explicitly asks (e.g., 'Abhi bhi busy hoon, shaam ko 6 baje karo' / 'Kal call karo'):\n"
@@ -752,10 +753,10 @@ async def api_dispatch(req: SingleCallReq):
     )
 
     agent_id = req.agent_id or profile.get("id") or "default"
-    agent_name = req.agent_name or profile.get("name") or profile.get("agent_name") or "Riya"
+    agent_name = req.agent_name or profile.get("name") or profile.get("agent_name") or os.getenv("AGENT_NAME", "Assistant")
     agent_voice = req.agent_voice or profile.get("voice") or os.getenv("GEMINI_TTS_VOICE", "Aoede")
-    business_name = req.business_name or profile.get("business_name") or "Kaamdhenu Real Estate"
-    service_type = req.service_type or profile.get("service_type") or "Luxury Properties"
+    business_name = req.business_name or profile.get("business_name") or os.getenv("BUSINESS_NAME", "")
+    service_type = req.service_type or profile.get("service_type") or os.getenv("SERVICE_TYPE", "")
     broker_phone = req.broker_phone or profile.get("broker_phone") or profile.get("broker_whatsapp") or os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
     broker_email = req.broker_email or profile.get("broker_email") or os.getenv("DEFAULT_BROKER_EMAIL", "")
     calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
@@ -801,6 +802,7 @@ async def api_dispatch(req: SingleCallReq):
         "pickup_drop_notes": pickup_drop_notes,
         "project_highlights": project_highlights,
         "agent_id": agent_id,
+        "agent_profile_id": agent_id,
         "agent_name": agent_name,
         "agent_voice": agent_voice,
         "voice": agent_voice,
@@ -810,6 +812,8 @@ async def api_dispatch(req: SingleCallReq):
         "broker_email": broker_email,
         "calcom_event_type_id": calcom_event_type_id,
         "system_prompt": final_prompt,
+        "custom_prompt": raw_prompt,
+        "instructions": final_prompt,
         "notes": req.notes or "",
         "bhk": req.bhk_requirement or "",
         "budget": req.budget or ""

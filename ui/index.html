@@ -1405,8 +1405,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const phoneVal = (document.getElementById('sc_phone')?.value || '').trim();
         const leadVal = (document.getElementById('sc_name')?.value || '').trim() || 'there';
-        const bizVal = (document.getElementById('single_business_name') || document.getElementById('sc_biz_name'))?.value.trim() || (selProfile?.business_name || 'Kaamdhenu Real Estate');
-        const srvVal = document.getElementById('sc_service')?.value.trim() || 'Luxury Properties';
+        const bizVal = (document.getElementById('single_business_name') || document.getElementById('sc_biz_name'))?.value.trim() || (selProfile?.business_name || '');
+        const srvVal = document.getElementById('sc_service')?.value.trim() || (selProfile?.service_type || '');
         const brokerVal = (document.getElementById('single_broker_phone') || document.getElementById('sc_broker'))?.value.trim() || null;
         const promptVal = (document.getElementById('single_system_prompt') || document.getElementById('sc_prompt'))?.value.trim() || null;
         const calIdVal = document.getElementById('single_calcom_event_type_id')?.value || selProfile?.calcom_event_type_id || null;
@@ -1447,8 +1447,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const payload = {
             agent_id: agentId,
-            agent_name: selProfile ? selProfile.agent_name : 'Riya',
-            agent_voice: selProfile ? selProfile.voice : 'Aoede',
+            agent_name: selProfile ? (selProfile.name || selProfile.agent_name || 'Assistant') : 'Assistant',
+            agent_voice: selProfile ? (selProfile.voice || 'Aoede') : 'Aoede',
             phone: phoneVal,
             phone_number: phoneVal,
             lead_name: leadVal,

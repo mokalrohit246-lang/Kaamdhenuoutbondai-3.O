@@ -116,6 +116,18 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
     calcom_event_type_id = str(last_record.get("calcom_event_type_id") or "").strip()
     project_name = str(last_record.get("project_name") or "").strip()
 
+    # Extract agent metadata from notes field if not directly present in call_logs table
+    notes_field = str(last_record.get("notes") or "")
+    if notes_field:
+        if not agent_id:
+            m_id = re.search(r'\[AgentID:\s*([^\]\|]+)', notes_field)
+            if m_id:
+                agent_id = m_id.group(1).strip()
+        if not agent_name:
+            m_name = re.search(r'\[Agent:\s*([^\]\|]+)', notes_field)
+            if m_name:
+                agent_name = m_name.group(1).strip()
+
     # If campaign_id is present, enrich with campaign metadata
     if campaign_id:
         try:
@@ -140,7 +152,7 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
 
     # Fetch specific agent profile / persona if agent_id is linked
     agent_record = None
-    if agent_id:
+    if agent_id and agent_id.lower() not in ("none", "null", "undefined", "", "default"):
         # Try 'agents' table first
         if db is not None:
             try:
@@ -175,7 +187,28 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # If STILL no agent_record found, intelligently fallback to the most recent agent profile
+    if not agent_record and db is not None:
+        try:
+            rec_res = await db.table("agent_profiles").select("*").order("updated_at", desc=True).limit(1).execute()
+            if not rec_res or not rec_res.data:
+                rec_res = await db.table("agent_profiles").select("*").order("created_at", desc=True).limit(1).execute()
+            if rec_res and rec_res.data and len(rec_res.data) > 0:
+                agent_record = rec_res.data[0]
+        except Exception as rec_err:
+            logger.debug(f"Fallback to latest agent profile in Supabase failed: {rec_err}")
+
+    if not agent_record:
+        try:
+            all_p = await list_agent_profiles()
+            if all_p:
+                sorted_p = sorted(all_p, key=lambda x: str(x.get("updated_at") or x.get("created_at") or ""), reverse=True)
+                agent_record = sorted_p[0]
+        except Exception:
+            pass
+
     if agent_record:
+        agent_id = str(agent_record.get("id") or agent_id).strip()
         agent_name = str(agent_record.get("name") or agent_record.get("agent_name") or agent_name).strip()
         configured_prompt = str(agent_record.get("system_prompt") or "").strip()
         if configured_prompt:
@@ -227,14 +260,25 @@ def build_inbound_callback_context_block(
     Constructs the exact required [INBOUND CALLBACK CONTEXT] prompt block
     to inject into the system prompt for returning callback callers.
     """
-    camp_disp = campaign_name.strip() if campaign_name and campaign_name.strip() else "our campaign"
+    camp_disp = campaign_name.strip() if campaign_name and campaign_name.strip() else ""
     agent_disp = agent_name.strip() if agent_name and agent_name.strip() else "your dedicated executive"
     lead_disp = lead_name.strip() if lead_name and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "") else "Caller"
-    biz_disp = business_name.strip() if business_name and business_name.strip() else "our organization"
-    summary_disp = last_call_summary.strip() if last_call_summary and last_call_summary.strip() else "Previous call was initiated/missed"
+    biz_disp = business_name.strip() if business_name and business_name.strip() else ""
+
+    # Clean technical tags out of summary display
+    clean_summary = last_call_summary.strip() if last_call_summary else ""
+    clean_summary = re.sub(r'\[AgentID:[^\]]+\]', '', clean_summary)
+    clean_summary = re.sub(r'\[Agent:[^\]]+\]', '', clean_summary).strip()
+    if not clean_summary:
+        clean_summary = "An outbound call was initiated earlier"
+
+    campaign_ref = f" ({camp_disp})" if camp_disp else ""
+    biz_intro = f" representing {biz_disp}" if biz_disp else ""
+
+    opening_example = f"Namaste {lead_disp}, main {biz_disp + ' se ' if biz_disp else ''}{agent_disp} baat kar rahi hoon. Aapka callback mila..."
 
     return f"""[INBOUND CALLBACK CONTEXT]
-The user is calling back after an earlier outbound interaction from your campaign ({camp_disp} / {agent_disp}).
-Prior summary / context: {summary_disp}.
-You are NOT a generic Kaamdhenu assistant. You are strictly {agent_disp} representing this specific business.
-Acknowledge the callback naturally in your opening sentence (e.g., 'Namaste {lead_disp}, main {biz_disp} se {agent_disp} baat kar rahi hoon. Aapka callback mila...')."""
+The customer is calling back after an earlier outbound call from {agent_disp}{biz_intro}{campaign_ref}.
+Prior interaction summary: {clean_summary}.
+ROLE CONTINUITY: You are strictly {agent_disp}{biz_intro}. Maintain full persona and topic continuity based on your instructions above.
+Acknowledge the callback naturally in your opening sentence (e.g., '{opening_example}')."""

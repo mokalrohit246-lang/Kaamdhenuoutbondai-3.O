@@ -461,6 +461,7 @@ async def log_call(
     location_preference: str = "", job_profile: str = "", bhk_preference: str = "",
     budget_range: str = "", timeline: str = "", site_visit_interest: str = "",
     cab_required: str = "", main_objection: str = "",
+    notes: str = "", agent_id: str = "", agent_name: str = "",
     **kwargs
 ):
     loc = location_preference or current_location or "-"
@@ -486,6 +487,23 @@ async def log_call(
     obj = main_objection or objection or ""
     sv_interest = site_visit_interest or (f"Yes ({site_visit_date})" if site_visit_date else "No")
 
+    # Resolve agent_id and agent_name from explicit params or kwargs
+    res_agent_id = str(agent_id or kwargs.get("agent_profile_id") or "").strip()
+    res_agent_name = str(agent_name or "").strip()
+
+    # Compose notes ensuring agent tags are preserved
+    combined_notes = (notes or "").strip()
+    agent_tag = ""
+    if res_agent_id or res_agent_name:
+        parts = []
+        if res_agent_id:
+            parts.append(f"AgentID: {res_agent_id}")
+        if res_agent_name:
+            parts.append(f"Agent: {res_agent_name}")
+        agent_tag = "[" + " | ".join(parts) + "]"
+        if agent_tag not in combined_notes:
+            combined_notes = f"{agent_tag} {combined_notes}".strip()
+
     row = {
         "id": call_id or str(uuid.uuid4()),
         "phone_number": phone_number,
@@ -499,6 +517,7 @@ async def log_call(
         "cost_inr": float(cost_inr),
         "timestamp": datetime.utcnow().isoformat(),
         "client_name": client_name or lead_name,
+        "notes": combined_notes,
         # Legacy column mappings
         "current_location": loc,
         "occupation": job,
@@ -525,6 +544,12 @@ async def log_call(
         "cab_required": cab,
         "main_objection": obj
     }
+    if res_agent_id:
+        row["agent_id"] = res_agent_id
+        row["agent_profile_id"] = res_agent_id
+    if res_agent_name:
+        row["agent_name"] = res_agent_name
+
     for k, v in kwargs.items():
         row[k] = v
     if campaign_id:
@@ -1508,25 +1533,24 @@ async def find_agent_profile(
         if str(p.get("is_default") or "").lower() in ("1", "true"):
             return p
 
-    # 6. Fallback to profile named 'Riya'
-    for p in all_profiles:
-        p_name = str(p.get("name") or p.get("agent_name") or "").strip().lower()
-        if p_name == "riya":
-            return p
-
-    # 7. First available profile
+    # 6. Fallback to most recently updated / created profile
     if all_profiles:
-        return all_profiles[0]
+        sorted_profiles = sorted(
+            all_profiles,
+            key=lambda x: str(x.get("updated_at") or x.get("created_at") or ""),
+            reverse=True
+        )
+        return sorted_profiles[0]
 
-    # 8. Ultimate fallback
+    # 7. Ultimate fallback (clean industry-agnostic voice assistant)
     return {
-        "id": "default_riya",
-        "name": "Riya",
-        "agent_name": "Riya",
+        "id": "default_assistant",
+        "name": "Assistant",
+        "agent_name": "Assistant",
         "voice": os.getenv("GEMINI_TTS_VOICE", "Aoede"),
-        "business_name": "Kaamdhenu Real Estate",
-        "service_type": "Luxury 2BHK/3BHK Apartments",
-        "system_prompt": "You are Riya, a professional luxury real estate consultant. Qualify the client's home buying requirements and arrange a confirmed site visit with complimentary cab pickup.",
+        "business_name": os.getenv("PROJECT_NAME", "Voice Platform"),
+        "service_type": "Voice Consultation",
+        "system_prompt": "You are a professional voice assistant. Listen carefully, answer questions concisely, and assist the caller respectfully.",
         "broker_phone": os.getenv("DEFAULT_BROKER_PHONE", "+919892057717"),
         "broker_email": os.getenv("DEFAULT_BROKER_EMAIL", ""),
         "calcom_event_type_id": os.getenv("CALCOM_EVENT_TYPE_ID", "6934775"),
