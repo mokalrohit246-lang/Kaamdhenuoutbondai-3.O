@@ -275,10 +275,8 @@ def build_inbound_callback_context_block(
     campaign_ref = f" ({camp_disp})" if camp_disp else ""
     biz_intro = f" representing {biz_disp}" if biz_disp else ""
 
-    opening_example = f"Namaste {lead_disp}, main {biz_disp + ' se ' if biz_disp else ''}{agent_disp} baat kar rahi hoon. Aapka callback mila..."
-
     return f"""[INBOUND CALLBACK CONTEXT]
 The customer is calling back after an earlier outbound call from {agent_disp}{biz_intro}{campaign_ref}.
 Prior interaction summary: {clean_summary}.
-ROLE CONTINUITY: You are strictly {agent_disp}{biz_intro}. Maintain full persona and topic continuity based on your instructions above.
-Acknowledge the callback naturally in your opening sentence (e.g., '{opening_example}')."""
+ROLE CONTINUITY: You are strictly {agent_disp}{biz_intro}. Maintain full persona, language, and topic continuity based on your instructions above.
+Acknowledge the callback naturally in your opening sentence in the appropriate conversation language."""

@@ -266,8 +266,21 @@ def get_base_system_prompt(
         prompt_parts = [clean_instructions]
         if "=== NATURAL HUMAN CONVERSATION & PROFESSIONAL PERSUASION LAYER ===" not in clean_instructions:
             prompt_parts.append(GLOBAL_NATURAL_CONVERSATION_LAYER.strip())
-        if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in clean_instructions:
+
+        has_strict_language = any(term in clean_instructions.lower() for term in [
+            "strictly speak in english", "only speak in english", "only use english",
+            "strictly speak in hindi", "only speak in hindi", "mandatory language",
+            "strictly in english", "always speak in english", "must speak in english"
+        ])
+        if not has_strict_language and "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in clean_instructions:
             prompt_parts.append(lang_layer)
+        elif has_strict_language and "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in clean_instructions:
+            prompt_parts.append("[LANGUAGE POLICY]\nStrictly adhere to the language mandated in your primary instructions.")
+
+        supreme_priority_directive = """[SUPREME PRIORITY DIRECTIVE]
+The PRIMARY AGENT INSTRUCTIONS and PERSONA defined at the top of this prompt are the ABSOLUTE LAW.
+If there is ANY conflict between background rules (fillers, language mirroring, formatting) and the PRIMARY AGENT INSTRUCTIONS regarding language, opening line, tone, or role, the PRIMARY AGENT INSTRUCTIONS OVERRIDE EVERYTHING."""
+        prompt_parts.append(supreme_priority_directive)
 
         return "\n\n".join(prompt_parts) + "\n"
     else:

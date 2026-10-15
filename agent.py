@@ -663,9 +663,17 @@ async def entrypoint(ctx: agents.JobContext):
 
         # ── DOMAIN-AGNOSTIC LAYERS (safe to append to ANY persona) ──
 
-        # Language mirroring
-        if "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
+        # Language policy / mirroring
+        # If user prompt has strict language mandate, honor it 100%
+        has_strict_language = any(term in system_prompt.lower() for term in [
+            "strictly speak in english", "only speak in english", "only use english",
+            "strictly speak in hindi", "only speak in hindi", "mandatory language",
+            "strictly in english", "always speak in english", "must speak in english"
+        ])
+        if not has_strict_language and "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
             system_prompt = system_prompt + "\n\n" + DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
+        elif has_strict_language and "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
+            system_prompt = system_prompt + "\n\n[LANGUAGE POLICY]\nStrictly adhere to the language mandated in your primary instructions."
 
         # Caller identity guard (only for non-callback inbound with known name)
         if direction == "inbound" and not is_inbound_callback and valid_lead_name:
@@ -675,16 +683,15 @@ async def entrypoint(ctx: agents.JobContext):
 """
             system_prompt = system_prompt + "\n" + strict_rules
 
-        # Conversational speed & fillers
+        # Conversational speed & fillers (language-neutral)
         conversational_speed_rules = """
 [CONVERSATIONAL SPEED & HUMAN FILLERS]
 - Respond INSTANTLY without thinking pauses. NEVER leave dead air or awkward silences.
-- When the user asks a question, IMMEDIATELY start your response with natural Indian conversational fillers:
-  'हाँ जी...', 'जी बिल्कुल...', 'हाँ तो सर...', 'हाँ...', 'Achha...', 'Ji sir...', 'Bilkul...' before answering specifics.
-- Keep sentences SHORT, CRISP, and conversational — like a real Indian executive on a phone call.
+- When the user asks a question, IMMEDIATELY start your response with natural conversational fillers appropriate to the language of the conversation (e.g. 'Sure...', 'Right...', 'Certainly...', 'Yes...', or native conversational equivalents) before answering specifics.
+- Keep sentences SHORT, CRISP, and conversational.
 - NEVER monologue. After every 2-3 sentences, pause briefly to let the caller respond.
-- Use active listening sounds: 'Hmm', 'Ji', 'Achha' while the user is speaking.
-- If the user is silent for more than 2 seconds, gently prompt: 'Sir/Ma'am, aap sun rahe hain na?' or 'Hello? Main sun rahi hoon.'
+- Use natural active listening sounds appropriate to the conversation while the user is speaking.
+- If the user is silent for more than 2 seconds, gently check if they are still on the line using the language of the conversation.
 """
         system_prompt = system_prompt + "\n" + conversational_speed_rules
 
@@ -707,9 +714,7 @@ async def entrypoint(ctx: agents.JobContext):
 - Known Details / Notes: {context_detail or 'None'}
 - STRICT RULE: You ALREADY KNOW the user's name is {lead_name}.
 - ABSOLUTELY NEVER ask "Aapka naam kya hai?" or "May I know your name?" or any variation.
-- ZERO FALSE CLAIMS: ABSOLUTELY NEVER say "Aapne inquiry ki thi", "Aapne property mein interest dikhaya tha", or claim prior inquiry.
-- Introduce yourself as a professional consultant representing {business_name}.
-- Dynamic Greeting: Greet with IST time of day (good morning / afternoon / evening) and ask permission: "Kya abhi aapse do minute baat ho sakti hai?"
+- ZERO FALSE CLAIMS: ABSOLUTELY NEVER claim prior inquiry unless stated in the notes above.
 """
             system_prompt = system_prompt + "\n" + dynamic_lead_instruction
             await push_unified_log("Agent", "info", f"Dynamic lead context injected for {lead_name} ({phone_number})", call_id=call_id)
@@ -717,10 +722,18 @@ async def entrypoint(ctx: agents.JobContext):
         # === CRITICAL CALL TERMINATION RULE ===
         call_termination_rules = """
 [CRITICAL CALL TERMINATION RULE]
-- Whenever the conversation concludes (e.g., user says 'theek hai', 'bye', 'thank you', 'baad mein baat karte hain', or a site visit/callback is scheduled and acknowledged), speak a polite, concise closing line (e.g., 'Dhanyawad, aapse baat karke accha laga. Have a great day!') and IMMEDIATELY invoke the `end_call` tool.
+- Whenever the conversation concludes (e.g., user says goodbye, thank you, or indicates they are done), speak a polite, concise closing line in the conversation's language and IMMEDIATELY invoke the `end_call` tool.
 - Never remain silent without calling `end_call` at wrap-up.
 """
         system_prompt = system_prompt + "\n" + call_termination_rules
+
+        # === SUPREME PRIORITY DIRECTIVE ===
+        supreme_priority_directive = """
+[SUPREME PRIORITY DIRECTIVE]
+The PRIMARY AGENT INSTRUCTIONS and PERSONA defined at the top of this prompt are the ABSOLUTE LAW.
+If there is ANY conflict between background rules (fillers, language mirroring, formatting) and the PRIMARY AGENT INSTRUCTIONS regarding language, opening line, tone, or role, the PRIMARY AGENT INSTRUCTIONS OVERRIDE EVERYTHING.
+"""
+        system_prompt = system_prompt + "\n" + supreme_priority_directive
 
         # === PERSONA LOGGING ===
         asyncio.create_task(push_unified_log("Agent", "info",
@@ -904,42 +917,13 @@ async def entrypoint(ctx: agents.JobContext):
             # Inbound call: await pre-warm task directly
             await session_start_task
 
-        # Instant Greeting Trigger: Direct pre-defined opening line to achieve <800ms latency
-        ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
-        ist_hour = ist_now.hour
-        if 5 <= ist_hour < 12:
-            time_greeting = "good morning"
-        elif 12 <= ist_hour < 17:
-            time_greeting = "good afternoon"
-        else:
-            time_greeting = "good evening"
-
-        is_callback_call = (
-            log_category == "campaign_callback" or
-            "callback" in call_id.lower() or
-            "scheduled callback" in (lead_notes or "").lower()
-        )
-
-        valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
-
+        # Instant Greeting Trigger: Direct model to execute ONLY the user-mandated opening line & language from prompt
         try:
-            biz_str = f" {business_name} se" if business_name else ""
-            if direction == "inbound":
-                if is_inbound_callback:
-                    customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste"
-                    if inbound_prior_project and inbound_prior_project != business_name:
-                        greeting_instruction = f"{customer_salutation}! Main{biz_str} {agent_name} baat kar rahi hoon. Aapka callback mila. Aapne pehle {inbound_prior_project} ke baare mein baat ki thi, batayein main aaj aapki kya madad kar sakti hoon?"
-                    else:
-                        greeting_instruction = f"{customer_salutation}! Main{biz_str} {agent_name} baat kar rahi hoon. Aapka callback mila, batayein main aaj aapki kya madad kar sakti hoon?"
-                else:
-                    service_intro = f"{business_name} mein" if business_name else "humaari service mein"
-                    greeting_instruction = f"Namaste! {service_intro} aapka swagat hai. Main {agent_name} baat kar rahi hoon. Batayein main aapki kya madad kar sakti hoon?"
-            elif is_callback_call:
-                customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
-                greeting_instruction = f"{customer_salutation}, main{biz_str} {agent_name} baat kar rahi hoon. Aapne callback ke liye bola tha, batayein main aapki kya madad kar sakti hoon?"
-            else:
-                customer_salutation = f"Namaste {lead_name} ji" if valid_lead_name else "Namaste sir"
-                greeting_instruction = f"{customer_salutation}, {time_greeting}! Main{biz_str} {agent_name} baat kar rahi hoon. Kya abhi aapse do minute baat ho sakti hai?"
+            greeting_instruction = (
+                "Initiate the call by executing ONLY the opening instructions and first spoken line "
+                "specified in your system prompt. Strictly speak in the exact language mandated by your instructions. "
+                "Do NOT invent your own greeting, do NOT mention any company or service unless instructed."
+            )
 
             # Fire-and-forget: don't await playout (which blocks 3-6s for full TTS)
             speech_handle = session.generate_reply(instructions=greeting_instruction)
@@ -1014,7 +998,7 @@ async def entrypoint(ctx: agents.JobContext):
                         asyncio.create_task(push_unified_log("Watchdog", "info", f"Silence detected ({silence_duration:.1f}s) - prompting caller", call_id=call_id))
                         try:
                             session.generate_reply(
-                                instructions='Hello? Kya aap sun pa rahe hain? Main line pe hoon.'
+                                instructions="Gently ask if the caller can hear you, using the language of the current conversation."
                             )
                         except Exception as pe:
                             logger.warning(f"Error generating silence prompt: {pe}")
