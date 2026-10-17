@@ -1479,8 +1479,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.querySelector('[data-tab="view_logs"]').click();
                 loadUnifiedLogs();
             } else {
-                const err = await res.json();
-                alert("Dispatch Failed: " + (err.detail || "Check logs"));
+                let errMsg = "Check logs";
+                try {
+                    const err = await res.json();
+                    errMsg = err.detail || err.error || JSON.stringify(err);
+                } catch (_) {
+                    errMsg = await res.text();
+                }
+                alert("Dispatch Failed: " + errMsg);
             }
         } catch(err) {
             alert("Error connecting to server: " + err);

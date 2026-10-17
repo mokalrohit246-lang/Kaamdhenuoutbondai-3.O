@@ -739,94 +739,129 @@ async def api_provision_inbound():
 @app.post("/api/dispatch-call")
 @app.post("/api/call")
 async def api_dispatch(req: SingleCallReq):
-    url = os.getenv("LIVEKIT_URL")
-    key = os.getenv("LIVEKIT_API_KEY")
-    secret = os.getenv("LIVEKIT_API_SECRET")
-    if not (url and key and secret):
-        raise HTTPException(400, "LiveKit credentials missing")
-
-    phone = (req.phone or req.phone_number or "").strip()
-    if not phone:
-        raise HTTPException(400, "Phone number required")
-
-    campaign_id = req.campaign_id or None
-
-    # 1. Resolve agent profile dynamically (supports custom saved profile, agent_id, agent_name, or default 'Riya')
-    profile = await find_agent_profile(
-        agent_id=req.agent_id,
-        agent_name=req.agent_name,
-        campaign_id=campaign_id
-    )
-
-    agent_id = req.agent_id or profile.get("id") or "default"
-    agent_name = req.agent_name or profile.get("name") or profile.get("agent_name") or os.getenv("AGENT_NAME", "Assistant")
-    agent_voice = req.agent_voice or profile.get("voice") or os.getenv("GEMINI_TTS_VOICE", "Aoede")
-    business_name = req.business_name or profile.get("business_name") or os.getenv("BUSINESS_NAME", "")
-    service_type = req.service_type or profile.get("service_type") or os.getenv("SERVICE_TYPE", "")
-    broker_phone = req.broker_phone or profile.get("broker_phone") or profile.get("broker_whatsapp") or os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
-    broker_email = req.broker_email or profile.get("broker_email") or os.getenv("DEFAULT_BROKER_EMAIL", "")
-    calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
-
-    # Build final system prompt strictly incorporating the active agent's persona without bloat
-    raw_prompt = (req.custom_prompt or req.system_prompt or profile.get("system_prompt") or "").strip()
-    if raw_prompt:
-        final_prompt = raw_prompt
-    else:
-        final_prompt = get_base_system_prompt(
-            agent_name=agent_name,
-            business_name=project_name or business_name,
-            custom_prompt="",
-            lead_name=req.lead_name or "there",
-            service_type=service_type
-        )
-
-    room_name = f"outbound-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
-    meta = {
-        "direction": "outbound",
-        "phone_number": phone,
-        "lead_name": req.lead_name or "there",
-        "campaign_id": campaign_id or "",
-        "project_name": project_name,
-        "brochure_url": brochure_url,
-        "site_address": site_address,
-        "pickup_drop_notes": pickup_drop_notes,
-        "project_highlights": project_highlights,
-        "agent_id": agent_id,
-        "agent_profile_id": agent_id,
-        "agent_name": agent_name,
-        "agent_voice": agent_voice,
-        "voice": agent_voice,
-        "business_name": business_name,
-        "service_type": service_type,
-        "broker_phone": broker_phone,
-        "broker_email": broker_email,
-        "calcom_event_type_id": calcom_event_type_id,
-        "system_prompt": final_prompt,
-        "custom_prompt": raw_prompt,
-        "instructions": final_prompt,
-        "notes": req.notes or "",
-        "bhk": req.bhk_requirement or "",
-        "budget": req.budget or ""
-    }
-
     try:
+        url = os.getenv("LIVEKIT_URL")
+        key = os.getenv("LIVEKIT_API_KEY")
+        secret = os.getenv("LIVEKIT_API_SECRET")
+        if not (url and key and secret):
+            return JSONResponse(status_code=400, content={"error": "LiveKit credentials missing", "detail": "LiveKit credentials missing", "status": "failed"})
+
+        phone = (req.phone or req.phone_number or "").strip()
+        if not phone:
+            return JSONResponse(status_code=400, content={"error": "Phone number required", "detail": "Phone number required", "status": "failed"})
+
+        campaign_id = req.campaign_id or None
+
+        # 1. Resolve agent profile dynamically (supports custom saved profile, agent_id, agent_name, or default 'Riya')
+        profile = {}
+        try:
+            profile = await find_agent_profile(
+                agent_id=req.agent_id,
+                agent_name=req.agent_name,
+                campaign_id=campaign_id
+            ) or {}
+        except Exception as pe:
+            logger.warning(f"Error finding agent profile: {pe}")
+            profile = {}
+
+        agent_id = req.agent_id or profile.get("id") or "default"
+        agent_name = req.agent_name or profile.get("name") or profile.get("agent_name") or os.getenv("AGENT_NAME", "Assistant")
+        agent_voice = req.agent_voice or profile.get("voice") or os.getenv("GEMINI_TTS_VOICE", "Aoede")
+        business_name = req.business_name or profile.get("business_name") or os.getenv("BUSINESS_NAME", "")
+        service_type = req.service_type or profile.get("service_type") or os.getenv("SERVICE_TYPE", "")
+        broker_phone = req.broker_phone or profile.get("broker_phone") or profile.get("broker_whatsapp") or os.getenv("DEFAULT_BROKER_PHONE", "+919892057717")
+        broker_email = req.broker_email or profile.get("broker_email") or os.getenv("DEFAULT_BROKER_EMAIL", "")
+        calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
+
+        project_name = req.project_name or business_name or ""
+        brochure_url = req.brochure_url or ""
+        site_address = req.site_address or ""
+        pickup_drop_notes = req.pickup_drop_notes or ""
+        project_highlights = req.project_highlights or ""
+
+        if campaign_id:
+            try:
+                camp = await get_campaign(campaign_id)
+                if camp:
+                    project_name = req.project_name or camp.get("project_name") or camp.get("name") or project_name
+                    brochure_url = req.brochure_url or camp.get("brochure_url") or brochure_url
+                    site_address = req.site_address or camp.get("site_address") or site_address
+                    pickup_drop_notes = req.pickup_drop_notes or camp.get("pickup_drop_notes") or pickup_drop_notes
+                    project_highlights = req.project_highlights or camp.get("project_highlights") or project_highlights
+            except Exception as camp_err:
+                logger.warning(f"Error fetching campaign in api_dispatch: {camp_err}")
+
+        # Build final system prompt strictly incorporating the active agent's persona without bloat
+        raw_prompt = ""
+        if req.custom_prompt and req.custom_prompt.strip():
+            raw_prompt = req.custom_prompt.strip()
+        elif req.system_prompt and req.system_prompt.strip():
+            raw_prompt = req.system_prompt.strip()
+        elif profile.get("system_prompt") and profile.get("system_prompt").strip():
+            raw_prompt = profile.get("system_prompt").strip()
+
+        if raw_prompt:
+            final_prompt = raw_prompt
+        else:
+            final_prompt = get_base_system_prompt(
+                agent_name=agent_name,
+                business_name=project_name or business_name,
+                custom_prompt="",
+                lead_name=req.lead_name or "there",
+                service_type=service_type
+            )
+
+        room_name = f"outbound-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
+        meta = {
+            "direction": "outbound",
+            "phone_number": phone,
+            "lead_name": req.lead_name or "there",
+            "campaign_id": campaign_id or "",
+            "project_name": project_name,
+            "brochure_url": brochure_url,
+            "site_address": site_address,
+            "pickup_drop_notes": pickup_drop_notes,
+            "project_highlights": project_highlights,
+            "agent_id": str(agent_id),
+            "agent_profile_id": str(agent_id),
+            "agent_name": agent_name,
+            "agent_voice": agent_voice,
+            "voice": agent_voice,
+            "business_name": business_name,
+            "service_type": service_type,
+            "broker_phone": broker_phone,
+            "broker_email": broker_email,
+            "calcom_event_type_id": calcom_event_type_id,
+            "system_prompt": final_prompt,
+            "custom_prompt": raw_prompt,
+            "instructions": final_prompt,
+            "notes": req.notes or "",
+            "bhk": req.bhk_requirement or "",
+            "budget": req.budget or ""
+        }
+
         from livekit import api as lk_api
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx))
-        lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
-        await lk.room.create_room(lk_api.CreateRoomRequest(name=room_name, empty_timeout=300))
-        await lk.agent_dispatch.create_dispatch(
-            lk_api.CreateAgentDispatchRequest(agent_name="kaamdhenu-voice-agent", room=room_name, metadata=json.dumps(meta))
-        )
-        await lk.aclose()
-        await session.close()
+        try:
+            lk = lk_api.LiveKitAPI(url=url, api_key=key, api_secret=secret, session=session)
+            await lk.room.create_room(lk_api.CreateRoomRequest(name=room_name, empty_timeout=300))
+            await lk.agent_dispatch.create_dispatch(
+                lk_api.CreateAgentDispatchRequest(agent_name="kaamdhenu-voice-agent", room=room_name, metadata=json.dumps(meta))
+            )
+            await lk.aclose()
+        finally:
+            await session.close()
+
         await push_unified_log("API", "info", f"Call dispatched to {phone} ({agent_name})", call_id=room_name)
-        return {"status": "dispatched", "room": room_name, "phone": phone, "agent": agent_name}
+        return JSONResponse(content={"status": "dispatched", "room": room_name, "phone": phone, "agent": agent_name})
+
     except Exception as e:
+        logger.error(f"api_dispatch exception: {e}", exc_info=True)
         await push_unified_log("API", "error", f"Dispatch failed: {e}")
-        raise HTTPException(500, str(e))
+        return JSONResponse(status_code=500, content={"error": str(e), "detail": str(e), "status": "failed"})
 
 # Agent Profiles API
 @app.get("/api/agent-profiles")
