@@ -93,7 +93,15 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
     voice_engine = os.getenv("VOICE_ENGINE", "realtime").lower()
     use_realtime = os.getenv("USE_GEMINI_REALTIME", "true").lower() != "false" and voice_engine == "realtime"
 
-    # ULTRA-FAST PURE GEMINI REALTIME — clean plugin defaults (no custom realtime_input_config to prevent 1011 errors)
+    # Turn handling options for ultra-low latency (<600-800ms) turn taking
+    turn_handling_config = {
+        "endpointing": {
+            "min_delay": 0.4,
+            "max_delay": 1.5,
+        }
+    }
+
+    # ULTRA-FAST PURE GEMINI REALTIME — clean plugin defaults with tuned 400ms endpointing
     if use_realtime and _google_realtime is not None:
         try:
             rt_kwargs = dict(
@@ -106,7 +114,8 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
 
             return AgentSession(
                 llm=_google_realtime(**rt_kwargs),
-                tools=unique_tools
+                tools=unique_tools,
+                turn_handling=turn_handling_config,
             )
         except Exception as e:
             logger.warning(f"Error initializing Google Realtime: {e}")
@@ -114,14 +123,29 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
     # PIPELINE FALLBACK — tuned Silero VAD for stable turn detection
     stt = _deepgram_stt(model=os.getenv("STT_MODEL", "nova-3"), language="multi") if _deepgram_stt and os.getenv("DEEPGRAM_API_KEY") else None
     tts = _google_tts(voice_name=gemini_voice) if _google_tts else None
+    vad_inst = None
+    if silero:
+        try:
+            vad_inst = silero.VAD.load(
+                min_speech_duration=0.15,
+                min_silence_duration=0.4,
+                prefix_padding_duration=0.1
+            )
+        except Exception:
+            try:
+                vad_inst = silero.VAD.load(
+                    min_silence_duration=0.4,
+                    prefix_padding_duration=0.1
+                )
+            except Exception:
+                pass
+
     return AgentSession(
         stt=stt,
         llm=_google_llm(model="gemini-2.0-flash") if _google_llm else None,
         tts=tts,
-        vad=silero.VAD.load(
-            min_silence_duration=0.8,
-            prefix_padding_duration=0.1
-        ),
+        vad=vad_inst,
+        turn_handling=turn_handling_config,
         tools=unique_tools
     )
 
@@ -393,6 +417,7 @@ async def entrypoint(ctx: agents.JobContext):
     calcom_event_type_id = None
     custom_prompt = None
     tool_ctx = None
+    session = None
     log_category = "general"
     lead_notes = ""
     lead_bhk = ""
@@ -605,17 +630,19 @@ async def entrypoint(ctx: agents.JobContext):
         # ===================================================================
         valid_lead_name = lead_name and lead_name.strip() and lead_name.strip().lower() not in ("there", "caller", "unknown", "lead", "")
 
+        has_custom_prompt = False
         if is_inbound_callback and custom_prompt and custom_prompt.strip():
             # ── RETURNING CALLBACK CALLER ──
             # Use the exact agent system_prompt fetched from agent_profiles + callback context block.
-            # Do NOT merge, prepend, or append get_base_system_prompt() or any real-estate defaults.
             system_prompt = custom_prompt.strip()
+            has_custom_prompt = True
             asyncio.create_task(push_unified_log("Agent", "info",
                 f"Inbound callback persona ISOLATED — using agent's own prompt only ({agent_name})",
                 call_id=call_id))
         elif custom_prompt and custom_prompt.strip():
             # ── OUTBOUND OR CAMPAIGN WITH EXPLICIT PROMPT ──
             system_prompt = custom_prompt.strip()
+            has_custom_prompt = True
         else:
             # ── FRESH CALLER — NO PRIOR CONTEXT, NO CAMPAIGN ──
             # Resolve default agent from Supabase instead of hardcoded real-estate prompts.
@@ -623,6 +650,7 @@ async def entrypoint(ctx: agents.JobContext):
                 default_profile = await asyncio.wait_for(find_agent_profile(), timeout=1.5)
                 if default_profile and default_profile.get("system_prompt", "").strip():
                     system_prompt = default_profile["system_prompt"].strip()
+                    has_custom_prompt = True
                     # Also adopt the default agent's identity if not already set from metadata
                     if default_profile.get("agent_name"):
                         agent_name = default_profile["agent_name"]
@@ -661,92 +689,55 @@ async def entrypoint(ctx: agents.JobContext):
                     service_type=service_type
                 )
 
-        # ── DOMAIN-AGNOSTIC LAYERS (safe to append to ANY persona) ──
-
-        # Language policy / mirroring
-        # If user prompt has strict language mandate, honor it 100%
-        has_strict_language = any(term in system_prompt.lower() for term in [
-            "strictly speak in english", "only speak in english", "only use english",
-            "strictly speak in hindi", "only speak in hindi", "mandatory language",
-            "strictly in english", "always speak in english", "must speak in english"
-        ])
-        if not has_strict_language and "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
-            system_prompt = system_prompt + "\n\n" + DYNAMIC_LANGUAGE_MIRRORING_LAYER.strip()
-        elif has_strict_language and "DYNAMIC ZERO-SHOT LANGUAGE MIRRORING" not in system_prompt:
-            system_prompt = system_prompt + "\n\n[LANGUAGE POLICY]\nStrictly adhere to the language mandated in your primary instructions."
-
-        # Caller identity guard (only for non-callback inbound with known name)
-        if direction == "inbound" and not is_inbound_callback and valid_lead_name:
-            strict_rules = f"""
-[CALLER IDENTITY RULE]
-- The user's name is {lead_name}. NEVER confuse the caller's name with an organization, project, or product name.
-"""
-            system_prompt = system_prompt + "\n" + strict_rules
-
-        # Conversational speed & fillers (language-neutral)
-        conversational_speed_rules = """
-[CONVERSATIONAL SPEED & HUMAN FILLERS]
-- Respond INSTANTLY without thinking pauses. NEVER leave dead air or awkward silences.
-- When the user asks a question, IMMEDIATELY start your response with natural conversational fillers appropriate to the language of the conversation (e.g. 'Sure...', 'Right...', 'Certainly...', 'Yes...', or native conversational equivalents) before answering specifics.
-- Keep sentences SHORT, CRISP, and conversational.
-- NEVER monologue. After every 2-3 sentences, pause briefly to let the caller respond.
-- Use natural active listening sounds appropriate to the conversation while the user is speaking.
-- If the user is silent for more than 2 seconds, gently check if they are still on the line using the language of the conversation.
-"""
-        system_prompt = system_prompt + "\n" + conversational_speed_rules
-
-        # === DYNAMIC LEAD CONTEXT INJECTION FOR OUTBOUND CALLS ONLY ===
-        if direction == "outbound" and valid_lead_name:
-            notes_str = lead_notes.strip() if lead_notes else "None"
-            bhk_str = lead_bhk.strip() if lead_bhk else ""
-            budget_str = lead_budget.strip() if lead_budget else ""
-            context_parts = [notes_str]
-            if bhk_str:
-                context_parts.append(f"BHK: {bhk_str}")
-            if budget_str:
-                context_parts.append(f"Budget: {budget_str}")
-            context_detail = " | ".join(p for p in context_parts if p and p != "None")
-
-            dynamic_lead_instruction = f"""
-[CRITICAL CALL CONTEXT - OUTBOUND LEAD DETAILS]
-- You are placing an outbound call to: {lead_name}
-- Phone: {phone_number}
-- Known Details / Notes: {context_detail or 'None'}
-- STRICT RULE: You ALREADY KNOW the user's name is {lead_name}.
-- ABSOLUTELY NEVER ask "Aapka naam kya hai?" or "May I know your name?" or any variation.
-- ZERO FALSE CLAIMS: ABSOLUTELY NEVER claim prior inquiry unless stated in the notes above.
-"""
-            system_prompt = system_prompt + "\n" + dynamic_lead_instruction
-            await push_unified_log("Agent", "info", f"Dynamic lead context injected for {lead_name} ({phone_number})", call_id=call_id)
-
-        # === CRITICAL CALL TERMINATION RULE ===
-        call_termination_rules = """
-[CRITICAL CALL TERMINATION RULE]
-- Whenever the conversation concludes (e.g., user says goodbye, thank you, or indicates they are done), speak a polite, concise closing line in the conversation's language and IMMEDIATELY invoke the `end_call` tool.
-- Never remain silent without calling `end_call` at wrap-up.
-"""
-        system_prompt = system_prompt + "\n" + call_termination_rules
-
-        # === SUPREME PRIORITY DIRECTIVE ===
-        supreme_priority_directive = """
-[SUPREME PRIORITY DIRECTIVE]
-The PRIMARY AGENT INSTRUCTIONS and PERSONA defined at the top of this prompt are the ABSOLUTE LAW.
-If there is ANY conflict between background rules (fillers, language mirroring, formatting) and the PRIMARY AGENT INSTRUCTIONS regarding language, opening line, tone, or role, the PRIMARY AGENT INSTRUCTIONS OVERRIDE EVERYTHING.
-"""
-        system_prompt = system_prompt + "\n" + supreme_priority_directive
+        # Append ONLY essential dynamic call context if outbound (zero corporate/telephony wrappers bloat)
+        if has_custom_prompt:
+            if direction == "outbound" and valid_lead_name:
+                notes_str = lead_notes.strip() if lead_notes else ""
+                context_parts = []
+                if lead_bhk and lead_bhk.strip():
+                    context_parts.append(f"BHK: {lead_bhk.strip()}")
+                if lead_budget and lead_budget.strip():
+                    context_parts.append(f"Budget: {lead_budget.strip()}")
+                if notes_str and notes_str != "None":
+                    context_parts.append(f"Notes: {notes_str}")
+                ctx_summary = " | ".join(context_parts)
+                lead_tag = f"\n\n[CALL DETAILS] Prospect: {lead_name} ({phone_number})"
+                if ctx_summary:
+                    lead_tag += f" | {ctx_summary}"
+                system_prompt = system_prompt + lead_tag
+                await push_unified_log("Agent", "info", f"Dynamic lead details attached for {lead_name}", call_id=call_id)
 
         # === PERSONA LOGGING ===
         asyncio.create_task(push_unified_log("Agent", "info",
             f"Loaded Persona: {agent_name} ({business_name}) | Direction: {direction} | Callback: {is_inbound_callback} | Prompt Chars: {len(system_prompt)}",
             call_id=call_id))
 
+        session_cleaned = False
+        async def _teardown_session():
+            nonlocal session_cleaned
+            if session_cleaned or not session:
+                return
+            session_cleaned = True
+            try:
+                await asyncio.wait_for(session.aclose(), timeout=2.0)
+                logger.info(f"Agent session closed cleanly for {call_id}")
+            except Exception as ce:
+                logger.debug(f"Session aclose error: {ce}")
+            if hasattr(session, "llm") and hasattr(session.llm, "aclose"):
+                try:
+                    await asyncio.wait_for(session.llm.aclose(), timeout=1.0)
+                except Exception:
+                    pass
+
         done_event = asyncio.Event()
         def _on_part_disconnected(p: rtc.RemoteParticipant):
             if ctx.room.local_participant and p.identity == ctx.room.local_participant.identity:
                 return
             done_event.set()
+            asyncio.create_task(_teardown_session())
+
         ctx.room.on("participant_disconnected", _on_part_disconnected)
-        ctx.room.on("disconnected", lambda: done_event.set())
+        ctx.room.on("disconnected", lambda: (done_event.set(), asyncio.create_task(_teardown_session())))
 
         tool_ctx = RealEstateTools(
             ctx,
@@ -867,9 +858,48 @@ If there is ANY conflict between background rules (fillers, language mirroring, 
                 nonlocal last_audio_activity
                 last_audio_activity = asyncio.get_event_loop().time()
 
+            recovering_1011 = False
             @session.on("error")
             def _on_session_error(error):
+                nonlocal recovering_1011
                 err_msg = str(error)
+                is_1011 = "1011" in err_msg or "Internal error encountered" in err_msg
+                if is_1011:
+                    logger.warning(f"Gemini Realtime 1011 internal error detected for {call_id}: {err_msg}")
+                    asyncio.create_task(
+                        push_unified_log("Gemini", "warning", f"1011 internal error encountered: {err_msg[:120]}", call_id=call_id)
+                    )
+                    if not recovering_1011:
+                        recovering_1011 = True
+                        async def _handle_1011_recovery():
+                            try:
+                                recovery_task = None
+                                if hasattr(session, "generate_reply") and not done_event.is_set():
+                                    try:
+                                        recovery_task = session.generate_reply(
+                                            instructions="Continue the conversation naturally in the mandated language."
+                                        )
+                                    except Exception:
+                                        recovery_task = None
+                                if recovery_task:
+                                    await asyncio.wait_for(recovery_task, timeout=2.0)
+                                    logger.info(f"1011 recovery succeeded for {call_id}")
+                                    return
+                            except Exception as rec_err:
+                                logger.warning(f"1011 recovery failed or timed out: {rec_err}")
+                            finally:
+                                if not done_event.is_set() and recovering_1011:
+                                    asyncio.create_task(
+                                        push_unified_log("Gemini", "warning", f"1011 recovery timed out (>2s) - terminating call gracefully", call_id=call_id)
+                                    )
+                                    try:
+                                        await ctx.room.disconnect()
+                                    except Exception:
+                                        pass
+                                    done_event.set()
+                        asyncio.create_task(_handle_1011_recovery())
+                    return
+
                 logger.error(f"Gemini Session error for {call_id}: {err_msg}")
                 asyncio.create_task(
                     push_unified_log("Gemini", "error", f"Session error: {err_msg}", call_id=call_id)
@@ -1019,10 +1049,20 @@ If there is ANY conflict between background rules (fillers, language mirroring, 
                 watchdog_task.cancel()
 
     except Exception as general_err:
-        await push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id)
-        logger.error(f"General error in entrypoint: {general_err}", exc_info=True)
+        err_str = str(general_err)
+        if "1011" in err_str or "Internal error encountered" in err_str:
+            logger.warning(f"Handled 1011 runtime error for {call_id}: {err_str}")
+            await push_unified_log("Agent", "warning", f"1011 runtime error caught: {err_str[:120]}", call_id=call_id)
+        else:
+            await push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id)
+            logger.error(f"General error in entrypoint: {general_err}", exc_info=True)
 
     finally:
+        # Explicit teardown of session and WebSocket resources to prevent zombie connections
+        try:
+            await _teardown_session()
+        except Exception:
+            pass
         # ALWAYS LOG CALL DATA WITH ALL QUALIFICATION FIELDS
         dur = max(1, int(time.time() - call_start_time))
         cost_inr = round((dur / 60.0) * 1.22, 2)

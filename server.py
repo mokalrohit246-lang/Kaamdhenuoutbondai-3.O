@@ -282,13 +282,17 @@ async def dispatch_callback_call(
             f"   - Do NOT interrogate or push.\n"
         )
 
-        prompt = get_base_system_prompt(
-            agent_name=agent_name,
-            business_name=business_name,
-            custom_prompt=custom_ctx,
-            lead_name=lead_name,
-            service_type=service_type
-        )
+        raw_prompt = (profile.get("system_prompt") or profile.get("custom_prompt") or "").strip()
+        if raw_prompt:
+            final_prompt = raw_prompt
+        else:
+            final_prompt = get_base_system_prompt(
+                agent_name=agent_name,
+                business_name=business_name,
+                custom_prompt=custom_ctx,
+                lead_name=lead_name,
+                service_type=service_type
+            )
 
         meta = {
             "direction": "outbound",
@@ -305,7 +309,9 @@ async def dispatch_callback_call(
             "broker_phone": broker_phone,
             "broker_email": broker_email,
             "calcom_event_type_id": calcom_event_type_id,
-            "system_prompt": prompt,
+            "system_prompt": final_prompt,
+            "custom_prompt": raw_prompt or custom_ctx,
+            "instructions": final_prompt,
             "notes": f"Scheduled callback requested earlier. {notes}".strip()
         }
 
@@ -761,34 +767,18 @@ async def api_dispatch(req: SingleCallReq):
     broker_email = req.broker_email or profile.get("broker_email") or os.getenv("DEFAULT_BROKER_EMAIL", "")
     calcom_event_type_id = req.calcom_event_type_id or profile.get("calcom_event_type_id") or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
 
-    # Priority for system_prompt:
-    # 1. Explicitly passed in single call form (req.custom_prompt or req.system_prompt)
-    # 2. The agent profile's saved system_prompt
-    raw_prompt = req.custom_prompt or req.system_prompt or profile.get("system_prompt") or ""
-
-    project_name = req.project_name or business_name
-    brochure_url = req.brochure_url or ""
-    site_address = req.site_address or ""
-    pickup_drop_notes = req.pickup_drop_notes or ""
-    project_highlights = req.project_highlights or ""
-
-    if campaign_id:
-        camp = await get_campaign(campaign_id)
-        if camp:
-            project_name = req.project_name or camp.get("project_name") or camp.get("name") or project_name
-            brochure_url = req.brochure_url or camp.get("brochure_url") or brochure_url
-            site_address = req.site_address or camp.get("site_address") or site_address
-            pickup_drop_notes = req.pickup_drop_notes or camp.get("pickup_drop_notes") or pickup_drop_notes
-            project_highlights = req.project_highlights or camp.get("project_highlights") or project_highlights
-
-    # Build final system prompt strictly incorporating the active agent's persona
-    final_prompt = get_base_system_prompt(
-        agent_name=agent_name,
-        business_name=project_name or business_name,
-        custom_prompt=raw_prompt,
-        lead_name=req.lead_name or "there",
-        service_type=service_type
-    )
+    # Build final system prompt strictly incorporating the active agent's persona without bloat
+    raw_prompt = (req.custom_prompt or req.system_prompt or profile.get("system_prompt") or "").strip()
+    if raw_prompt:
+        final_prompt = raw_prompt
+    else:
+        final_prompt = get_base_system_prompt(
+            agent_name=agent_name,
+            business_name=project_name or business_name,
+            custom_prompt="",
+            lead_name=req.lead_name or "there",
+            service_type=service_type
+        )
 
     room_name = f"outbound-{phone.replace('+', '')}-{random.randint(1000, 9999)}"
     meta = {
