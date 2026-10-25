@@ -399,7 +399,7 @@ Conversation Transcript:
 async def entrypoint(ctx: agents.JobContext):
     call_id = ctx.room.name
     call_start_time = time.time()
-    await push_unified_log("LiveKit", "info", f"Job connected: {call_id}", call_id=call_id)
+    asyncio.create_task(push_unified_log("LiveKit", "info", f"Job connected: {call_id}", call_id=call_id))
 
     direction = "outbound"
     phone_number = ""
@@ -476,7 +476,7 @@ async def entrypoint(ctx: agents.JobContext):
         # PHASE 2: CONNECT IMMEDIATELY (minimize latency — no DB before this)
         # ===================================================================
         await ctx.connect()
-        await push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id)
+        asyncio.create_task(push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id))
 
         # ===================================================================
         # PHASE 3: ASYNC DB LOOKUPS (Dynamic Persona & Callback Memory)
@@ -705,7 +705,7 @@ async def entrypoint(ctx: agents.JobContext):
                 if ctx_summary:
                     lead_tag += f" | {ctx_summary}"
                 system_prompt = system_prompt + lead_tag
-                await push_unified_log("Agent", "info", f"Dynamic lead details attached for {lead_name}", call_id=call_id)
+                asyncio.create_task(push_unified_log("Agent", "info", f"Dynamic lead details attached for {lead_name}", call_id=call_id))
 
         # === PERSONA LOGGING ===
         asyncio.create_task(push_unified_log("Agent", "info",
@@ -872,6 +872,7 @@ async def entrypoint(ctx: agents.JobContext):
                     if not recovering_1011:
                         recovering_1011 = True
                         async def _handle_1011_recovery():
+                            recovery_succeeded = False
                             try:
                                 recovery_task = None
                                 if hasattr(session, "generate_reply") and not done_event.is_set():
@@ -882,15 +883,17 @@ async def entrypoint(ctx: agents.JobContext):
                                     except Exception:
                                         recovery_task = None
                                 if recovery_task:
-                                    await asyncio.wait_for(recovery_task, timeout=2.0)
+                                    await asyncio.wait_for(recovery_task, timeout=1.5)
                                     logger.info(f"1011 recovery succeeded for {call_id}")
+                                    recovery_succeeded = True
+                                    recovering_1011 = False
                                     return
                             except Exception as rec_err:
                                 logger.warning(f"1011 recovery failed or timed out: {rec_err}")
                             finally:
-                                if not done_event.is_set() and recovering_1011:
+                                if not recovery_succeeded and not done_event.is_set():
                                     asyncio.create_task(
-                                        push_unified_log("Gemini", "warning", f"1011 recovery timed out (>2s) - terminating call gracefully", call_id=call_id)
+                                        push_unified_log("Gemini", "warning", f"1011 recovery timed out (>1.5s) - terminating call gracefully", call_id=call_id)
                                     )
                                     try:
                                         await ctx.room.disconnect()
@@ -938,7 +941,7 @@ async def entrypoint(ctx: agents.JobContext):
                     sip_participant, _ = await asyncio.gather(dial_task, session_start_task)
                     asyncio.create_task(push_unified_log("SIP", "info", f"Call answered by {phone_number} (200 OK)", call_id=call_id))
                 except Exception as dial_err:
-                    await push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id)
+                    asyncio.create_task(push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id))
                     ctx.shutdown()
                     return
             else:
@@ -1052,9 +1055,9 @@ async def entrypoint(ctx: agents.JobContext):
         err_str = str(general_err)
         if "1011" in err_str or "Internal error encountered" in err_str:
             logger.warning(f"Handled 1011 runtime error for {call_id}: {err_str}")
-            await push_unified_log("Agent", "warning", f"1011 runtime error caught: {err_str[:120]}", call_id=call_id)
+            asyncio.create_task(push_unified_log("Agent", "warning", f"1011 runtime error caught: {err_str[:120]}", call_id=call_id))
         else:
-            await push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id)
+            asyncio.create_task(push_unified_log("Agent", "error", f"Call runtime error: {general_err}", call_id=call_id))
             logger.error(f"General error in entrypoint: {general_err}", exc_info=True)
 
     finally:
