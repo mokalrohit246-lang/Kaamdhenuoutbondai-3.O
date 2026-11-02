@@ -142,7 +142,7 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
 
     return AgentSession(
         stt=stt,
-        llm=_google_llm(model="gemini-2.0-flash") if _google_llm else None,
+        llm=_google_llm(model="gemini-3-flash-preview") if _google_llm else None,
         tts=tts,
         vad=vad_inst,
         turn_handling=turn_handling_config,
@@ -322,7 +322,7 @@ Rules:
 Conversation Transcript:
 {transcript}
 """
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={google_api_key}"
             payload = {
                 "contents": [{"parts": [{"text": prompt_text}]}],
                 "generationConfig": {"response_mime_type": "application/json"}
@@ -545,7 +545,7 @@ async def entrypoint(ctx: agents.JobContext):
 
                 if agent_id:
                     try:
-                        active_agent_profile = await get_agent_profile(agent_id)
+                        active_agent_profile = await asyncio.wait_for(get_agent_profile(agent_id), timeout=1.0)
                     except Exception:
                         pass
 
@@ -591,7 +591,10 @@ async def entrypoint(ctx: agents.JobContext):
                     log_category = "dedicated_inbound"
                     ag_id = camp.get("agent_profile_id")
                     if ag_id:
-                        ag_prof = await get_agent_profile(ag_id)
+                        try:
+                            ag_prof = await asyncio.wait_for(get_agent_profile(ag_id), timeout=1.0)
+                        except Exception:
+                            ag_prof = None
                         if ag_prof:
                             active_agent_profile = ag_prof
                             agent_id = ag_id
@@ -610,7 +613,7 @@ async def entrypoint(ctx: agents.JobContext):
             # Outbound call: resolve profile if agent_id passed
             if agent_id and not active_agent_profile:
                 try:
-                    active_agent_profile = await get_agent_profile(agent_id)
+                    active_agent_profile = await asyncio.wait_for(get_agent_profile(agent_id), timeout=1.0)
                     if active_agent_profile:
                         if not custom_prompt and active_agent_profile.get("system_prompt"):
                             custom_prompt = active_agent_profile.get("system_prompt")
@@ -713,21 +716,29 @@ async def entrypoint(ctx: agents.JobContext):
             call_id=call_id))
 
         session_cleaned = False
+        watchdog_task = None
+
         async def _teardown_session():
             nonlocal session_cleaned
-            if session_cleaned or not session:
+            if session_cleaned:
                 return
             session_cleaned = True
-            try:
-                await asyncio.wait_for(session.aclose(), timeout=2.0)
-                logger.info(f"Agent session closed cleanly for {call_id}")
-            except Exception as ce:
-                logger.debug(f"Session aclose error: {ce}")
-            if hasattr(session, "llm") and hasattr(session.llm, "aclose"):
+            if watchdog_task and not watchdog_task.done():
                 try:
-                    await asyncio.wait_for(session.llm.aclose(), timeout=1.0)
+                    watchdog_task.cancel()
                 except Exception:
                     pass
+            if session:
+                try:
+                    await asyncio.wait_for(session.aclose(), timeout=2.0)
+                    logger.info(f"Agent session closed cleanly for {call_id}")
+                except Exception as ce:
+                    logger.debug(f"Session aclose error: {ce}")
+                if hasattr(session, "llm") and hasattr(session.llm, "aclose"):
+                    try:
+                        await asyncio.wait_for(session.llm.aclose(), timeout=1.0)
+                    except Exception:
+                        pass
 
         done_event = asyncio.Event()
         def _on_part_disconnected(p: rtc.RemoteParticipant):
@@ -1075,7 +1086,7 @@ async def entrypoint(ctx: agents.JobContext):
         dur_mins = round(dur / 60.0, 2)
         if campaign_id:
             try:
-                await add_campaign_minutes(campaign_id, dur_mins)
+                await asyncio.wait_for(add_campaign_minutes(campaign_id, dur_mins), timeout=2.0)
             except Exception:
                 pass
 
@@ -1254,50 +1265,53 @@ async def entrypoint(ctx: agents.JobContext):
         summary = f"{t_client_name} ({clean_phone}): {bhk_pref or 'TBD'} | Budget: {bud_range or 'TBD'} | {t_purpose}{visit_str}{cab_str} | Score: {final_score} | Duration: {dur}s"
 
         try:
-            await log_call(
-                call_id=call_id,
-                phone_number=clean_phone,
-                called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
-                lead_name=t_client_name,
-                direction=direction,
-                campaign_id=campaign_id,
-                agent_id=agent_id or "",
-                agent_name=agent_name or "",
-                notes=lead_notes or "",
-                outcome=t_outcome,
-                lead_score=final_score,
-                summary=summary,
-                reason="",
-                duration_seconds=dur,
-                cost_inr=cost_inr,
-                recording_url=rec_url,
-                # Structured CRM columns
-                location_preference=loc_pref,
-                job_profile=job_prof,
-                bhk_preference=bhk_pref,
-                budget_range=bud_range,
-                timeline=time_frame,
-                funding_type=fund_type,
-                site_visit_interest=sv_interest,
-                cab_required=cab_req,
-                main_objection=main_obj,
-                whatsapp_status=wa_status,
-                # Legacy column mappings for backward compatibility
-                client_name=t_client_name,
-                current_location=loc_pref,
-                occupation=job_prof,
-                bhk_requirement=bhk_pref,
-                budget=bud_range,
-                purpose=t_purpose,
-                possession_timeline=time_frame,
-                commitment_risk=t_commitment,
-                site_visit_date=t_site_visit,
-                pickup_required=(cab_req == "Yes" or t_pickup),
-                pickup_location=t_pickup_loc,
-                next_callback=t_callback,
-                objection=main_obj,
-                log_category=log_category,
-                callback_dispatched=False
+            await asyncio.wait_for(
+                log_call(
+                    call_id=call_id,
+                    phone_number=clean_phone,
+                    called_to=os.getenv("VOBIZ_OUTBOUND_NUMBER", ""),
+                    lead_name=t_client_name,
+                    direction=direction,
+                    campaign_id=campaign_id,
+                    agent_id=agent_id or "",
+                    agent_name=agent_name or "",
+                    notes=lead_notes or "",
+                    outcome=t_outcome,
+                    lead_score=final_score,
+                    summary=summary,
+                    reason="",
+                    duration_seconds=dur,
+                    cost_inr=cost_inr,
+                    recording_url=rec_url,
+                    # Structured CRM columns
+                    location_preference=loc_pref,
+                    job_profile=job_prof,
+                    bhk_preference=bhk_pref,
+                    budget_range=bud_range,
+                    timeline=time_frame,
+                    funding_type=fund_type,
+                    site_visit_interest=sv_interest,
+                    cab_required=cab_req,
+                    main_objection=main_obj,
+                    whatsapp_status=wa_status,
+                    # Legacy column mappings for backward compatibility
+                    client_name=t_client_name,
+                    current_location=loc_pref,
+                    occupation=job_prof,
+                    bhk_requirement=bhk_pref,
+                    budget=bud_range,
+                    purpose=t_purpose,
+                    possession_timeline=time_frame,
+                    commitment_risk=t_commitment,
+                    site_visit_date=t_site_visit,
+                    pickup_required=(cab_req == "Yes" or t_pickup),
+                    pickup_location=t_pickup_loc,
+                    next_callback=t_callback,
+                    objection=main_obj,
+                    log_category=log_category,
+                    callback_dispatched=False
+                ),
+                timeout=3.0
             )
             await push_unified_log("CRM", "info", f"Call log saved ({direction}): {clean_phone} - {dur}s, ₹{cost_inr}", call_id=call_id)
         except Exception as log_err:

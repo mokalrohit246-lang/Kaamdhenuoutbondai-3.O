@@ -52,8 +52,8 @@ class RealEstateTools(llm.ToolContext):
         self.campaign_id = campaign_id
         self.broker_phone = broker_phone or os.getenv("DEFAULT_BROKER_WHATSAPP", "")
         self.broker_email = broker_email or os.getenv("DEFAULT_BROKER_EMAIL", "")
-        self.calcom_api_key = calcom_api_key or os.getenv("CALCOM_API_KEY", "cal_live_b3cec47f49e2eeb34a38f0500002a22a")
-        self.calcom_event_type_id = calcom_event_type_id or os.getenv("CALCOM_EVENT_TYPE_ID", "6934775")
+        self.calcom_api_key = (calcom_api_key or os.getenv("CALCOM_API_KEY", "")).strip()
+        self.calcom_event_type_id = (calcom_event_type_id or os.getenv("CALCOM_EVENT_TYPE_ID", "")).strip()
         self.sheets_webhook = sheets_webhook
         self.brochure_url = brochure_url or ""
         self.project_name = project_name or ""
@@ -105,6 +105,7 @@ class RealEstateTools(llm.ToolContext):
             self.book_site_visit,
             self.send_project_brochure,
             self.send_whatsapp_brochure,
+            self.send_booking_details,
             self.send_broker_hot_lead_alert,
             self.send_sms_confirmation,
             self.transfer_to_human,
@@ -195,34 +196,53 @@ class RealEstateTools(llm.ToolContext):
             timezone = os.getenv("CALCOM_TIMEZONE", "Asia/Kolkata")
 
             async def _bg_calcom():
-                if not (api_key and event_type_id):
-                    return
+                clean_phone_digits = re.sub(r'\D', '', str(self.phone_number or ""))
+                custom_apt_id = f"apt_cal_{clean_phone_digits[-10:]}_{int(_time_mod.time())}"
+                # 1. Save in Supabase appointments
                 try:
-                    from datetime import datetime as _dt
-                    start_dt = _dt.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M")
-                    start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    booking_payload = {
-                        "eventTypeId": int(event_type_id),
-                        "start": start_iso,
-                        "timeZone": timezone,
-                        "responses": {"name": name, "email": email, "notes": notes},
-                        "metadata": {"source": "KaamdhenuAI"}
-                    }
-                    booking_headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-                    if httpx is not None:
-                        async with httpx.AsyncClient(timeout=4.0) as client:
-                            resp = await client.post("https://api.cal.com/v1/bookings", headers=booking_headers, json=booking_payload)
-                            if resp.status_code in (200, 201):
-                                uid = resp.json().get("uid", "")
-                                await push_unified_log("Cal.com", "info", f"Cal.com slot synced (UID: {uid})", call_id=self.call_id)
-                except Exception as exc:
-                    logger.warning(f"Cal.com async booking background error: {exc}")
+                    await book_appointment(
+                        id=custom_apt_id,
+                        name=name or self.client_name or self.lead_name or "Lead",
+                        phone=self.phone_number,
+                        date=date,
+                        time=start_time,
+                        service=f"Consultation ({notes or 'Cal.com'})",
+                        status="booked"
+                    )
+                    await push_unified_log("Tools", "info", f"Appointment saved in DB: {name} on {date} at {start_time}", call_id=self.call_id)
+                except Exception as db_err:
+                    logger.warning(f"DB appointment error in book_calcom: {db_err}")
+
+                # 2. Cal.com API sync (if configured)
+                if api_key and event_type_id:
+                    try:
+                        from datetime import datetime as _dt
+                        start_dt = _dt.strptime(f"{date} {start_time}", "%Y-%m-%d %H:%M")
+                        start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                        booking_payload = {
+                            "eventTypeId": int(event_type_id) if str(event_type_id).isdigit() else event_type_id,
+                            "start": start_iso,
+                            "timeZone": timezone,
+                            "responses": {"name": name, "email": email, "notes": notes},
+                            "metadata": {"source": "KaamdhenuAI"}
+                        }
+                        booking_headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "KaamdhenuAI/3.0"}
+                        if httpx is not None:
+                            async with httpx.AsyncClient(timeout=2.0) as client:
+                                resp = await client.post("https://api.cal.com/v1/bookings", headers=booking_headers, json=booking_payload)
+                                if resp.status_code in (200, 201):
+                                    uid = resp.json().get("uid", "")
+                                    await push_unified_log("Cal.com", "info", f"Cal.com slot synced (UID: {uid})", call_id=self.call_id)
+                                else:
+                                    await push_unified_log("Cal.com", "warning", f"Cal.com API returned {resp.status_code}", call_id=self.call_id)
+                    except Exception as exc:
+                        logger.warning(f"Cal.com async booking background error: {exc}")
 
             asyncio.create_task(_bg_calcom())
-            return f"Cal.com appointment scheduled for {date} at {start_time}."
+            return f"Appointment scheduled for {date} at {start_time}."
         except Exception as exc:
             logger.warning(f"book_calcom error: {exc}")
-            return "Cal.com booking noted."
+            return "Appointment booking noted."
 
     @llm.function_tool
     async def book_site_visit(self, client_name: str, visit_datetime: str, pickup_required: bool = False, pickup_address: str = "") -> str:
@@ -257,7 +277,29 @@ class RealEstateTools(llm.ToolContext):
 
             async def _bg_site_visit():
                 calcom_booking_uid = ""
-                # 1. Cal.com booking
+
+                # 1. Save appointment to database FIRST
+                try:
+                    await book_appointment(
+                        id=custom_apt_id,
+                        name=client_name or self.lead_name or "Lead",
+                        phone=self.phone_number,
+                        date=date,
+                        time=vtime,
+                        service=service_title,
+                        budget=self.budget,
+                        property_type=bhk,
+                        pickup_required=pickup_required,
+                        pickup_address=pickup_address,
+                        status="booked",
+                        calcom_booking_uid=""
+                    )
+                    pickup_msg = f" with cab pickup from {pickup_address}" if pickup_required and pickup_address else ""
+                    await push_unified_log("Tools", "info", f"Site visit booked: {client_name} on {visit_datetime}{pickup_msg}", call_id=self.call_id)
+                except Exception as db_err:
+                    logger.warning(f"DB book_appointment error: {db_err}")
+
+                # 2. Cal.com booking (optional, 2.0s timeout)
                 if self.calcom_api_key and self.calcom_event_type_id:
                     try:
                         from datetime import datetime as _dt, timedelta as _td
@@ -286,35 +328,16 @@ class RealEstateTools(llm.ToolContext):
                     }
                     if httpx is not None:
                         try:
-                            async with httpx.AsyncClient(timeout=4.0) as client:
-                                resp = await client.post(url, json=body)
+                            async with httpx.AsyncClient(timeout=2.0) as client:
+                                resp = await client.post(url, json=body, headers={"User-Agent": "KaamdhenuAI/3.0"})
                                 if resp.status_code in (200, 201):
                                     data = resp.json()
                                     calcom_booking_uid = data.get("booking", {}).get("uid") or data.get("uid", "")
                                     await push_unified_log("Cal.com", "info", f"Cal.com site visit booked (UID: {calcom_booking_uid})", call_id=self.call_id)
+                                else:
+                                    await push_unified_log("Cal.com", "warning", f"Cal.com returned status {resp.status_code}", call_id=self.call_id)
                         except Exception as cal_err:
                             logger.warning(f"Cal.com background booking error: {cal_err}")
-
-                # 2. Save appointment to database
-                try:
-                    await book_appointment(
-                        id=custom_apt_id,
-                        name=client_name or self.lead_name or "Lead",
-                        phone=self.phone_number,
-                        date=date,
-                        time=vtime,
-                        service=service_title,
-                        budget=self.budget,
-                        property_type=bhk,
-                        pickup_required=pickup_required,
-                        pickup_address=pickup_address,
-                        status="booked",
-                        calcom_booking_uid=calcom_booking_uid
-                    )
-                    pickup_msg = f" with cab pickup from {pickup_address}" if pickup_required and pickup_address else ""
-                    await push_unified_log("Tools", "info", f"Site visit booked: {client_name} on {visit_datetime}{pickup_msg} (Cal.com UID: {calcom_booking_uid or 'Local'})", call_id=self.call_id)
-                except Exception as db_err:
-                    logger.warning(f"DB book_appointment error: {db_err}")
 
                 # 3. Trigger WhatsApp & Broker alerts
                 try:
@@ -623,6 +646,42 @@ class RealEstateTools(llm.ToolContext):
         except Exception as e:
             logger.error(f"send_whatsapp_brochure error: {e}")
             return "Brochure WhatsApp par bhej diya jayeka."
+
+    @llm.function_tool
+    async def send_booking_details(self, phone_number: str = "", booking_info: str = "") -> str:
+        """Send appointment or booking details to caller via WhatsApp.
+
+        Args:
+            phone_number: Recipient phone number (defaults to caller phone if empty).
+            booking_info: Specific booking information or notes to include.
+        """
+        try:
+            phone = phone_number or self.phone_number
+            lead_name = self.client_name or self.lead_name or "Valued Client"
+            visit_time = self.site_visit_date or "Upcoming Slot"
+            cab_info = self.pickup_location if self.pickup_required else "Direct Visit"
+
+            async def _bg_booking_details():
+                try:
+                    await send_site_visit_confirmation(
+                        to_phone=phone,
+                        customer_name=lead_name,
+                        project_name=self.project_name or "Kaamdhenu Premium Residences",
+                        visit_time=visit_time,
+                        cab_details=cab_info,
+                        campaign_id=self.campaign_id,
+                        call_id=self.call_id
+                    )
+                    await push_unified_log("WhatsApp", "info", f"Booking details sent to {phone}", call_id=self.call_id)
+                except Exception as be:
+                    logger.warning(f"Background booking details dispatch error: {be}")
+                    await push_unified_log("WhatsApp", "error", f"Booking details failed: {be}", call_id=self.call_id)
+
+            asyncio.create_task(_bg_booking_details())
+            return "Maine WhatsApp par booking details send kar di hain."
+        except Exception as e:
+            logger.error(f"send_booking_details error: {e}")
+            return "Booking details note kar li gayi hain."
 
     @llm.function_tool
     async def send_broker_hot_lead_alert(self, name: str = "", phone: str = "", budget: str = "", property_type: str = "", date: str = "", time: str = "") -> str:

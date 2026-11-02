@@ -78,11 +78,19 @@ async def _rest_supabase(method: str, endpoint: str, json_data: Optional[Union[d
             pass
     return await asyncio.to_thread(_sync_supabase_rest, method, endpoint, json_data, extra_headers)
 
-def _adb():
+_cached_supabase_client = None
+
+async def _adb():
+    global _cached_supabase_client
+    if _cached_supabase_client is not None:
+        return _cached_supabase_client
     from supabase._async.client import create_client
     url = os.getenv("SUPABASE_URL", "")
     key = os.getenv("SUPABASE_SERVICE_KEY", "")
-    return create_client(url, key)
+    if not (url and key):
+        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in environment")
+    _cached_supabase_client = await create_client(url, key)
+    return _cached_supabase_client
 
 async def push_unified_log(source: str, level: str, message: str, detail: str = "", call_id: Optional[str] = None):
     try:

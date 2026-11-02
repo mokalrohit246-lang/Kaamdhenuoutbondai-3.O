@@ -824,7 +824,7 @@ CRITICAL SALES GUARDRAILS (STRICT RULES):
 5. LANGUAGE: Mirror the language of the lead naturally (Hindi, English, or Hinglish).
 """
 
-    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={google_api_key}"
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={google_api_key}"
     payload = {
         "contents": [
             {
