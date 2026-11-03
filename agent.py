@@ -97,11 +97,10 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
     turn_handling_config = {
         "endpointing": {
             "min_delay": 0.4,
-            "max_delay": 1.0,
+            "max_delay": 1.2,
         },
         "interruption": {
             "enabled": True,
-            "discard_audio_if_uninterruptible": False,
             "min_duration": 0.2,
         }
     }
@@ -484,6 +483,45 @@ async def entrypoint(ctx: agents.JobContext):
         asyncio.create_task(push_unified_log("SIP", "info", f"Room connected ({direction}): {phone_number}", call_id=call_id))
 
         # ===================================================================
+        # GUARANTEED WEBRTC AUDIO INGESTION: Track subscription handlers
+        # ===================================================================
+        def _subscribe_remote_track(pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant):
+            if pub.kind == rtc.TrackKind.KIND_AUDIO:
+                if not pub.subscribed:
+                    pub.set_subscribed(True)
+                    logger.info(f"Explicitly subscribed to remote audio track {pub.sid} from {p.identity}")
+                    asyncio.create_task(push_unified_log(
+                        "Audio", "info",
+                        f"Subscribed to remote audio track {pub.sid} from {p.identity}",
+                        call_id=call_id
+                    ))
+
+        @ctx.room.on("track_published")
+        def _on_track_published(pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant):
+            logger.info(f"Track published by {p.identity}: {pub.sid} ({pub.kind})")
+            _subscribe_remote_track(pub, p)
+
+        @ctx.room.on("track_subscribed")
+        def _on_track_subscribed(track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant):
+            logger.info(f"Remote audio track actively streaming: {track.sid} from {p.identity}")
+            asyncio.create_task(push_unified_log(
+                "Audio", "info",
+                f"Audio track streaming active from {p.identity} ({track.kind})",
+                call_id=call_id
+            ))
+
+        @ctx.room.on("participant_connected")
+        def _on_participant_connected(p: rtc.RemoteParticipant):
+            logger.info(f"Remote participant joined room: {p.identity}")
+            asyncio.create_task(push_unified_log(
+                "Audio", "info",
+                f"Remote participant joined: {p.identity}",
+                call_id=call_id
+            ))
+            for pub in p.track_publications.values():
+                _subscribe_remote_track(pub, p)
+
+        # ===================================================================
         # PHASE 3: ASYNC DB LOOKUPS (Dynamic Persona & Callback Memory)
         # ===================================================================
         inbound_prior_project = ""  # Tracks prior project context for returning callers
@@ -839,6 +877,15 @@ async def entrypoint(ctx: agents.JobContext):
         turn1_latency_logged = False
 
         try:
+            @session.on("user_started_speaking")
+            def _on_user_started(*args):
+                nonlocal last_audio_activity, t_user_turn1_start
+                last_audio_activity = asyncio.get_event_loop().time()
+                if user_turns == 0 and t_user_turn1_start == 0.0:
+                    t_user_turn1_start = last_audio_activity
+                logger.info(f"VAD: User started speaking for {call_id}")
+                asyncio.create_task(push_unified_log("VAD", "info", "User started speaking (voice activity detected)", call_id=call_id))
+
             @session.on("user_speech_committed")
             def _on_user_speech(msg):
                 nonlocal last_audio_activity, user_turns, prompted_for_silence, t_user_turn1_committed
@@ -849,17 +896,24 @@ async def entrypoint(ctx: agents.JobContext):
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
                 _record_speech("Client", str(content))
-                if user_turns == 1:
-                    t_user_turn1_committed = asyncio.get_event_loop().time()
-                    asyncio.create_task(push_unified_log(
-                        "Latency", "info",
-                        f"Turn 1 user speech committed: '{str(content)[:60]}' (committed_at: {t_user_turn1_committed:.3f})",
-                        call_id=call_id
-                    ))
+                t_user_turn1_committed = asyncio.get_event_loop().time()
+                logger.info(f"VAD: User speech committed (Turn {user_turns}): '{str(content)[:60]}'")
+                asyncio.create_task(push_unified_log(
+                    "VAD", "info",
+                    f"User speech committed (Turn {user_turns}): '{str(content)[:100]}'",
+                    call_id=call_id
+                ))
                 if content:
                     asyncio.create_task(
                         push_unified_log("STT", "info", f"User: {str(content)[:120]}", call_id=call_id)
                     )
+
+            @session.on("agent_started_speaking")
+            def _on_agent_started(*args):
+                nonlocal last_audio_activity
+                last_audio_activity = asyncio.get_event_loop().time()
+                logger.info(f"VAD: Agent started speaking for {call_id}")
+                asyncio.create_task(push_unified_log("VAD", "info", "Agent started speaking (audio synthesis playback)", call_id=call_id))
 
             @session.on("agent_speech_committed")
             def _on_agent_speech(msg):
@@ -869,6 +923,8 @@ async def entrypoint(ctx: agents.JobContext):
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
                 _record_speech("Agent", str(content))
+                logger.info(f"VAD: Agent speech committed: '{str(content)[:60]}'")
+                asyncio.create_task(push_unified_log("VAD", "info", f"Agent speech committed: '{str(content)[:100]}'", call_id=call_id))
                 if user_turns >= 1 and not turn1_latency_logged:
                     turn1_latency_logged = True
                     t_agent_turn1_reply = asyncio.get_event_loop().time()
@@ -982,6 +1038,17 @@ async def entrypoint(ctx: agents.JobContext):
                     # Await dialing answer and session pre-warming concurrently
                     sip_participant, _ = await asyncio.gather(dial_task, session_start_task)
                     asyncio.create_task(push_unified_log("SIP", "info", f"Call answered by {phone_number} (200 OK)", call_id=call_id))
+
+                    # GUARANTEED AUDIO LINKAGE: Ensure SIP participant audio tracks are subscribed and linked
+                    for p in ctx.room.remote_participants.values():
+                        for pub in p.track_publications.values():
+                            _subscribe_remote_track(pub, p)
+                        if hasattr(session, "_room_io") and session._room_io:
+                            try:
+                                session._room_io.set_participant(p.identity)
+                                logger.info(f"RoomIO actively linked to participant {p.identity}")
+                            except Exception as rio_err:
+                                logger.warning(f"RoomIO link participant warning: {rio_err}")
                 except Exception as dial_err:
                     asyncio.create_task(push_unified_log("SIP", "error", f"Dial failed: {dial_err}", call_id=call_id))
                     ctx.shutdown()
@@ -1009,7 +1076,7 @@ async def entrypoint(ctx: agents.JobContext):
             greeting_delivered = True
             last_audio_activity = asyncio.get_event_loop().time()
 
-            # Schedule non-blocking playout-done callback for logging and listener state priming
+            # Schedule non-blocking playout-done callback for logging (no artificial state overrides)
             async def _greeting_done():
                 try:
                     await speech_handle
@@ -1017,15 +1084,9 @@ async def entrypoint(ctx: agents.JobContext):
                     pass
                 t_greeting_end = asyncio.get_event_loop().time()
                 greeting_dur = t_greeting_end - t_greeting_start
-                # Prime session listener state explicitly
-                if hasattr(session, "_update_agent_state") and getattr(session, "agent_state", "") == "speaking":
-                    try:
-                        session._update_agent_state("listening")
-                    except Exception:
-                        pass
                 asyncio.create_task(push_unified_log(
                     "Gemini", "info",
-                    f"Autonomous greeting delivered by {agent_name} to {lead_name} (playout: {greeting_dur:.2f}s) - listener primed",
+                    f"Autonomous greeting delivered by {agent_name} to {lead_name} (playout: {greeting_dur:.2f}s)",
                     call_id=call_id
                 ))
             asyncio.create_task(_greeting_done())

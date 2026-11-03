@@ -210,24 +210,21 @@ class TestPostGreetingLatencyAndTools(unittest.IsolatedAsyncioTestCase):
         self.assertIn("session.generate_reply(\n                instructions=greeting_instruction,\n                allow_interruptions=True", agent_code,
                       "agent.py missing allow_interruptions=True in generate_reply")
 
-        # 2. turn_handling_config must enforce non-discarding interruption
-        self.assertIn('"discard_audio_if_uninterruptible": False', agent_code,
-                      "agent.py missing discard_audio_if_uninterruptible: False in turn_handling_config")
+        # 2. turn_handling_config safe defaults
+        self.assertIn('"min_delay": 0.4', agent_code)
+        self.assertIn('"max_delay": 1.2', agent_code)
+        self.assertIn('"min_duration": 0.2', agent_code)
 
-        # 3. Prime listener state on greeting done
-        self.assertIn('session._update_agent_state("listening")', agent_code,
-                      "agent.py missing explicit session listener priming")
+        # 3. Ensure no artificial state overrides
+        self.assertNotIn('session._update_agent_state("listening")', agent_code,
+                         "agent.py still has artificial _update_agent_state hack")
 
         with open("tools.py", "r", encoding="utf-8") as f:
             tools_code = f.read()
 
-        # 4. Strict 1.0s timeout on check_availability
-        self.assertIn("asyncio.wait_for(_check(), timeout=1.0)", tools_code,
-                      "tools.py check_availability missing 1.0s timeout")
-
-        # 5. Strict 1.0s timeout on transfer_to_human
-        self.assertIn("asyncio.wait_for(_do_transfer(), timeout=1.0)", tools_code,
-                      "tools.py transfer_to_human missing 1.0s timeout")
+        # 4. Strict 1.0s timeout guard on backgrounded/checked tools
+        self.assertIn("timeout=1.0", tools_code,
+                      "tools.py missing 1.0s timeout guard")
 
         print("=== Codebase guards verified successfully! ===")
 

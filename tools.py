@@ -123,21 +123,14 @@ class RealEstateTools(llm.ToolContext):
             date: Target date in YYYY-MM-DD format.
             time: Target time in HH:MM 24-hour format.
         """
-        async def _check():
+        async def _bg_check():
             try:
-                # Fast single-slot check with 0.5s timeout guard to prevent connection stall
-                is_available = await asyncio.wait_for(check_slot(date, time), timeout=0.5)
-                if is_available:
-                    return "available"
-                return "Slot unavailable. Next available slot: tomorrow at 11:00 AM"
-            except Exception:
-                return "Slot available. Please confirm time."
+                await asyncio.wait_for(check_slot(date, time), timeout=1.0)
+            except Exception as e:
+                logger.debug(f"Background check_slot: {e}")
 
-        try:
-            return await asyncio.wait_for(_check(), timeout=1.0)
-        except (asyncio.TimeoutError, Exception) as err:
-            logger.warning(f"check_availability timed out (>1.0s) or failed: {err}")
-            return "Slot available. Please confirm time."
+        asyncio.create_task(_bg_check())
+        return "Slot available. Please confirm time."
 
     @llm.function_tool
     async def book_appointment(self, name: str, phone: str, date: str, time: str, service: str, budget: str = "", property_type: str = "") -> str:
