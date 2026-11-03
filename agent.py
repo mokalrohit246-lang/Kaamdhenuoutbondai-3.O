@@ -97,7 +97,12 @@ def _build_session(tools: list, system_prompt: str, voice: str = "") -> AgentSes
     turn_handling_config = {
         "endpointing": {
             "min_delay": 0.4,
-            "max_delay": 1.5,
+            "max_delay": 1.0,
+        },
+        "interruption": {
+            "enabled": True,
+            "discard_audio_if_uninterruptible": False,
+            "min_duration": 0.2,
         }
     }
 
@@ -828,10 +833,15 @@ async def entrypoint(ctx: agents.JobContext):
         prompted_for_silence = False
         prompt_timestamp = 0.0
 
+        # Turn 1 high-resolution latency tracking
+        t_user_turn1_start = 0.0
+        t_user_turn1_committed = 0.0
+        turn1_latency_logged = False
+
         try:
             @session.on("user_speech_committed")
             def _on_user_speech(msg):
-                nonlocal last_audio_activity, user_turns, prompted_for_silence
+                nonlocal last_audio_activity, user_turns, prompted_for_silence, t_user_turn1_committed
                 last_audio_activity = asyncio.get_event_loop().time()
                 user_turns += 1
                 prompted_for_silence = False
@@ -839,6 +849,13 @@ async def entrypoint(ctx: agents.JobContext):
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
                 _record_speech("Client", str(content))
+                if user_turns == 1:
+                    t_user_turn1_committed = asyncio.get_event_loop().time()
+                    asyncio.create_task(push_unified_log(
+                        "Latency", "info",
+                        f"Turn 1 user speech committed: '{str(content)[:60]}' (committed_at: {t_user_turn1_committed:.3f})",
+                        call_id=call_id
+                    ))
                 if content:
                     asyncio.create_task(
                         push_unified_log("STT", "info", f"User: {str(content)[:120]}", call_id=call_id)
@@ -846,18 +863,32 @@ async def entrypoint(ctx: agents.JobContext):
 
             @session.on("agent_speech_committed")
             def _on_agent_speech(msg):
-                nonlocal last_audio_activity
+                nonlocal last_audio_activity, turn1_latency_logged
                 last_audio_activity = asyncio.get_event_loop().time()
                 content = getattr(msg, "content", "") or getattr(msg, "text", "")
                 if isinstance(content, list):
                     content = " ".join(str(getattr(x, "text", x)) for x in content)
                 _record_speech("Agent", str(content))
+                if user_turns >= 1 and not turn1_latency_logged:
+                    turn1_latency_logged = True
+                    t_agent_turn1_reply = asyncio.get_event_loop().time()
+                    ref_time = t_user_turn1_committed if t_user_turn1_committed > 0 else t_user_turn1_start
+                    if ref_time > 0:
+                        turn1_latency_ms = int((t_agent_turn1_reply - ref_time) * 1000)
+                        asyncio.create_task(push_unified_log(
+                            "Latency", "info",
+                            f"Turn 1 AI response latency: {turn1_latency_ms}ms (target <800ms) - '{str(content)[:60]}'",
+                            call_id=call_id
+                        ))
 
             # Keep last_audio_activity alive on ANY session state transition
             @session.on("user_state_changed")
             def _on_user_state(ev):
-                nonlocal last_audio_activity
+                nonlocal last_audio_activity, t_user_turn1_start
                 last_audio_activity = asyncio.get_event_loop().time()
+                new_state = getattr(ev, "new_state", "") or getattr(ev, "state", "") or str(ev)
+                if ("speaking" in str(new_state).lower()) and user_turns == 0 and t_user_turn1_start == 0.0:
+                    t_user_turn1_start = asyncio.get_event_loop().time()
 
             @session.on("agent_state_changed")
             def _on_agent_state(ev):
@@ -969,18 +1000,34 @@ async def entrypoint(ctx: agents.JobContext):
                 "Do NOT invent your own greeting, do NOT mention any company or service unless instructed."
             )
 
-            # Fire-and-forget: don't await playout (which blocks 3-6s for full TTS)
-            speech_handle = session.generate_reply(instructions=greeting_instruction)
+            # Fire-and-forget: pass allow_interruptions=True so caller audio is never dropped or silenced
+            t_greeting_start = asyncio.get_event_loop().time()
+            speech_handle = session.generate_reply(
+                instructions=greeting_instruction,
+                allow_interruptions=True
+            )
             greeting_delivered = True
             last_audio_activity = asyncio.get_event_loop().time()
 
-            # Schedule non-blocking playout-done callback for logging
+            # Schedule non-blocking playout-done callback for logging and listener state priming
             async def _greeting_done():
                 try:
                     await speech_handle
                 except Exception:
                     pass
-                asyncio.create_task(push_unified_log("Gemini", "info", f"Autonomous greeting delivered by {agent_name} to {lead_name}", call_id=call_id))
+                t_greeting_end = asyncio.get_event_loop().time()
+                greeting_dur = t_greeting_end - t_greeting_start
+                # Prime session listener state explicitly
+                if hasattr(session, "_update_agent_state") and getattr(session, "agent_state", "") == "speaking":
+                    try:
+                        session._update_agent_state("listening")
+                    except Exception:
+                        pass
+                asyncio.create_task(push_unified_log(
+                    "Gemini", "info",
+                    f"Autonomous greeting delivered by {agent_name} to {lead_name} (playout: {greeting_dur:.2f}s) - listener primed",
+                    call_id=call_id
+                ))
             asyncio.create_task(_greeting_done())
         except Exception as ge:
             logger.warning(f"Greeting error: {ge}")

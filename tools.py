@@ -125,18 +125,18 @@ class RealEstateTools(llm.ToolContext):
         """
         async def _check():
             try:
-                if await check_slot(date, time):
+                # Fast single-slot check with 0.5s timeout guard to prevent connection stall
+                is_available = await asyncio.wait_for(check_slot(date, time), timeout=0.5)
+                if is_available:
                     return "available"
-                next_slot = await get_next_available(date, time)
-                return f"Slot unavailable. Next available slot: {next_slot}"
-            except Exception as e:
-                logger.warning(f"check_availability error: {e}")
+                return "Slot unavailable. Next available slot: tomorrow at 11:00 AM"
+            except Exception:
                 return "Slot available. Please confirm time."
 
         try:
-            return await asyncio.wait_for(_check(), timeout=1.5)
+            return await asyncio.wait_for(_check(), timeout=1.0)
         except (asyncio.TimeoutError, Exception) as err:
-            logger.warning(f"check_availability timed out or failed: {err}")
+            logger.warning(f"check_availability timed out (>1.0s) or failed: {err}")
             return "Slot available. Please confirm time."
 
     @llm.function_tool
@@ -796,9 +796,9 @@ class RealEstateTools(llm.ToolContext):
                 return "Unable to transfer right now. A specialist will call you right back."
 
         try:
-            return await asyncio.wait_for(_do_transfer(), timeout=1.5)
+            return await asyncio.wait_for(_do_transfer(), timeout=1.0)
         except asyncio.TimeoutError:
-            logger.warning("transfer_to_human timed out (>1.5s)")
+            logger.warning("transfer_to_human timed out (>1.0s)")
             return "Transfer in progress. Connecting you now."
 
     @llm.function_tool

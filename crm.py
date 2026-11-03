@@ -48,12 +48,15 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
     # 1. Query call_logs in Supabase for the most recent outbound interaction
     if db is not None:
         try:
-            res = await db.table("call_logs").select("*") \
-                .eq("direction", "outbound") \
-                .ilike("phone_number", f"%{clean_10}%") \
-                .order("timestamp", desc=True) \
-                .limit(1) \
-                .execute()
+            res = await asyncio.wait_for(
+                db.table("call_logs").select("*")
+                    .eq("direction", "outbound")
+                    .ilike("phone_number", f"%{clean_10}%")
+                    .order("timestamp", desc=True)
+                    .limit(1)
+                    .execute(),
+                timeout=0.3
+            )
             if res.data and len(res.data) > 0:
                 last_record = res.data[0]
         except Exception as e:
@@ -62,9 +65,12 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
     # Fallback via REST if SDK didn't return a record
     if not last_record:
         try:
-            code, data = await _rest_supabase(
-                "GET",
-                f"call_logs?direction=eq.outbound&phone_number=ilike.*{clean_10}*&order=timestamp.desc&limit=1"
+            code, data = await asyncio.wait_for(
+                _rest_supabase(
+                    "GET",
+                    f"call_logs?direction=eq.outbound&phone_number=ilike.*{clean_10}*&order=timestamp.desc&limit=1"
+                ),
+                timeout=0.3
             )
             if code == 200 and isinstance(data, list) and len(data) > 0:
                 last_record = data[0]
@@ -74,11 +80,14 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
     # 2. If no outbound call_log found, check leads table (if exists)
     if not last_record and db is not None:
         try:
-            l_res = await db.table("leads").select("*") \
-                .ilike("phone", f"%{clean_10}%") \
-                .order("created_at", desc=True) \
-                .limit(1) \
-                .execute()
+            l_res = await asyncio.wait_for(
+                db.table("leads").select("*")
+                    .ilike("phone", f"%{clean_10}%")
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute(),
+                timeout=0.3
+            )
             if l_res.data and len(l_res.data) > 0:
                 last_record = l_res.data[0]
         except Exception as e:
@@ -87,11 +96,14 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
     # 3. If still not found, check any call_logs (in case direction wasn't recorded as outbound)
     if not last_record and db is not None:
         try:
-            res_any = await db.table("call_logs").select("*") \
-                .ilike("phone_number", f"%{clean_10}%") \
-                .order("timestamp", desc=True) \
-                .limit(1) \
-                .execute()
+            res_any = await asyncio.wait_for(
+                db.table("call_logs").select("*")
+                    .ilike("phone_number", f"%{clean_10}%")
+                    .order("timestamp", desc=True)
+                    .limit(1)
+                    .execute(),
+                timeout=0.3
+            )
             if res_any.data and len(res_any.data) > 0:
                 last_record = res_any.data[0]
         except Exception:
@@ -131,7 +143,7 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
     # If campaign_id is present, enrich with campaign metadata
     if campaign_id:
         try:
-            camp = await get_campaign(campaign_id)
+            camp = await asyncio.wait_for(get_campaign(campaign_id), timeout=0.3)
             if camp:
                 if not campaign_name and camp.get("name"):
                     campaign_name = str(camp.get("name")).strip()
@@ -156,7 +168,10 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
         # Try 'agents' table first
         if db is not None:
             try:
-                a_res = await db.table("agents").select("*").eq("id", agent_id).maybe_single().execute()
+                a_res = await asyncio.wait_for(
+                    db.table("agents").select("*").eq("id", agent_id).maybe_single().execute(),
+                    timeout=0.3
+                )
                 if a_res and a_res.data:
                     agent_record = a_res.data
             except Exception as e:
@@ -165,7 +180,10 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
         # Try 'agent_profiles' table in Supabase
         if not agent_record and db is not None:
             try:
-                ap_res = await db.table("agent_profiles").select("*").eq("id", agent_id).maybe_single().execute()
+                ap_res = await asyncio.wait_for(
+                    db.table("agent_profiles").select("*").eq("id", agent_id).maybe_single().execute(),
+                    timeout=0.3
+                )
                 if ap_res and ap_res.data:
                     agent_record = ap_res.data
             except Exception as e:
@@ -174,7 +192,7 @@ async def lookup_inbound_callback_context(caller_phone: str) -> Dict[str, Any]:
         # Fallback to get_agent_profile in db.py (checks SQLite if needed)
         if not agent_record:
             try:
-                agent_record = await get_agent_profile(agent_id)
+                agent_record = await asyncio.wait_for(get_agent_profile(agent_id), timeout=0.3)
             except Exception as e:
                 logger.debug(f"get_agent_profile lookup error: {e}")
 
